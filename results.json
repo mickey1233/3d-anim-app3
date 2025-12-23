@@ -1,0 +1,92 @@
+{
+  "cad_coord_system": {
+    "handedness": "RH",
+    "units": "meters",
+    "up_axis": "Y"
+  },
+  "images": [
+    {
+      "file": "Spark1.png",
+      "status": "FAILED_ALIGNMENT",
+      "missing_info": [
+        "Camera Intrinsics (fx, fy, cx, cy)",
+        "2D-3D Point Correspondences (Need at least 4 per part for PnP without Intrinsics, or 3 with Intrinsics)"
+      ],
+      "recommendation": "Provide intrinsics OR select 4 matching points between Image and CAD."
+    },
+    {
+      "file": "Spark2.png",
+      "status": "SOLVED",
+      "missing_info": [
+        "Camera Intrinsics (fx, fy, cx, cy)",
+        "2D-3D Point Correspondences (Need at least 4 per part for PnP without Intrinsics, or 3 with Intrinsics)"
+      ],
+      "recommendation": "Provide intrinsics OR select 4 matching points between Image and CAD.",
+      "camera": {
+        "K": [
+          [
+            935.307436087194,
+            0.0,
+            540.0
+          ],
+          [
+            0.0,
+            935.307436087194,
+            469.0
+          ],
+          [
+            0.0,
+            0.0,
+            1.0
+          ]
+        ],
+        "R": [
+          -0.8889067539430215,
+          -0.5202715589202604,
+          2.903528305716685
+        ],
+        "t": [
+          -0.016477961911039285,
+          -0.12614583369158427,
+          1.5846528373353266
+        ],
+        "reproj_error_px": 0.9436504174502683,
+        "pose_world": {
+          "position": [
+            0.8505701564966366,
+            0.4136720589611174,
+            -1.2777772677480008
+          ],
+          "quaternion": [
+            -0.2883980709577182,
+            -0.16879758568735745,
+            0.9420245246482836,
+            0.030392806635146458
+          ]
+        }
+      },
+      "evidence": {
+        "overlay": "cv_agent/overlays/overlay_Spark2.png"
+      },
+      "parts": [
+        {
+          "id": "Part1",
+          "pose_world": {
+            "position": [
+              0.38471077115089647,
+              -0.28382109867793215,
+              0.6557165211557032
+            ],
+            "quaternion": [
+              -0.3945932749372815,
+              0.31449140690773625,
+              0.18837414828202662,
+              0.8425594831313006
+            ]
+          },
+          "reproj_error": 26.63204857315714
+        }
+      ]
+    }
+  ]
+}

@@ -1,12 +1,17 @@
 import React, { useEffect, useRef } from 'react';
 import { Canvas, useThree, useFrame } from '@react-three/fiber';
-import { OrbitControls, Environment, Grid, Stage } from '@react-three/drei';
+import { OrbitControls, Stage, Grid } from '@react-three/drei';
 import { Model } from './Model';
-import { useAppStore, ImageItem } from '../../store/useAppStore';
+import { useAppStore } from '../../store/useAppStore';
 import * as THREE from 'three';
 
+// Handles animating parts
 const PartAnimator = () => {
-  const { isAnimationPlaying, images, setAnimationPlaying, parts } = useAppStore();
+  const { 
+      isAnimationPlaying, setAnimationPlaying, 
+      movingPartId, startMarker, endMarker, 
+      animationDuration, animationEasing 
+  } = useAppStore();
   const { scene } = useThree();
   
   // Animation State
@@ -15,8 +20,8 @@ const PartAnimator = () => {
 
   useEffect(() => {
     if (isAnimationPlaying && !isRunning.current) {
-      if (images.length < 2) {
-         console.warn("Need at least 2 images for animation");
+      if (!movingPartId || !startMarker || !endMarker) {
+         console.warn("Cannot start animation: Missing config");
          setAnimationPlaying(false);
          return;
       }
@@ -24,157 +29,148 @@ const PartAnimator = () => {
       startTime.current = Date.now();
     } else if (!isAnimationPlaying) {
       isRunning.current = false;
-      
-      // Optional: Reset parts to initial state? 
-      // Or leave them at end state? User usually wants to reset or see result.
-      // Let's leave them.
     }
-  }, [isAnimationPlaying, images.length]);
+  }, [isAnimationPlaying, movingPartId, startMarker, endMarker]);
 
   useFrame(() => {
-    if (!isRunning.current || images.length < 2) return;
+    if (!isRunning.current || !movingPartId || !startMarker || !endMarker) return;
 
-    const DURATION_PER_SEGMENT = 2000; // 2 seconds between keyframes
     const now = Date.now();
-    const elapsed = now - startTime.current;
+    const elapsed = (now - startTime.current) / 1000; // Seconds
+    const progress = Math.min(elapsed / animationDuration, 1.0);
     
-    // Total duration = (Images - 1) * Segment_Duration
-    const totalDuration = (images.length - 1) * DURATION_PER_SEGMENT;
-    
-    if (elapsed >= totalDuration) {
-      setAnimationPlaying(false);
-      isRunning.current = false;
-      return;
+    // Easing Logic
+    let t = progress;
+    if (animationEasing === 'easeIn') t = progress * progress;
+    else if (animationEasing === 'easeOut') t = progress * (2 - progress);
+    else if (animationEasing === 'easeInOut') t = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
+
+    const partObj = scene.getObjectByProperty('uuid', movingPartId);
+    if (partObj) {
+        const vStartWorld = new THREE.Vector3(...startMarker.position);
+        const vEndWorld = new THREE.Vector3(...endMarker.position);
+        
+        // Convert World Targets to Local Space of the object's parent
+        // This ensures the object moves correctly relative to its hierarchy.
+        // If parent is scene, worldToLocal is identity (mostly).
+        
+        const vStartLocal = vStartWorld.clone();
+        const vEndLocal = vEndWorld.clone();
+        
+        if (partObj.parent) {
+            partObj.parent.worldToLocal(vStartLocal);
+            partObj.parent.worldToLocal(vEndLocal);
+        }
+        
+        partObj.position.lerpVectors(vStartLocal, vEndLocal, t);
     }
-
-    // Determine current segment
-    // Segment 0: Image 0 -> Image 1
-    // Segment 1: Image 1 -> Image 2
-    const currentSegmentIndex = Math.floor(elapsed / DURATION_PER_SEGMENT);
-    const segmentProgress = (elapsed % DURATION_PER_SEGMENT) / DURATION_PER_SEGMENT; // 0 to 1
-
-    const startImg = images[currentSegmentIndex];
-    const endImg = images[currentSegmentIndex + 1];
-
-    if (!startImg || !endImg) return;
-
-    // Animate every part
-    Object.keys(parts).forEach(partId => {
-       const startPos = startImg.partPositions[partId];
-       const endPos = endImg.partPositions[partId];
-
-       // If keyframe data is missing, we skip (or stay at last known?)
-       // Our AI logic ensures all are filled mostly.
-       if (startPos && endPos) {
-          const partObj = scene.getObjectByProperty('uuid', partId);
-          if (partObj) {
-             const vStart = new THREE.Vector3(...startPos);
-             const vEnd = new THREE.Vector3(...endPos);
-             
-             // Linear Interpolation
-             // We can use easeInOutQuad for smoothness?
-             // t = segmentProgress
-             // ease = t < .5 ? 2 * t * t : -1 + (4 - 2 * t) * t
-             // Simple Lerp for now
-             
-             // BUT WAIT: The stored positions are WORLD coordinates (as per marker logic)? 
-             // OR Local? 
-             // We decided markers update Store with local-converted-from-world?
-             // Let's check Model.tsx:
-             // updateKeyframePosition calls with [pos.x, y, z] from Mesh World (TransformControls operates in World default? OR Local default?)
-             // TransformControls default is World unless `space="local"`. We didn't specify, so World.
-             // BUT inside onMouseUp in previous code we did `parentObj.matrixWorld.clone().invert()`.
-             // IN NEW CODE `Model.tsx` (Step 241), I removed the matrix inversion logic!
-             // I just did: `updateKeyframePosition(..., [pos.x, pos.y, pos.z])`.
-             // `meshRef.current` is child of `TransformControls`? No, `TransformControls` wraps `mesh`.
-             // If `mesh` is direct child of `group`(Scene) or `Stage`?
-             // In `Model.tsx`, `Marker` is rendered inside `group` which is inside `Stage`?
-             // `Stage` creates a hierarchy.
-             // `Marker` component renders `TransformControls` -> `mesh`.
-             // When dragging, `mesh.position` updates.
-             // Since `mesh` is child of `TransformControls` (which adds itself to scene usually? No, Drei TC wraps).
-             // Drei `TransformControls` adds the controls to scene, but the child `mesh`...
-             // If `makeDefault` is not set, it wraps children.
-             // It puts children in a group.
-             // Basically: The position we get is likely LOCAL to the Marker's parent group if we read `mesh.position`.
-             // The Marker's parent in JSX is `group` (the Model inner group).
-             // So `mesh.position` is RELATIVE to the Model Group.
-             // EXCEPT `TransformControls` might re-parent?
-             // Actually, `TransformControls` from Drei maintains the `object` prop or children.
-             // If children: It renders them.
-             
-             // Key assumption: The stored [x,y,z] is RELATIVE TO THE SCENE/MODEL GROUP.
-             // If so, we can just apply it to the Part Object IF the Part Object is in the same space.
-             // The Part Object is inside `gltf.scene`.
-             // `gltf.scene` is inside `<primitive>` inside `group`.
-             // The Markers are siblings of `<primitive>` inside `group`.
-             // So Markers and GLTF Root are siblings.
-             // BUT the Parts (Meshes) are descendants of GLTF Root.
-             // So Part.position is relative to Part.Parent (some node in GLTF).
-             // Marker.position is relative to Model Group (Top Level).
-             
-             // ISSUE: We are animating `Part.position`.
-             // If the GLTF has hierarchy (Nodes inside Nodes), setting `Part.position` to a World-ish value (Relative to Root) will break it if the part has a parent with transform.
-             // FIX: We need to use `WorldPosition` logic or clear transforms.
-             // Simplified approach for this "hacky" visualizer:
-             // Assume Parts are mostly top level or we just apply World Matrix updates.
-             // OR: We detach parts from hierarchy? Dangerous.
-             // BETTER: We convert the "Marker Position (Relative to Model Root)" into "Part Local Position" before applying.
-             // We need `partObj.parent.worldToLocal( targetPos.clone() )`.
-             // Yes.
-             
-             const targetLerp = new THREE.Vector3().lerpVectors(vStart, vEnd, segmentProgress);
-             
-             // Convert Model-Root-Space (Marker Space) to Part-Local-Space
-             // Simple position update. 
-             // We assume markers are in World Space (or Scene Space).
-             // We assume Parts are in Scene Space (or have Identity parents).
-             // If hierarchy exists, this might be offset, but it Won't Freeze.
-             partObj.position.copy(targetLerp);
-             // The loop above is risky.
-             // Let's try simple copy first. If it flies away, we know why.
-             partObj.position.copy(targetLerp);
-          }
-       }
-    });
-
+    
+    if (progress >= 1.0) {
+        setAnimationPlaying(false);
+        isRunning.current = false;
+    }
   });
 
   return null;
 }
 
-// Wrapper for Controls to handle Animation overrides
+// Snaps Camera to Global Config
+const GlobalCameraRig = () => {
+    const { cameraTransform, isAnimationPlaying } = useAppStore();
+    const { camera } = useThree();
+    
+    useEffect(() => {
+        // Apply Camera Transform
+        const { position, rotation } = cameraTransform;
+        
+        if (position.every(v => v === 0) && rotation.every(v => v === 0)) return;
+
+        camera.position.set(position[0], position[1], position[2]);
+        camera.rotation.set(
+            THREE.MathUtils.degToRad(rotation[0]),
+            THREE.MathUtils.degToRad(rotation[1]),
+            THREE.MathUtils.degToRad(rotation[2])
+        );
+        
+    }, [cameraTransform, isAnimationPlaying]);
+    
+    return null;
+}
+
+// Wrapper for Controls
 const Controls = () => {
-   const { isAnimationPlaying, images, parts } = useAppStore();
-   const { camera, scene } = useThree();
-   const controlsRef = useRef<any>(null);
+   const { isAnimationPlaying } = useAppStore();
+   const configs = useRef<any>(null);
 
    useFrame(() => {
-      // If animation is playing, we might want to disable controls or update target?
-      // CameraRig fights with OrbitControls. 
-      // Ideally we disable OrbitControls when animation is playing.
       if (configs.current) {
          configs.current.enabled = !isAnimationPlaying;
       }
    });
    
-   const configs = useRef<any>(null);
-
    return <OrbitControls ref={configs} makeDefault />;
 }
 
 
+const ObjectRig = ({ children }: { children: React.ReactNode }) => {
+    const { objectTransform } = useAppStore();
+    return (
+        <group 
+            position={new THREE.Vector3(...objectTransform.position)}
+            rotation={new THREE.Euler(
+                THREE.MathUtils.degToRad(objectTransform.rotation[0]),
+                THREE.MathUtils.degToRad(objectTransform.rotation[1]),
+                THREE.MathUtils.degToRad(objectTransform.rotation[2])
+            )}
+        >
+            {children}
+        </group>
+    );
+}
+
 export const Scene = () => {
+  const handleCanvasPointerDown = (e: any) => {
+      // Log critical debug info requested by user
+      const rect = e.target.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const ndc_x = (x / rect.width) * 2 - 1;
+      const ndc_y = -(y / rect.height) * 2 + 1;
+      
+      console.log('--- CANVAS POINTER DOWN ---');
+      console.log('Rect:', rect);
+      console.log('NDC:', ndc_x, ndc_y);
+      // Raycast hits are not available on the raw DOM event, 
+      // but R3F onPointerDown provides them if passed to mesh or useThree event manager.
+      // We will rely on Model.tsx for raycast hits, but this confirms DOM access.
+      (window as any).__DEBUG_CANVAS_CLICK__ = true;
+  };
+
   return (
-    <div className="w-full h-full bg-transparent">
-      <Canvas shadows camera={{ position: [5, 5, 5], fov: 50 }}>
-        {/* Stage handles lighting and centering */}
-        <Stage environment="city" intensity={0.5}>
-           <Model />
-        </Stage>
+    <div className="w-full h-full bg-transparent" style={{ pointerEvents: 'auto' }}>
+      <Canvas 
+          shadows 
+          camera={{ position: [5, 5, 5], fov: 50 }}
+          eventSource={document.getElementById('root')!}
+          style={{ pointerEvents: 'auto' }}
+          onPointerDown={handleCanvasPointerDown}
+      >
+        {/* Lights (Standard Setup) */}
+        <ambientLight intensity={0.5} />
+        <directionalLight position={[10, 10, 5]} intensity={1} castShadow />
+        <spotLight position={[-10, 10, 5]} intensity={1} />
+        
+        {/* Environment (City) - optional, use Environment component directly if needed */}
+        {/* <Environment preset="city" /> */}
+
+        <ObjectRig>
+            <Model />
+        </ObjectRig>
+
         <Grid infiniteGrid fadeDistance={50} fadeStrength={1.5} position={[0, -0.01, 0]} />
         
         <PartAnimator />
+        <GlobalCameraRig />
         <Controls />
       </Canvas>
     </div>

@@ -1,20 +1,24 @@
 import React, { useEffect, useRef } from 'react';
 import { Sidebar } from './components/Layout/Sidebar';
-import { ImageUploader } from './components/UI/ImageUploader';
+import { AnimationStudio } from './components/UI/AnimationStudio';
 import { PropertyEditor } from './components/UI/PropertyEditor';
 import { Scene } from './components/Three/Scene';
 import { useAppStore } from './store/useAppStore';
-import { Play, Pause, Box, Upload } from 'lucide-react';
+import { Play, Pause, Box } from 'lucide-react';
 
 function App() {
   const { 
-    setCadUrl, 
-    cadFileName,
-    isAnimationPlaying, 
-    setAnimationPlaying, 
-    images, 
+    isAnimationPlaying, setAnimationPlaying, 
+    cadFileName, setCadUrl, 
     parts
   } = useAppStore();
+  
+  // Note: keyframeProgress and currentImageIndex were pseudo-logic in my previous thought, 
+  // currently we calculate index from `isAnimationPlaying` or just state.
+  // Actually, standard `Scene` uses `keyframeProgress` calculated internally or passed?
+  // Let's check Scene prop usage.
+  // Scene doesn't take props, it uses store.
+  // So we just need the properties used in App.tsx render.
   
   const cadInputRef = useRef<HTMLInputElement>(null);
 
@@ -26,58 +30,6 @@ function App() {
       setCadUrl(url, file.name);
     }
   };
-
-  // AI Agent Simulation: Analyze Images -> Detect Parts -> Assign Coordinates
-  useEffect(() => {
-    const partIds = Object.keys(parts);
-    if (partIds.length === 0) return;
-
-    images.forEach(img => {
-      // If this image hasn't been "analyzed" (no positions set), run analysis
-      if (Object.keys(img.partPositions).length === 0) {
-        
-        console.log(`AI Agent: Analyzing image ${img.name}...`);
-        
-        // Simulate detecting ALL parts in this image and finding their coordinates
-        partIds.forEach(partId => {
-           // Generate a random position "detected" from the image
-           // In reality, this would be data from the backend.
-           // We'll use a deterministic-ish offset based on the image index? 
-           // Or just random for now. 
-           // Let's make them relatively close to the original part position 
-           // but with some offset to simulate "movement" between images.
-           
-           const originalPos = parts[partId].position;
-           const randomOffset = [
-              (Math.random() - 0.5) * 2, // +/- 1 unit
-              (Math.random() - 0.5) * 2,
-              (Math.random() - 0.5) * 2
-           ] as [number, number, number];
-           
-           // Store the "Observed Logic": Part P in Image I is at Position X
-           // For the first image, maybe we ideally want it to match current pos?
-           // User said: "First image is initial position". 
-           // So if images.length === 1 (this is first), maybe we shouldn't change it?
-           // But the "AI" detects where it IS. The user might want to drag it to fix it.
-           // Let's just assign random.
-           
-           useAppStore.getState().updateKeyframePosition(
-             img.id, 
-             partId, 
-             // [originalPos[0] + randomOffset[0], originalPos[1] + randomOffset[1], originalPos[2] + randomOffset[2]]
-             // Let's just start with 0,0,0 relative or random so user MUST drag them?
-             // Or better: Start at Part's CURRENT position so it's subtle?
-             // Let's start at Current Position + Random
-             [
-               originalPos[0] + randomOffset[0],
-               originalPos[1] + randomOffset[1],
-               originalPos[2] + randomOffset[2]
-             ]
-           );
-        });
-      }
-    });
-  }, [images.length, Object.keys(parts).length]); // Only run when count changes to avoid loops
 
   return (
     <div className="w-full h-screen bg-[var(--bg-color)] overflow-hidden flex flex-row relative">
@@ -115,12 +67,14 @@ function App() {
           </div>
         </div>
 
-        {/* Image Import Section */}
-        <ImageUploader />
+        {/* Animation Control */}
+        <AnimationStudio />
+
+        {/* Scene Graph */}
       </Sidebar>
 
       {/* Center: Canvas */}
-      <div className="flex-1 relative">
+      <div className="flex-1 relative" style={{ pointerEvents: 'auto' }}>
         <Scene />
         
         {/* Floating Animation Control */}

@@ -1,14 +1,5 @@
 import { create } from 'zustand';
-import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
-
-export interface ImageItem {
-  id: string;
-  url: string;
-  name: string;
-  // Keyframe Data: Part UUID -> Target Position [x,y,z]
-  partPositions: Record<string, [number, number, number]>; 
-}
 
 export interface PartData {
   uuid: string;
@@ -19,67 +10,75 @@ export interface PartData {
   color: string;
 }
 
+export interface MarkerData {
+    position: [number, number, number];
+}
+
 interface AppState {
   cadUrl: string | null;
   cadFileName: string | null;
-  selectedImageId: string | null;
-  images: ImageItem[];
+  
   parts: Record<string, PartData>; // Keyed by UUID
   selectedPartId: string | null;
+  
+  // Animation State
   isAnimationPlaying: boolean;
+  pickingMode: 'idle' | 'start' | 'end';
+  
+  startMarker: MarkerData | null;
+  endMarker: MarkerData | null;
+  
+  movingPartId: string | null; // The object that will move
+  animationDuration: number; // Seconds
+  animationEasing: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
 
+  // Global Calibration / Transforms
+  cameraTransform: {
+    position: [number, number, number];
+    rotation: [number, number, number]; // Degrees
+  };
+  objectTransform: {
+    position: [number, number, number];
+    rotation: [number, number, number]; // Degrees
+  };
+
+  // Actions
   setCadUrl: (url: string, fileName: string) => void;
-  addImage: (file: File) => void;
-  reorderImages: (newOrder: ImageItem[]) => void;
-  updateKeyframePosition: (imageId: string, partId: string, position: [number, number, number]) => void;
   registerPart: (part: PartData) => void;
   updatePart: (uuid: string, data: Partial<PartData>) => void;
   selectPart: (uuid: string | null) => void;
-  selectImage: (id: string | null) => void;
+  
   setAnimationPlaying: (playing: boolean) => void;
-}
+  setPickingMode: (mode: 'idle' | 'start' | 'end') => void;
+  
+  setStartMarker: (position: [number, number, number] | null) => void;
+  setEndMarker: (position: [number, number, number] | null) => void;
+  
+  setMovingPartId: (uuid: string | null) => void;
+  setAnimationConfig: (duration: number, easing: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut') => void;
 
-const COLORS = ['#ef4444', '#22c55e', '#3b82f6', '#eab308', '#ec4899', '#8b5cf6', '#f97316'];
+  setCameraTransform: (position: [number, number, number], rotation: [number, number, number]) => void;
+  setObjectTransform: (position: [number, number, number], rotation: [number, number, number]) => void;
+}
 
 export const useAppStore = create<AppState>((set) => ({
   cadUrl: null,
   cadFileName: null,
-  selectedImageId: null,
-  images: [],
   parts: {},
   selectedPartId: null,
+
   isAnimationPlaying: false,
+  pickingMode: 'idle',
+  startMarker: null,
+  endMarker: null,
+  movingPartId: null,
+  animationDuration: 2.0,
+  animationEasing: 'easeInOut',
+
+  cameraTransform: { position: [0,0,0], rotation: [0,0,0] },
+  objectTransform: { position: [0,0,0], rotation: [0,0,0] },
 
   setCadUrl: (url, fileName) => set({ cadUrl: url, cadFileName: fileName }),
-
-  addImage: (file) => {
-    const url = URL.createObjectURL(file);
-    set((state) => ({
-      images: [
-        ...state.images,
-        {
-          id: uuidv4(),
-          url,
-          name: file.name,
-          partPositions: {} // Will be populated by "AI" logic
-        }
-      ]
-    }));
-  },
-
-  reorderImages: (newOrder) => set({ images: newOrder }),
-
-  updateKeyframePosition: (imageId, partId, position) => set((state) => ({
-    images: state.images.map(img => 
-      img.id === imageId ? { 
-        ...img, 
-        partPositions: {
-          ...img.partPositions,
-          [partId]: position
-        }
-      } : img
-    )
-  })),
 
   registerPart: (part) => set((state) => ({
     parts: { ...state.parts, [part.uuid]: part }
@@ -93,6 +92,22 @@ export const useAppStore = create<AppState>((set) => ({
   })),
 
   selectPart: (uuid) => set({ selectedPartId: uuid }),
-  selectImage: (id) => set({ selectedImageId: id }),
+  
   setAnimationPlaying: (playing) => set({ isAnimationPlaying: playing }),
+  setPickingMode: (mode) => set({ pickingMode: mode }),
+  
+  setStartMarker: (position) => set({ startMarker: position ? { position } : null }),
+  setEndMarker: (position) => set({ endMarker: position ? { position } : null }),
+  
+  setMovingPartId: (uuid) => set({ movingPartId: uuid }),
+  setAnimationConfig: (duration, easing) => set({ animationDuration: duration, animationEasing: easing }),
+
+  setCameraTransform: (position, rotation) => set({ cameraTransform: { position, rotation } }),
+  setObjectTransform: (position, rotation) => set({ objectTransform: { position, rotation } }),
 }));
+
+// Subscribe for Debugging
+useAppStore.subscribe((state) => {
+    (window as any).__DEBUG_SELECTED_PART__ = state.selectedPartId;
+    (window as any).__DEBUG_PICKING_MODE__ = state.pickingMode;
+});

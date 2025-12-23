@@ -3,12 +3,16 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useGLTF, Html, TransformControls } from '@react-three/drei';
 import { useThree, useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
-import { useAppStore, ImageItem } from '../../store/useAppStore';
+import { useAppStore } from '../../store/useAppStore';
 
 // Inner Component that actually uses the hook
 const InnerModel = ({ url }: { url: string }) => {
-  const { registerPart, selectPart, parts, images, updatePart } = useAppStore();
-  const { scene } = useThree();
+  const { 
+      registerPart, selectPart, parts,
+      pickingMode, setStartMarker, setEndMarker, startMarker, endMarker, 
+      setPickingMode
+  } = useAppStore();
+  const { scene, gl, size, camera } = useThree();
   const [modelScene, setModelScene] = useState<THREE.Group | null>(null);
 
   // Load GLTF - URL is guaranteed valid here
@@ -42,65 +46,146 @@ const InnerModel = ({ url }: { url: string }) => {
     Object.values(parts).forEach(part => {
       const object = modelScene.getObjectByProperty('uuid', part.uuid);
       if (object) {
+        // NOTE: We do NOT reparent logic anymore to preserve R3F event bubbling.
+        // We will handle world/local conversion in the Animator.
+        
+        // However, we still need to apply initial positions?
+        // Actually the parts in store are just "registered" default positions initially?
+        // Or updated positions.
+        // If we don't reparent, we rely on the object being in its original hierarchy.
+        // We must apply the store transforms.
+        
         object.position.set(...part.position);
         object.rotation.set(...part.rotation);
         object.scale.set(...part.scale);
       }
     });
-  }, [parts, modelScene]);  // Handle Selection
+  }, [parts, modelScene]);
+
+  const handlePointerDown = (e: any) => {
+      e.stopPropagation();
+      console.log(`[POINTER] Object: ${e.object.name}, Type: ${e.object.type}`);
+      (window as any).__DEBUG_R3F_OBJ__ = e.object.name || 'Unnamed Object';
+      handleClick(e);
+  };
+
   const handleClick = (e: any) => {
-    e.stopPropagation();
+    // If in Picking Mode, handle Face Picking
+    if (pickingMode === 'start' || pickingMode === 'end') {
+        const mesh = e.object as THREE.Mesh;
+        if (!mesh.isMesh) {
+             console.log("Picking: Ignored (Not a mesh)");
+             return;
+        }
+
+        const face = e.face;
+        if (!face) {
+             console.log("Picking: Ignored (No face data)");
+             return;
+        }
+
+        const posAttr = mesh.geometry.attributes.position;
+        const vA = new THREE.Vector3().fromBufferAttribute(posAttr, face.a);
+        const vB = new THREE.Vector3().fromBufferAttribute(posAttr, face.b);
+        const vC = new THREE.Vector3().fromBufferAttribute(posAttr, face.c);
+
+        vA.applyMatrix4(mesh.matrixWorld);
+        vB.applyMatrix4(mesh.matrixWorld);
+        vC.applyMatrix4(mesh.matrixWorld);
+
+        const center = new THREE.Vector3().addVectors(vA, vB).add(vC).divideScalar(3);
+        const pointData = [center.x, center.y, center.z] as [number, number, number];
+        
+        console.log(`Picking Success! Mode: ${pickingMode}, Point:`, pointData);
+
+        if (pickingMode === 'start') {
+             setStartMarker(pointData);
+             setPickingMode('idle');
+        } else {
+             setEndMarker(pointData);
+             setPickingMode('idle');
+        }
+        return; 
+    }
+
+    // Normal Selection
     if (e.object.userData.isPart) {
+      console.log(`Select Part: ${e.object.name}`);
       selectPart(e.object.uuid);
     } else {
+      console.log(`Deselect (Clicked ${e.object.type})`);
       selectPart(null);
     }
   };
 
+  // Debug Camera
+  useFrame(({ camera }) => {
+      // Log camera if needed
+  });
+
+  const handlePointerMissed = (e: any) => {
+      console.log('--- POINTER MISSED ---', e.type);
+  };
+
   const controls = useThree((state) => state.controls);
-  const { selectedImageId, selectedPartId } = useAppStore();
+  const { selectedPartId } = useAppStore();
 
   return (
-    <group onClick={handleClick}>
-      <primitive object={gltf.scene} />
+    <group onPointerMissed={handlePointerMissed}>
+        {/* Debug Red Cube for Verification */}
+        <mesh position={[2, 0, 0]} onPointerDown={handlePointerDown}>
+             <boxGeometry args={[0.5, 0.5, 0.5]} />
+             <meshStandardMaterial color="red" />
+             <Html position={[0, 0.6, 0]}>
+                <div className="bg-black/50 text-white text-[10px] whitespace-nowrap px-1">Debug Cube</div>
+             </Html>
+        </mesh>
+
+        {/* Actual Model */}
+        <primitive 
+            object={gltf.scene} 
+            onPointerDown={handlePointerDown}
+        />
       
-      {/* Highlight Selected Part */}
-      {selectedPartId && <PartHighlighter uuid={selectedPartId} scene={gltf.scene} />}
-
-      {/* 
-          Render Markers for SELECTED Image Keyframe ONLY.
-      */}
-      {images.map((img) => {
-         // Only show markers for the selected image
-         if (img.id !== selectedImageId) return null;
-
-         return Object.entries(img.partPositions).map(([partId, position]) => {
-            const part = parts[partId];
-            if (!part) return null;
-            
-            return (
-              <Marker 
-                key={`${img.id}-${partId}`} 
-                imgId={img.id}
-                imgName={img.name}
-                position={position}
-                part={part} 
-                modelScene={modelScene}
+        {/* Markers */}
+        {startMarker && (
+            <DraggableMarker 
+                position={startMarker.position} 
+                color="#4ade80" 
+                label="Start"
+                onDragEnd={(pos) => setStartMarker([pos.x, pos.y, pos.z])}
                 controls={controls}
-              />
-            );
-         });
-      })}
+            />
+        )}
+        {endMarker && (
+            <DraggableMarker 
+                position={endMarker.position} 
+                color="#60a5fa" 
+                label="End"
+                onDragEnd={(pos) => setEndMarker([pos.x, pos.y, pos.z])}
+                controls={controls}
+            />
+        )}
+
+        {/* Highlight Selected Part */}
+        {selectedPartId && <PartHighlighter uuid={selectedPartId} scene={gltf.scene} />}
+      
+        {/* Labels - Filtered to only show registered parts */}
+        {Object.values(parts).map(part => (
+            <group key={part.uuid} position={new THREE.Vector3(...part.position)}>
+                <Html distanceFactor={10} zIndexRange={[100, 0]} pointerEvents="none">
+                    <div className="text-[8px] text-white/50 pointer-events-none whitespace-nowrap select-none bg-black/20 px-1 rounded backdrop-blur-[1px]">
+                        {part.name}
+                    </div>
+                </Html>
+            </group>
+        ))}
     </group>
   );
 };
 
 // Component to Highlight Selected Part
 const PartHighlighter = ({ uuid, scene }: { uuid: string, scene: THREE.Group }) => {
-   const meshRef = useRef<THREE.Mesh>(null);
-   // We need to attach the helper to the ACTUAL matrix-world object in the scene.
-   // But we can't easily pass the object ref if it's deep in gltf.
-   // So we find it.
    const [targetObj, setTargetObj] = useState<THREE.Object3D | null>(null);
 
    useEffect(() => {
@@ -108,55 +193,43 @@ const PartHighlighter = ({ uuid, scene }: { uuid: string, scene: THREE.Group }) 
       if (obj) setTargetObj(obj);
    }, [uuid, scene]);
 
-   // Create a box helper
    if (!targetObj) return null;
 
    return <primitive object={new THREE.BoxHelper(targetObj, 0xffff00)} />;
+}
+
+const DraggableMarker = ({ position, color, label, onDragEnd, controls }: { 
+    position: [number, number, number], 
+    color: string, 
+    label: string, 
+    onDragEnd: (pos: THREE.Vector3) => void,
+    controls: any 
+}) => {
+    const meshRef = useRef<THREE.Mesh>(null);
+    return (
+        <TransformControls 
+            mode="translate"
+            onMouseDown={() => { if(controls) controls.enabled = false; }}
+            onMouseUp={() => { 
+                if(controls) controls.enabled = true;
+                if(meshRef.current) onDragEnd(meshRef.current.position);
+            }}
+        >
+            <mesh ref={meshRef} position={new THREE.Vector3(...position)}>
+                <sphereGeometry args={[0.05, 16, 16]} />
+                <meshBasicMaterial color={color} depthTest={false} transparent opacity={0.8} />
+                <Html distanceFactor={10} pointerEvents="none">
+                    <div style={{color}} className="text-[10px] font-bold bg-black/80 px-1 rounded border border-white/20 whitespace-nowrap">
+                        {label}
+                    </div>
+                </Html>
+            </mesh>
+        </TransformControls>
+    )
 }
 
 export const Model = () => {
   const { cadUrl } = useAppStore();
   if (!cadUrl) return null;
   return <InnerModel url={cadUrl} />;
-}
-
-const Marker = ({ imgId, imgName, position, part, modelScene, controls }: { 
-  imgId: string, 
-  imgName: string, 
-  position: [number, number, number], 
-  part: any, 
-  modelScene: THREE.Group | null,
-  controls: any
-}) => {
-  const meshRef = useRef<THREE.Mesh>(null);
-  const { updateKeyframePosition } = useAppStore();
-  
-  return (
-      <TransformControls 
-         mode="translate"
-         // Disable Orbit when dragging
-         onMouseDown={() => { if(controls) controls.enabled = false; }}
-         onMouseUp={() => { 
-            if(controls) controls.enabled = true;
-            
-            // Save new position
-            if (meshRef.current) {
-               const pos = meshRef.current.position;
-               updateKeyframePosition(imgId, part.uuid, [pos.x, pos.y, pos.z]);
-            }
-         }}
-      >
-        <mesh ref={meshRef} position={new THREE.Vector3(...position)}>
-          <sphereGeometry args={[0.05, 16, 16]} />
-          {/* Color matches the Part */}
-          <meshStandardMaterial color={part.color} emissive={part.color} emissiveIntensity={1} transparent opacity={0.8} />
-          <Html distanceFactor={10}>
-            <div className="bg-black/80 text-white text-[8px] px-1 rounded pointer-events-none whitespace-nowrap flex flex-col items-center">
-              <span>{imgName}</span>
-              <span style={{color: part.color}}>{part.name}</span>
-            </div>
-          </Html>
-        </mesh>
-      </TransformControls>
-  );
 }
