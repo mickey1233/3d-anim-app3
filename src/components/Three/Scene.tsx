@@ -3,6 +3,7 @@ import { Canvas, useThree, useFrame } from '@react-three/fiber';
 import { OrbitControls, Stage, Grid } from '@react-three/drei';
 import { Model } from './Model';
 import { useAppStore } from '../../store/useAppStore';
+import { RemoteClient } from '../Network/RemoteClient';
 import * as THREE from 'three';
 
 // Handles animating parts
@@ -10,13 +11,15 @@ const PartAnimator = () => {
   const { 
       isAnimationPlaying, setAnimationPlaying, 
       movingPartId, startMarker, endMarker, 
-      animationDuration, animationEasing 
+      animationDuration, animationEasing,
+      parts // Needed to access part data if necessary, though we use scene object mostly
   } = useAppStore();
   const { scene } = useThree();
   
   // Animation State
   const startTime = useRef(0);
   const isRunning = useRef(false);
+  const initialPosition = useRef<THREE.Vector3 | null>(null);
 
   useEffect(() => {
     if (isAnimationPlaying && !isRunning.current) {
@@ -25,15 +28,27 @@ const PartAnimator = () => {
          setAnimationPlaying(false);
          return;
       }
+      
+      // Capture Initial Position
+      const partObj = scene.getObjectByProperty('uuid', movingPartId);
+      if (partObj) {
+          initialPosition.current = partObj.position.clone();
+      } else {
+          console.warn("Moving part not found in scene");
+          setAnimationPlaying(false);
+          return;
+      }
+
       isRunning.current = true;
       startTime.current = Date.now();
     } else if (!isAnimationPlaying) {
       isRunning.current = false;
+      initialPosition.current = null;
     }
-  }, [isAnimationPlaying, movingPartId, startMarker, endMarker]);
+  }, [isAnimationPlaying, movingPartId, startMarker, endMarker, scene]);
 
   useFrame(() => {
-    if (!isRunning.current || !movingPartId || !startMarker || !endMarker) return;
+    if (!isRunning.current || !movingPartId || !startMarker || !endMarker || !initialPosition.current) return;
 
     const now = Date.now();
     const elapsed = (now - startTime.current) / 1000; // Seconds
@@ -47,27 +62,44 @@ const PartAnimator = () => {
 
     const partObj = scene.getObjectByProperty('uuid', movingPartId);
     if (partObj) {
+        // Calculate World Delta Vector
         const vStartWorld = new THREE.Vector3(...startMarker.position);
         const vEndWorld = new THREE.Vector3(...endMarker.position);
+        const worldDelta = new THREE.Vector3().subVectors(vEndWorld, vStartWorld);
         
-        // Convert World Targets to Local Space of the object's parent
-        // This ensures the object moves correctly relative to its hierarchy.
-        // If parent is scene, worldToLocal is identity (mostly).
+        // Convert Delta to Local Space (simplified assumption: scale is 1, rotation matches or handled)
+        // Correct way: 
+        // TargetWorld = InitialWorld + WorldDelta
+        // TargetLocal = Parent.worldToLocal(TargetWorld)
         
-        const vStartLocal = vStartWorld.clone();
-        const vEndLocal = vEndWorld.clone();
+        // Get Initial World Position
+        // We stored initialPosition which is LOCAL.
+        // We need Context.
         
         if (partObj.parent) {
-            partObj.parent.worldToLocal(vStartLocal);
-            partObj.parent.worldToLocal(vEndLocal);
+             // 1. Initial Local -> Initial World
+             const initialWorld = initialPosition.current.clone().applyMatrix4(partObj.parent.matrixWorld);
+             
+             // 2. Target World = Initial World + Delta
+             const targetWorld = initialWorld.clone().add(worldDelta);
+             
+             // 3. Target Local = Parent.worldToLocal(Target World)
+             const targetLocal = targetWorld.clone(); // Transform in place
+             partObj.parent.worldToLocal(targetLocal);
+             
+             // 4. Lerp Local: InitialLocal -> TargetLocal
+             partObj.position.lerpVectors(initialPosition.current, targetLocal, t);
+        } else {
+             // No parent (Scene root), Local == World
+             const targetLocal = initialPosition.current.clone().add(worldDelta);
+             partObj.position.lerpVectors(initialPosition.current, targetLocal, t);
         }
-        
-        partObj.position.lerpVectors(vStartLocal, vEndLocal, t);
     }
     
     if (progress >= 1.0) {
         setAnimationPlaying(false);
         isRunning.current = false;
+        initialPosition.current = null;
     }
   });
 
@@ -128,6 +160,87 @@ const ObjectRig = ({ children }: { children: React.ReactNode }) => {
     );
 }
 
+const SequenceController = () => {
+    const { 
+        isSequencePlaying, 
+        currentStepIndex, 
+        sequence, 
+        nextStep, 
+        stopSequence,
+        setMovingPartId, setStartMarker, setEndMarker, setAnimationConfig, setAnimationPlaying,
+        isAnimationPlaying
+    } = useAppStore();
+
+    // 1. Trigger Step when Index Changes
+    useEffect(() => {
+        if (!isSequencePlaying) return;
+
+        if (currentStepIndex >= 0 && currentStepIndex < sequence.length) {
+            const step = sequence[currentStepIndex];
+            console.log(`[SEQUENCE] Playing Step ${currentStepIndex + 1}:`, step.description);
+            
+            // Allow a small delay for state to settle? Not strictly needed but safe.
+            // Batch updates
+            setMovingPartId(step.partId);
+            setStartMarker(step.startMarker.position);
+            setEndMarker(step.endMarker.position);
+            setAnimationConfig(step.duration, step.easing);
+            
+            // Trigger Animation
+            // We need a slight timeout because we just updated the dependencies of the Animator?
+            // Actually, Animator watches [isAnimationPlaying].
+            // If we set everything THEN set playing, it should be fine.
+            setTimeout(() => setAnimationPlaying(true), 10);
+            
+        } else if (currentStepIndex >= sequence.length) {
+            console.log("[SEQUENCE] Finished.");
+            stopSequence();
+        }
+    }, [isSequencePlaying, currentStepIndex]);
+
+    // 2. Watch for Animation Completion
+    const wasPlaying = useRef(false);
+    useEffect(() => {
+        if (!isSequencePlaying) return;
+
+        if (wasPlaying.current && !isAnimationPlaying) {
+            // Animation just finished
+            console.log("[SEQUENCE] Step Finished. Moving to next...");
+            // Non-blocking wait if desired?
+            setTimeout(() => nextStep(), 500); // 0.5s pause between steps
+        }
+        
+        wasPlaying.current = isAnimationPlaying;
+    }, [isSequencePlaying, isAnimationPlaying]);
+
+    return null;
+}
+
+// Resets objects to their original positions when resetTrigger changes
+const SceneResetter = () => {
+    const { resetTrigger, parts } = useAppStore();
+    const { scene } = useThree();
+
+    useEffect(() => {
+        if (resetTrigger === 0) return;
+
+        console.log('[SCENE] Resetting parts...');
+        
+        // Iterate over all parts in the store and reset their corresponding scene objects
+        Object.values(parts).forEach(part => {
+            const obj = scene.getObjectByProperty('uuid', part.uuid);
+            if (obj) {
+                obj.position.set(...part.position);
+                obj.rotation.set(...part.rotation);
+                obj.scale.set(...part.scale);
+            }
+        });
+
+    }, [resetTrigger, parts, scene]);
+
+    return null;
+}
+
 export const Scene = () => {
   const handleCanvasPointerDown = (e: any) => {
       // Log critical debug info requested by user
@@ -170,7 +283,10 @@ export const Scene = () => {
         <Grid infiniteGrid fadeDistance={50} fadeStrength={1.5} position={[0, -0.01, 0]} />
         
         <PartAnimator />
+        <SequenceController />
+        <SceneResetter />
         <GlobalCameraRig />
+        <RemoteClient />
         <Controls />
       </Canvas>
     </div>

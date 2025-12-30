@@ -84,19 +84,86 @@ const InnerModel = ({ url }: { url: string }) => {
              return;
         }
 
+        // --- NEW: Calculate Center of the Entire Coplanar Surface ---
+        // 1. Get Local Normal and a Point on the clicked face
+        const localNormal = face.normal.clone().normalize();
         const posAttr = mesh.geometry.attributes.position;
-        const vA = new THREE.Vector3().fromBufferAttribute(posAttr, face.a);
-        const vB = new THREE.Vector3().fromBufferAttribute(posAttr, face.b);
-        const vC = new THREE.Vector3().fromBufferAttribute(posAttr, face.c);
-
-        vA.applyMatrix4(mesh.matrixWorld);
-        vB.applyMatrix4(mesh.matrixWorld);
-        vC.applyMatrix4(mesh.matrixWorld);
-
-        const center = new THREE.Vector3().addVectors(vA, vB).add(vC).divideScalar(3);
-        const pointData = [center.x, center.y, center.z] as [number, number, number];
+        const indexAttr = mesh.geometry.index;
         
-        console.log(`Picking Success! Mode: ${pickingMode}, Point:`, pointData);
+        // Helper to get vertex at index
+        const getV = (i: number) => {
+            const v = new THREE.Vector3();
+            v.fromBufferAttribute(posAttr, i);
+            return v;
+        };
+        
+        // Point on plane (Vertex A of clicked face)
+        const planePoint = getV(face.a);
+        
+        // 2. Identify all triangles that are coplanar
+        // Criteria: Same Normal (dot > 0.99) AND Coplanar (dist < 0.001)
+        
+        const triangleCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3;
+        
+        const triNormal = new THREE.Vector3();
+        const triA = new THREE.Vector3();
+        const triB = new THREE.Vector3();
+        const triC = new THREE.Vector3();
+        
+        // Bounding Box for Coplanar Vertices
+        const coplanarBox = new THREE.Box3();
+        let matchCount = 0;
+        
+        for (let i = 0; i < triangleCount; i++) {
+            let a, b, c;
+            if (indexAttr) {
+                a = indexAttr.getX(i * 3);
+                b = indexAttr.getY(i * 3);
+                c = indexAttr.getZ(i * 3);
+            } else {
+                a = i * 3;
+                b = i * 3 + 1;
+                c = i * 3 + 2;
+            }
+            
+            triA.fromBufferAttribute(posAttr, a);
+            triB.fromBufferAttribute(posAttr, b);
+            triC.fromBufferAttribute(posAttr, c);
+            
+            // Calc Normal
+            triNormal.subVectors(triC, triB).cross(new THREE.Vector3().subVectors(triA, triB)).normalize();
+            
+            // Check Normal match
+            if (triNormal.dot(localNormal) > 0.99) {
+                // Check if Coplanar
+                const dist = new THREE.Vector3().subVectors(triA, planePoint).dot(localNormal);
+                
+                if (Math.abs(dist) < 0.001) {
+                    // Coplanar! Add vertices to Box
+                    coplanarBox.expandByPoint(triA);
+                    coplanarBox.expandByPoint(triB);
+                    coplanarBox.expandByPoint(triC);
+                    matchCount++;
+                }
+            }
+        }
+        
+        let centerLocal = new THREE.Vector3();
+        if (!coplanarBox.isEmpty()) {
+             coplanarBox.getCenter(centerLocal);
+             console.log(`[SNAP] Found ${matchCount} coplanar triangles. Box Center:`, centerLocal);
+        } else {
+             // Fallback
+             centerLocal.copy(planePoint);
+             console.log("[SNAP] No coplanar faces found, using single point.");
+        }
+        
+        // Convert to World Space
+        const centerWorld = centerLocal.clone().applyMatrix4(mesh.matrixWorld);
+        const pointData = [centerWorld.x, centerWorld.y, centerWorld.z] as [number, number, number];
+        
+        console.log(`[SNAP] Final World Point:`, pointData);
+        // -----------------------------------------------------------
 
         if (pickingMode === 'start') {
              setStartMarker(pointData);

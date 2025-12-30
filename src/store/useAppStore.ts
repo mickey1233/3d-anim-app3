@@ -14,6 +14,16 @@ export interface MarkerData {
     position: [number, number, number];
 }
 
+export interface AnimationStep {
+  id: string;
+  partId: string;
+  startMarker: MarkerData;
+  endMarker: MarkerData;
+  duration: number;
+  easing: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
+  description: string;
+}
+
 interface AppState {
   cadUrl: string | null;
   cadFileName: string | null;
@@ -31,6 +41,14 @@ interface AppState {
   movingPartId: string | null; // The object that will move
   animationDuration: number; // Seconds
   animationEasing: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
+
+  // Scene Control
+  resetTrigger: number;
+
+  // Sequence State
+  sequence: AnimationStep[];
+  isSequencePlaying: boolean;
+  currentStepIndex: number;
 
   // Global Calibration / Transforms
   cameraTransform: {
@@ -56,12 +74,20 @@ interface AppState {
   
   setMovingPartId: (uuid: string | null) => void;
   setAnimationConfig: (duration: number, easing: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut') => void;
+  triggerReset: () => void;
 
   setCameraTransform: (position: [number, number, number], rotation: [number, number, number]) => void;
   setObjectTransform: (position: [number, number, number], rotation: [number, number, number]) => void;
+
+  // Sequence Actions
+  addStep: (step: AnimationStep) => void;
+  removeStep: (id: string) => void;
+  playSequence: () => void;
+  stopSequence: () => void;
+  nextStep: () => void;
 }
 
-export const useAppStore = create<AppState>((set) => ({
+export const useAppStore = create<AppState>((set, get) => ({
   cadUrl: null,
   cadFileName: null,
   parts: {},
@@ -74,6 +100,12 @@ export const useAppStore = create<AppState>((set) => ({
   movingPartId: null,
   animationDuration: 2.0,
   animationEasing: 'easeInOut',
+  resetTrigger: 0,
+
+  // Sequence Defaults
+  sequence: [],
+  isSequencePlaying: false,
+  currentStepIndex: -1,
 
   cameraTransform: { position: [0,0,0], rotation: [0,0,0] },
   objectTransform: { position: [0,0,0], rotation: [0,0,0] },
@@ -101,13 +133,28 @@ export const useAppStore = create<AppState>((set) => ({
   
   setMovingPartId: (uuid) => set({ movingPartId: uuid }),
   setAnimationConfig: (duration, easing) => set({ animationDuration: duration, animationEasing: easing }),
+  triggerReset: () => set((state) => ({ resetTrigger: state.resetTrigger + 1, isAnimationPlaying: false, isSequencePlaying: false, currentStepIndex: -1 })),
 
   setCameraTransform: (position, rotation) => set({ cameraTransform: { position, rotation } }),
   setObjectTransform: (position, rotation) => set({ objectTransform: { position, rotation } }),
+
+  // Sequence Implementation
+  addStep: (step) => set((state) => ({ sequence: [...state.sequence, step] })),
+  removeStep: (id) => set((state) => ({ sequence: state.sequence.filter(s => s.id !== id) })),
+  playSequence: () => set({ isSequencePlaying: true, currentStepIndex: 0 }),
+  stopSequence: () => set({ isSequencePlaying: false, currentStepIndex: -1 }),
+  nextStep: () => set((state) => {
+      const nextIndex = state.currentStepIndex + 1;
+      if (nextIndex >= state.sequence.length) {
+          return { isSequencePlaying: false, currentStepIndex: -1 }; // Finished
+      }
+      return { currentStepIndex: nextIndex };
+  }),
 }));
 
 // Subscribe for Debugging
 useAppStore.subscribe((state) => {
     (window as any).__DEBUG_SELECTED_PART__ = state.selectedPartId;
     (window as any).__DEBUG_PICKING_MODE__ = state.pickingMode;
+    (window as any).__DEBUG_SEQUENCE_INDEX__ = state.currentStepIndex;
 });
