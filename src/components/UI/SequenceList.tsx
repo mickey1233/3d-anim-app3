@@ -2,7 +2,13 @@ import React from 'react';
 import { useAppStore } from '../../store/useAppStore';
 import { Play, Trash2, X, ListOrdered, StepForward } from 'lucide-react';
 
-export const SequenceList: React.FC = () => {
+import { AnimationStep } from '../../store/useAppStore';
+
+interface SequenceListProps {
+    onSelect?: (step: AnimationStep) => void;
+}
+
+export const SequenceList: React.FC<SequenceListProps> = ({ onSelect }) => {
     const { 
         sequence, 
         removeStep, 
@@ -30,7 +36,8 @@ export const SequenceList: React.FC = () => {
                     return (
                         <div 
                             key={step.id} 
-                            className={`flex items-center justify-between p-2 rounded border text-xs ${isActive ? 'bg-[var(--accent-color)]/20 border-[var(--accent-color)]' : 'bg-black/30 border-white/5'}`}
+                            onClick={() => onSelect && onSelect(step)}
+                            className={`flex items-center justify-between p-2 rounded border text-xs cursor-pointer hover:bg-white/5 transition-colors ${isActive ? 'bg-[var(--accent-color)]/20 border-[var(--accent-color)]' : 'bg-black/30 border-white/5'}`}
                         >
                             <div className="flex items-center gap-2 overflow-hidden">
                                 <span className={`text-[9px] font-mono ${isActive ? 'text-[var(--accent-color)]' : 'text-gray-500'}`}>

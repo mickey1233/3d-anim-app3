@@ -1,0 +1,30 @@
+nohup: ignoring input
+[MCP-Server] WebSocket server listening on port 3001
+MCP Server running on StdIO
+[MCP-Server] Received Chat: "load demo"
+[MCP-Server] Received Chat: "load demo"
+[MCP] Failed to fetch scene state for NLP context Error: Timeout waiting for App response
+    at Timeout._onTimeout (/home/ubuntu/git/bullshit_artist/3d-anim-app3/mcp-server/index.ts:238:24)
+    at listOnTimeout (node:internal/timers:569:17)
+    at process.processTimers (node:internal/timers:512:7)
+[MCP-Server] Received Chat: "move Part2 bottom to Part1 top"
+[MCP-Server] Received Chat: "move Part2 bottom to Part1 top"
+[MCP-Server] Received Chat: "move Part2 bottom to Part1 top"
+[MCP-Server] Received Chat: "add step"
+[MCP-Server] Received Chat: "run"
+[MCP-Server] Received Chat: "move Part3 front to Part2 back"
+[MCP-Server] Received Chat: "add step"
+[MCP-Server] Received Chat: "run"
+[MCP-Server] Received Chat: "play"
+[MCP-Server] Received Chat: "run"
+[MCP-Server] Received Chat: "load demo"
+[MCP-Server] Received Chat: "move Part2 bottom to Part1 top"
+[MCP-Server] Received Chat: "move Part2 bottom to Part1 top"
+[MCP-Server] Received Chat: "load demo"
+[MCP-Server] Received Chat: "move Part2 bottom to Part1 top"
+[MCP-Server] Received Chat: "move Part2 bottom to Part1 top"
+[MCP-Server] Received Chat: "move Part2 to NonExistentPart"
+❌ Error processing chat: Source or Target mesh not found in scene. Source=Part2, Target=NonExistentPart
+[MCP-Server] Received Chat: "move Part2 bottom to Part1 top"
+❌ Error processing chat: Source or Target mesh not found in scene. Source=Part2, Target=Part1
+[MCP-Server] Received Chat: "move Part2 bottom to Part1 top"

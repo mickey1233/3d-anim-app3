@@ -1,0 +1,14 @@
+nohup: ignoring input
+
+> 3d-anim-app@0.0.0 dev
+> vite --host
+
+
+  VITE v5.4.21  ready in 85 ms
+
+  ➜  Local:   http://localhost:5173/
+  ➜  Network: http://192.168.234.194:5173/
+2:00:41 PM [vite] hmr update /src/components/Network/RemoteClient.tsx, /src/styles/global.css
+2:00:41 PM [vite] hmr update /src/components/UI/AnimationStudio.tsx, /src/styles/global.css
+2:00:41 PM [vite] hmr update /src/components/Network/RemoteClient.tsx, /src/styles/global.css
+2:00:41 PM [vite] hmr update /src/App.tsx, /src/styles/global.css, /src/components/Network/RemoteClient.tsx, /src/components/UI/ChatInterface.tsx

@@ -76,6 +76,14 @@ class MCPBridge {
             this.ws.send(JSON.stringify({ id, error }));
         }
     }
+
+    public sendChatCommand(text: string) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            this.ws.send(JSON.stringify({ command: 'chat_input', text }));
+        } else {
+            console.warn('[MCPBridge] Cannot send chat, socket closed.');
+        }
+    }
 }
 
 export const mcpBridge = new MCPBridge();

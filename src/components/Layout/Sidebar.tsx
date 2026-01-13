@@ -10,7 +10,7 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = ({ children, title, side, className = '' }) => {
   return (
     <div className={`
-      w-80 h-full p-4 flex flex-col gap-4 z-10 shrink-0
+      w-[500px] h-full p-4 flex flex-col gap-4 z-10 shrink-0
       bg-[rgba(30,30,35,0.6)] backdrop-blur-md border-${side === 'left' ? 'r' : 'l'} border-[rgba(255,255,255,0.1)]
       text-white shadow-xl
       ${className}

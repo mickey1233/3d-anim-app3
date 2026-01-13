@@ -1,0 +1,22 @@
+nohup: ignoring input
+[MCP-Server] WebSocket server listening on port 3001
+[MCP] FAST-WARNING: No GEMINI_API_KEY found in .env. AI Chat features will be limited to basic keyword matching.
+MCP Server running on StdIO
+[MCP-Server] Received Chat: "Put the bottom edge of Part 1 on the top edge of Part 2"
+[MCP-Server] Received Chat: "Create a new step."
+[MCP-Server] Received Chat: "Insert a step"
+[MCP-Server] Received Chat: "Introduce a new step"
+[MCP-Server] Received Chat: "Create a new step"
+[MCP-Server] Received Chat: "Add one more step"
+[MCP-Server] Received Chat: "Attach Part 1’s bottom to Part 2’s top."
+[MCP-Server] Received Chat: "Attach Part 2’s bottom to Part 1’s top."
+[MCP-Server] Received Chat: "Attach Part 2’s bottom to Part 1’s top."
+[MCP-Server] Received Chat: "Align Part 2’s bottom with the top of Part 1."
+[MCP-Server] Received Chat: "add step"
+[MCP-Server] Received Chat: "play"
+[MCP-Server] Received Chat: "load demo"
+[MCP-Server] Received Chat: "Align Part 2’s bottom with the top of Part 1."
+[MCP-Server] Received Chat: "Align Part 2’s bottom with the top of Part 1."
+[MCP-Server] Received Chat: "add step"
+[MCP-Server] Received Chat: "play"
+[MCP-Server] Received Chat: "reset"

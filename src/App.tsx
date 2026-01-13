@@ -6,7 +6,14 @@ import { Scene } from './components/Three/Scene';
 import { useAppStore } from './store/useAppStore';
 import { Play, Pause, Box } from 'lucide-react';
 
+import { mcpBridge } from './services/MCPBridge';
+
 function App() {
+  useEffect(() => {
+     mcpBridge.connect();
+     // Cleanup optional, but effectively we want persistent connection
+  }, []);
+
   const { 
     isAnimationPlaying, setAnimationPlaying, 
     cadFileName, setCadUrl, 

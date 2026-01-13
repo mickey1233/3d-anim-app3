@@ -1,25 +1,27 @@
 import React from 'react';
 import { useAppStore } from '../../store/useAppStore';
-import { Target, MousePointer2, Play, Settings, RotateCcw, Plus } from 'lucide-react';
+import { Play, Plus, RotateCcw, Save, MousePointerClick, ChevronRight, ChevronDown, Trash2, Settings } from 'lucide-react';
 import { SequenceList } from './SequenceList';
+import { ChatInterface } from './ChatInterface';
 
 export const AnimationStudio: React.FC = () => {
+    const [editingStepId, setEditingStepId] = React.useState<string | null>(null);
+
     const { 
         parts, movingPartId, setMovingPartId,
         pickingMode, setPickingMode,
         startMarker, endMarker, setStartMarker, setEndMarker,
         animationDuration, animationEasing, setAnimationConfig,
         isAnimationPlaying, setAnimationPlaying,
-        updatePart,
+        updatePart, resetPart,
         addStep,
-        triggerReset,
-        sequence // Check length to show Badge?
+        updateStep,
+        resetAllParts,
+        sequence 
     } = useAppStore();
 
     const handleRun = () => {
-        if (!movingPartId || !startMarker || !endMarker) return;
         setAnimationPlaying(true);
-        // Animation Logic is handled in Scene.tsx (PartAnimator)
     };
 
     const handleAddToSequence = () => {
@@ -34,13 +36,38 @@ export const AnimationStudio: React.FC = () => {
             easing: animationEasing,
             description: `Move ${parts[movingPartId]?.name || 'Object'}`
         });
-        
-        // Optional: clear markers after adding? Or keep for tweaking?
-        // Let's keep them for now.
+    };
+
+    const handleUpdateStep = () => {
+        if (!editingStepId || !movingPartId || !startMarker || !endMarker) return;
+
+        updateStep(editingStepId, {
+            partId: movingPartId,
+            startMarker: startMarker,
+            endMarker: endMarker,
+            duration: animationDuration,
+            easing: animationEasing,
+            description: `Move ${parts[movingPartId]?.name || 'Object'}`
+        });
+        setEditingStepId(null); // Exit editing mode
+    };
+
+    const handleSelectStep = (step: any) => {
+        setEditingStepId(step.id);
+        setMovingPartId(step.partId);
+        setStartMarker(step.startMarker.position);
+        setEndMarker(step.endMarker.position);
+        setAnimationConfig(step.duration, step.easing);
     };
 
     const handleReset = () => {
-        triggerReset();
+        resetAllParts();
+        setEditingStepId(null);
+    };
+
+    const cancelEditing = () => {
+        setEditingStepId(null);
+        // Optionally clear inputs? Let's keep them.
     };
 
     return (
@@ -51,102 +78,123 @@ export const AnimationStudio: React.FC = () => {
             </h3>
             
             <div className="flex flex-col gap-3">
-                {/* ... Inputs (Select, Start/End, Settings) kept as is ... */}
                 {/* 1. Select Moving Object */}
                 <div className="flex flex-col gap-1">
                     <label className="text-[10px] uppercase text-gray-500 font-bold">Target Object</label>
-                    <select 
-                        value={movingPartId || ''}
-                        onChange={(e) => setMovingPartId(e.target.value || null)}
-                        className="bg-black/50 border border-white/10 rounded px-2 py-1 text-xs text-white"
-                    >
-                        <option value="">-- Select Object to Move --</option>
-                        {Object.values(parts).map(part => (
-                            <option key={part.uuid} value={part.uuid}>{part.name}</option>
-                        ))}
-                    </select>
+                    <div className="flex gap-2">
+                        <select 
+                            value={movingPartId || ''}
+                            onChange={(e) => setMovingPartId(e.target.value || null)}
+                            className="bg-black/50 border border-white/10 rounded px-2 py-1 text-xs text-white flex-1 min-w-0"
+                        >
+                            <option value="">-- Select Object to Move --</option>
+                            {Object.values(parts).map(part => (
+                                <option key={part.uuid} value={part.uuid}>{part.name}</option>
+                            ))}
+                        </select>
+                        <button
+                            onClick={() => movingPartId && resetPart(movingPartId)}
+                            disabled={!movingPartId}
+                            className="p-1.5 bg-white/10 hover:bg-white/20 text-white rounded disabled:opacity-30 disabled:cursor-not-allowed"
+                            title="Reset Selected Part"
+                        >
+                            <RotateCcw className="w-4 h-4" />
+                        </button>
+                    </div>
                 </div>
 
                 {/* 2. Start/End Points */}
-                <div className="grid grid-cols-2 gap-2">
+                <div className="flex flex-col gap-3">
                     {/* Start Point */}
-                    <div className={`p-2 rounded border ${pickingMode === 'start' ? 'border-green-400 bg-green-400/10' : 'border-white/10 bg-black/20'}`}>
-                        <div className="flex justify-between items-center mb-1">
-                            <span className="text-[10px] font-bold text-gray-300">Start Point</span>
+                    <div className={`p-3 rounded border ${pickingMode === 'start' ? 'border-green-400 bg-green-400/10' : 'border-white/10 bg-black/20'}`}>
+                        <div className="flex justify-between items-center mb-2">
+                            <span className="text-xs font-bold text-gray-300">Start Point</span>
                             <button 
                                 onClick={() => setPickingMode(pickingMode === 'start' ? 'idle' : 'start')}
-                                className={`p-1 rounded transition-colors ${pickingMode === 'start' ? 'bg-green-400 text-black' : 'bg-white/10 hover:bg-white/20'}`}
+                                className={`p-1.5 rounded transition-colors ${pickingMode === 'start' ? 'bg-green-400 text-black' : 'bg-white/10 hover:bg-white/20'}`}
                                 title="Pick Face Center"
                             >
-                                <MousePointer2 className="w-3 h-3" />
+                                <MousePointerClick className="w-4 h-4" />
                             </button>
                         </div>
                         
                         {startMarker ? (
-                             <div className="flex gap-1 mb-1">
+                             <div className="flex gap-2 mb-2 items-center">
                                 {startMarker.position.map((val, idx) => (
-                                    <input 
-                                        key={idx}
-                                        type="number" 
-                                        step="0.1"
-                                        className="w-full bg-black/30 border border-white/10 rounded px-1 py-0.5 text-[9px] text-gray-300 text-center focus:border-[var(--accent-color)] outline-none"
-                                        value={Number(val).toFixed(2)}
-                                        onChange={(e) => {
-                                            const newPos = [...startMarker.position] as [number, number, number];
-                                            newPos[idx] = parseFloat(e.target.value);
-                                            setStartMarker(newPos);
-                                        }}
-                                    />
+                                    <div key={idx} className="flex-1 min-w-0">
+                                        <input 
+                                            type="number" 
+                                            step="0.01"
+                                            className="w-full bg-black/40 border border-white/20 rounded px-2 py-2 text-sm text-gray-200 text-center focus:border-[var(--accent-color)] outline-none font-mono"
+                                            value={Number(val).toFixed(2)}
+                                            onChange={(e) => {
+                                                const newPos = [...startMarker.position] as [number, number, number];
+                                                newPos[idx] = parseFloat(e.target.value);
+                                                setStartMarker(newPos);
+                                            }}
+                                        />
+                                    </div>
                                 ))}
                             </div>
                         ) : (
-                            <div className="text-[9px] text-gray-400 font-mono italic mb-1">Not set</div>
+                            <div className="text-xs text-gray-500 italic px-2 py-1">Not set</div>
                         )}
-                        
-                        <button 
-                           onClick={() => setStartMarker(null)} 
-                           className="text-[8px] text-red-400 hover:text-red-300 w-full text-right"
-                        >Clear</button>
+                        <div className="flex justify-end">
+                            {startMarker && (
+                                <button 
+                                    onClick={() => setStartMarker(null)}
+                                    className="text-xs text-red-400 hover:text-red-300"
+                                >
+                                    Clear
+                                </button>
+                            )}
+                        </div>
                     </div>
 
                     {/* End Point */}
-                    <div className={`p-2 rounded border ${pickingMode === 'end' ? 'border-blue-400 bg-blue-400/10' : 'border-white/10 bg-black/20'}`}>
-                        <div className="flex justify-between items-center mb-1">
-                            <span className="text-[10px] font-bold text-gray-300">End Point</span>
-                            <button 
+                    <div className="bg-white/5 rounded p-3 border border-white/5">
+                        <div className="flex justify-between items-center mb-2">
+                            <label className="text-xs font-bold text-gray-400 uppercase tracking-wider">End Point</label>
+                            {/* Pick Button */}
+                             <button
                                 onClick={() => setPickingMode(pickingMode === 'end' ? 'idle' : 'end')}
-                                className={`p-1 rounded transition-colors ${pickingMode === 'end' ? 'bg-blue-400 text-black' : 'bg-white/10 hover:bg-white/20'}`}
+                                className={`p-1.5 rounded transition-colors ${pickingMode === 'end' ? 'bg-[var(--accent-color)] text-white' : 'bg-white/10 text-gray-400 hover:bg-white/20'}`}
                                 title="Pick Face Center"
                             >
-                                <MousePointer2 className="w-3 h-3" />
+                                <MousePointerClick className="w-4 h-4" />
                             </button>
                         </div>
 
                         {endMarker ? (
-                             <div className="flex gap-1 mb-1">
+                             <div className="flex gap-2 mb-2 items-center">
                                 {endMarker.position.map((val, idx) => (
-                                    <input 
-                                        key={idx}
-                                        type="number" 
-                                        step="0.1"
-                                        className="w-full bg-black/30 border border-white/10 rounded px-1 py-0.5 text-[9px] text-gray-300 text-center focus:border-[var(--accent-color)] outline-none"
-                                        value={Number(val).toFixed(2)}
-                                        onChange={(e) => {
-                                            const newPos = [...endMarker.position] as [number, number, number];
-                                            newPos[idx] = parseFloat(e.target.value);
-                                            setEndMarker(newPos);
-                                        }}
-                                    />
+                                    <div key={idx} className="flex-1 min-w-0">
+                                        <input 
+                                            type="number" 
+                                            step="0.01"
+                                            className="w-full bg-black/40 border border-white/20 rounded px-2 py-2 text-sm text-gray-200 text-center focus:border-[var(--accent-color)] outline-none font-mono"
+                                            value={Number(val).toFixed(2)}
+                                            onChange={(e) => {
+                                                const newPos = [...endMarker.position] as [number, number, number];
+                                                newPos[idx] = parseFloat(e.target.value);
+                                                setEndMarker(newPos);
+                                            }}
+                                        />
+                                    </div>
                                 ))}
                             </div>
                         ) : (
-                             <div className="text-[9px] text-gray-400 font-mono italic mb-1">Not set</div>
+                             <div className="text-xs text-gray-500 italic px-2 py-1">Not set</div>
                         )}
 
-                        <button 
-                           onClick={() => setEndMarker(null)} 
-                           className="text-[8px] text-red-400 hover:text-red-300 w-full text-right"
-                        >Clear</button>
+                        <div className="flex justify-end">
+                             {endMarker && (
+                                <button 
+                                   onClick={() => setEndMarker(null)} 
+                                   className="text-xs text-red-400 hover:text-red-300"
+                                >Clear</button>
+                             )}
+                        </div>
                     </div>
                 </div>
 
@@ -187,14 +235,36 @@ export const AnimationStudio: React.FC = () => {
                             <Play className="w-3 h-3" />
                             RUN
                         </button>
-                        <button
-                            onClick={handleAddToSequence}
-                            disabled={!movingPartId || !startMarker || !endMarker}
-                            className="px-3 py-2 bg-blue-500/20 text-blue-400 border border-blue-500/50 rounded hover:bg-blue-500/30 disabled:opacity-30 disabled:cursor-not-allowed"
-                            title="Add to Sequence"
-                        >
-                            <Plus className="w-4 h-4" />
-                        </button>
+
+                        {editingStepId ? (
+                            <>
+                                <button
+                                    onClick={handleUpdateStep}
+                                    disabled={!movingPartId || !startMarker || !endMarker}
+                                    className="px-3 py-2 bg-yellow-500/20 text-yellow-400 border border-yellow-500/50 rounded hover:bg-yellow-500/30 disabled:opacity-30 disabled:cursor-not-allowed text-xs font-bold"
+                                    title="Update Sequence Step"
+                                >
+                                    UPDATE
+                                </button>
+                                <button
+                                    onClick={cancelEditing}
+                                    className="px-3 py-2 bg-white/10 text-gray-400 border border-white/10 rounded hover:bg-white/20 text-xs"
+                                    title="Cancel Editing"
+                                >
+                                    CANCEL
+                                </button>
+                            </>
+                        ) : (
+                            <button
+                                onClick={handleAddToSequence}
+                                disabled={!movingPartId || !startMarker || !endMarker}
+                                className="px-3 py-2 bg-blue-500/20 text-blue-400 border border-blue-500/50 rounded hover:bg-blue-500/30 disabled:opacity-30 disabled:cursor-not-allowed"
+                                title="Add to Sequence"
+                            >
+                                <Plus className="w-4 h-4" />
+                            </button>
+                        )}
+                        
                         <button
                              onClick={handleReset}
                              className="px-3 py-2 bg-red-500/20 text-red-400 border border-red-500/50 rounded hover:bg-red-500/30"
@@ -208,8 +278,13 @@ export const AnimationStudio: React.FC = () => {
                  <div className="h-px bg-white/10 my-1" />
                 
                  {/* Sequence List */}
-                 <SequenceList />
+                 <SequenceList onSelect={handleSelectStep} />
                  
+                 <div className="h-px bg-white/10 my-1" />
+
+                 {/* Chat Interface */}
+                 <ChatInterface />
+
                 <button 
                     onClick={() => useAppStore.getState().setCadUrl('/demo/Spark.glb', 'Spark.glb')}
                     className="text-[9px] text-gray-500 hover:text-white underline text-center mt-2"

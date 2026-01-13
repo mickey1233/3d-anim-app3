@@ -196,17 +196,14 @@ const InnerModel = ({ url }: { url: string }) => {
 
   const controls = useThree((state) => state.controls);
   const { selectedPartId } = useAppStore();
+  const [selectedMarkerId, setSelectedMarkerId] = useState<'start' | 'end' | null>(null);
 
   return (
-    <group onPointerMissed={handlePointerMissed}>
-        {/* Debug Red Cube for Verification */}
-        <mesh position={[2, 0, 0]} onPointerDown={handlePointerDown}>
-             <boxGeometry args={[0.5, 0.5, 0.5]} />
-             <meshStandardMaterial color="red" />
-             <Html position={[0, 0.6, 0]}>
-                <div className="bg-black/50 text-white text-[10px] whitespace-nowrap px-1">Debug Cube</div>
-             </Html>
-        </mesh>
+    <group onPointerMissed={(e) => {
+        handlePointerMissed(e);
+        setSelectedMarkerId(null);
+    }}>
+
 
         {/* Actual Model */}
         <primitive 
@@ -222,6 +219,8 @@ const InnerModel = ({ url }: { url: string }) => {
                 label="Start"
                 onDragEnd={(pos) => setStartMarker([pos.x, pos.y, pos.z])}
                 controls={controls}
+                isSelected={selectedMarkerId === 'start'}
+                onSelect={() => setSelectedMarkerId('start')}
             />
         )}
         {endMarker && (
@@ -231,6 +230,8 @@ const InnerModel = ({ url }: { url: string }) => {
                 label="End"
                 onDragEnd={(pos) => setEndMarker([pos.x, pos.y, pos.z])}
                 controls={controls}
+                isSelected={selectedMarkerId === 'end'}
+                onSelect={() => setSelectedMarkerId('end')}
             />
         )}
 
@@ -238,55 +239,189 @@ const InnerModel = ({ url }: { url: string }) => {
         {selectedPartId && <PartHighlighter uuid={selectedPartId} scene={gltf.scene} />}
       
         {/* Labels - Filtered to only show registered parts */}
-        {Object.values(parts).map(part => (
-            <group key={part.uuid} position={new THREE.Vector3(...part.position)}>
-                <Html distanceFactor={10} zIndexRange={[100, 0]} pointerEvents="none">
-                    <div className="text-[8px] text-white/50 pointer-events-none whitespace-nowrap select-none bg-black/20 px-1 rounded backdrop-blur-[1px]">
-                        {part.name}
-                    </div>
-                </Html>
-            </group>
-        ))}
+
     </group>
   );
 };
 
 // Component to Highlight Selected Part
+import { computeSmartOBB } from '../../utils/OBBUtils';
+
 const PartHighlighter = ({ uuid, scene }: { uuid: string, scene: THREE.Group }) => {
-   const [targetObj, setTargetObj] = useState<THREE.Object3D | null>(null);
+   const [helper, setHelper] = useState<THREE.Object3D | null>(null);
+
+   useFrame(() => {
+       if (helper && scene) {
+           const obj = scene.getObjectByProperty('uuid', uuid);
+           if (obj && trackedMeshRef.current && helper.userData.basis) {
+                // Determine Final Matrix: Object World * PCA Basis
+                // Helper matrix = MeshWorld * PCAKey
+                const meshWorld = trackedMeshRef.current.matrixWorld;
+                const pcaBasis = helper.userData.basis as THREE.Matrix4;
+                
+                helper.matrix.multiplyMatrices(meshWorld, pcaBasis);
+           }
+       }
+   });
+
+   // Ref to store the tracked mesh for useFrame
+   const trackedMeshRef = useRef<THREE.Mesh | null>(null);
 
    useEffect(() => {
       const obj = scene.getObjectByProperty('uuid', uuid);
-      if (obj) setTargetObj(obj);
+      if (obj) {
+          // Force update to ensure clean state
+          obj.updateWorldMatrix(true, true);
+
+          // 1. Find all visible meshes
+          const meshes: THREE.Mesh[] = [];
+          obj.traverse((child) => {
+              if ((child as THREE.Mesh).isMesh && child.visible) {
+                  meshes.push(child as THREE.Mesh);
+              }
+          });
+
+          // 2. Single Mesh -> Show OBB (Tight & Oriented via PCA)
+          if (meshes.length === 1) {
+              const mesh = meshes[0];
+              trackedMeshRef.current = mesh; 
+
+              // Use Smart PCA OBB
+              const { center, size, basis } = computeSmartOBB(mesh);
+              
+              // Create Wireframe Box
+              const geom = new THREE.BoxGeometry(size.x, size.y, size.z);
+              const edges = new THREE.EdgesGeometry(geom);
+              const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xffff00 }));
+              
+              // Store Basis for Sync
+              line.userData.basis = basis;
+              
+              // Offset geometry to match PCA center (which is in local space relative to mesh)
+              // But we are applying "basis" check? 
+              // computeSmartOBB returns center in LOCAL SPACE (relative to mesh pivot), but already "rotated" into Basis? NO.
+              // It returns center in LOCAL SPACE.
+              // BUT if we apply `basis` as a rotation, the box is aligned to basis.
+              // We need to transform the box geometry to be centered at `center`.
+              // But `basis` rotates around (0,0,0).
+              // Let's think: 
+              // mesh.matrixWorld transforms Local -> World.
+              // basis transforms Eigen -> Local (Pure Rotation).
+              // BoxGeometry is AABB in Eigen Space.
+              // `center` is in Local Space.
+              
+              // Decompose:
+              // We want Helper transform T_h.
+              // T_h * v_box = T_mesh * v_local
+              // v_local = Basis * v_eigen + Center? No.
+              // The PCA Logic: v_local = Center + Basis * v_box_centered
+              // So T_h = T_mesh
+              // And inside T_h, we effectively render: Basis * v + Center_local_rotated?
+              
+              // EASIER WAY:
+              // Construct the Matrix4 that represents the OBB Frame in LOCAL Space.
+              // Position = center. Rotation = basis. Scale = 1.
+              // Construct the Matrix4 that represents the OBB Frame in LOCAL Space.
+              const localOBBMatrix = new THREE.Matrix4();
+              
+              // Wait, basis IS the rotation matrix.
+              localOBBMatrix.copy(basis);
+              localOBBMatrix.setPosition(center);
+              
+              // Store this LOCAL offset matrix.
+              line.userData.basis = localOBBMatrix;
+
+              // Apply World Matrix (Initial)
+              // line.matrix = mesh.matrixWorld * localOBBMatrix
+              line.matrixAutoUpdate = false;
+              line.matrix.multiplyMatrices(mesh.matrixWorld, localOBBMatrix);
+              
+              console.log(`[PCA-OBB] Highlighting Single Mesh: ${mesh.name}`);
+              setHelper(line);
+          } 
+          // 3. Multiple Meshes -> Fallback As Before
+          else {
+              trackedMeshRef.current = null;
+              const box = new THREE.Box3();
+              let foundMesh = false;
+              meshes.forEach(mesh => {
+                  if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+                  const localBox = mesh.geometry.boundingBox!.clone();
+                  localBox.applyMatrix4(mesh.matrixWorld);
+                  box.union(localBox);
+                  foundMesh = true;
+              });
+              if (!foundMesh) box.setFromObject(obj);
+              setHelper(new THREE.Box3Helper(box, 0xffff00));
+          }
+      } else {
+          setHelper(null);
+          trackedMeshRef.current = null;
+      }
    }, [uuid, scene]);
-
-   if (!targetObj) return null;
-
-   return <primitive object={new THREE.BoxHelper(targetObj, 0xffff00)} />;
+   
+   if (!helper) return null;
+   return <primitive object={helper} />;
 }
 
-const DraggableMarker = ({ position, color, label, onDragEnd, controls }: { 
+const DraggableMarker = ({ position, color, label, onDragEnd, controls, isSelected, onSelect }: { 
     position: [number, number, number], 
     color: string, 
     label: string, 
     onDragEnd: (pos: THREE.Vector3) => void,
-    controls: any 
+    controls: any,
+    isSelected: boolean,
+    onSelect: () => void
 }) => {
+    const transformRef = useRef<any>(null);
     const meshRef = useRef<THREE.Mesh>(null);
+    
+    // Manage OrbitControls enablement during drag
+    useEffect(() => {
+        if (transformRef.current) {
+            const controlsObj = transformRef.current;
+            const callback = (event: any) => {
+                const isDragging = event.value;
+                if (controls) controls.enabled = !isDragging;
+                
+                // Sync on drag end
+                if (!isDragging && meshRef.current) {
+                    onDragEnd(meshRef.current.position);
+                }
+            };
+            controlsObj.addEventListener('dragging-changed', callback);
+            return () => controlsObj.removeEventListener('dragging-changed', callback);
+        }
+    }, [controls, onDragEnd]);
+
     return (
         <TransformControls 
+            ref={transformRef}
             mode="translate"
-            onMouseDown={() => { if(controls) controls.enabled = false; }}
-            onMouseUp={() => { 
-                if(controls) controls.enabled = true;
-                if(meshRef.current) onDragEnd(meshRef.current.position);
-            }}
+            enabled={isSelected}
+            showX={isSelected}
+            showY={isSelected}
+            showZ={isSelected}
+            // If not selected, we don't want the gizmo to intercept rays, 
+            // but we want the mesh to be clickable.
         >
-            <mesh ref={meshRef} position={new THREE.Vector3(...position)}>
-                <sphereGeometry args={[0.05, 16, 16]} />
-                <meshBasicMaterial color={color} depthTest={false} transparent opacity={0.8} />
-                <Html distanceFactor={10} pointerEvents="none">
-                    <div style={{color}} className="text-[10px] font-bold bg-black/80 px-1 rounded border border-white/20 whitespace-nowrap">
+            <mesh 
+                ref={meshRef} 
+                position={new THREE.Vector3(...position)}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    onSelect();
+                }}
+            >
+                <sphereGeometry args={[0.08, 16, 16]} />
+                <meshBasicMaterial 
+                    color={isSelected ? '#ffffff' : color} 
+                    depthTest={false} 
+                    transparent 
+                    opacity={0.9} 
+                />
+                <Html position={[0, 0.15, 0]} distanceFactor={10} pointerEvents="none" center>
+                    <div style={{color: isSelected ? '#ffffff' : color}} className="text-[10px] font-bold bg-black/60 px-1.5 py-0.5 rounded border border-white/20 whitespace-nowrap backdrop-blur-sm shadow-sm transition-colors">
                         {label}
                     </div>
                 </Html>

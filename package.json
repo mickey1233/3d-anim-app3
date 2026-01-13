@@ -9,15 +9,19 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@react-three/drei": "^9.96.1",
     "@react-three/fiber": "^8.15.12",
+    "@types/fast-levenshtein": "^0.0.4",
     "clsx": "^2.1.0",
+    "fast-levenshtein": "^3.0.0",
     "framer-motion": "^10.16.16",
     "lucide-react": "^0.303.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "tailwind-merge": "^2.2.0",
     "three": "^0.160.0",
+    "three-stdlib": "^2.36.1",
     "uuid": "^9.0.1",
     "zustand": "^4.4.7"
   },
