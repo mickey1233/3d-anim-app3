@@ -1,10 +1,26 @@
 import React, { useEffect, useRef } from 'react';
 import { Canvas, useThree, useFrame } from '@react-three/fiber';
-import { OrbitControls, Stage, Grid } from '@react-three/drei';
+import { OrbitControls, Stage, Grid, Environment } from '@react-three/drei';
 import { Model } from './Model';
 import { useAppStore } from '../../store/useAppStore';
 import { RemoteClient } from '../Network/RemoteClient';
+import { LoadingOverlay } from '../UI/LoadingOverlay';
+import { ModelErrorBoundary } from './ModelErrorBoundary';
+import { PreviewRenderer } from './PreviewRenderer';
+import { FaceHighlight } from './FaceHighlight';
+import { ArcballDrag } from './ArcballDrag';
+import { setSceneRef } from '../../services/mcpHandlers';
 import * as THREE from 'three';
+
+// Exposes the Three.js scene to mcpHandlers so geometry tools can look up meshes
+const SceneConnector = () => {
+  const { scene } = useThree();
+  useEffect(() => {
+    setSceneRef(scene);
+    return () => setSceneRef(null);
+  }, [scene]);
+  return null;
+};
 
 // Handles animating parts
 const PartAnimator = () => {
@@ -131,12 +147,13 @@ const GlobalCameraRig = () => {
 
 // Wrapper for Controls
 const Controls = () => {
-   const { isAnimationPlaying } = useAppStore();
+   const { isAnimationPlaying, isTransformDragging } = useAppStore();
    const configs = useRef<any>(null);
 
    useFrame(() => {
       if (configs.current) {
-         configs.current.enabled = !isAnimationPlaying;
+         configs.current.enabled = !isAnimationPlaying && !isTransformDragging;
+         (window as any).__DEBUG_ORBIT_ENABLED__ = configs.current.enabled;
       }
    });
    
@@ -218,6 +235,7 @@ const SequenceController = () => {
 
 
 export const Scene = () => {
+  const { environmentPreset, floorStyle } = useAppStore();
   const handleCanvasPointerDown = (e: any) => {
       // Log critical debug info requested by user
       const rect = e.target.getBoundingClientRect();
@@ -244,22 +262,42 @@ export const Scene = () => {
           style={{ pointerEvents: 'auto' }}
           onPointerDown={handleCanvasPointerDown}
       >
+        <color attach="background" args={['#151515']} />
+        
         {/* Lights (Standard Setup) */}
         <ambientLight intensity={0.5} />
         <directionalLight position={[10, 10, 5]} intensity={1} castShadow />
         <spotLight position={[-10, 10, 5]} intensity={1} />
         
-        {/* Environment (City) - optional, use Environment component directly if needed */}
-        {/* <Environment preset="city" /> */}
+        <React.Suspense fallback={null}>
+            {/* Environment (Factory/Warehouse) with visible background */}
+            <Environment preset={environmentPreset} background blur={0.6} />
+        </React.Suspense>
 
-        <ObjectRig>
-            <Model />
-        </ObjectRig>
+        <ModelErrorBoundary>
+            <React.Suspense fallback={<LoadingOverlay />}>
+                <ObjectRig>
+                    <Model />
+                </ObjectRig>
+            </React.Suspense>
+        </ModelErrorBoundary>
 
-        <Grid infiniteGrid fadeDistance={50} fadeStrength={1.5} position={[0, -0.01, 0]} />
+        {floorStyle === 'grid' && (
+            <Grid infiniteGrid fadeDistance={50} fadeStrength={1.5} position={[0, -0.01, 0]} />
+        )}
+        {floorStyle === 'reflective' && (
+            <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.01, 0]}>
+                <planeGeometry args={[50, 50]} />
+                <meshStandardMaterial color="#333" roughness={0.1} metalness={0.8} />
+            </mesh>
+        )}
         
+        <SceneConnector />
         <PartAnimator />
         <SequenceController />
+        <PreviewRenderer />
+        <FaceHighlight />
+        <ArcballDrag />
         <GlobalCameraRig />
         <RemoteClient />
         <Controls />
