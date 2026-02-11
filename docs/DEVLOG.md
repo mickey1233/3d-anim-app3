@@ -3,9 +3,9 @@
 > 時間基準：本次執行時間為 2026-02-11（local）。本檔用來記錄可中斷/可續跑的進度、決策與測試證據。
 
 ## Progress (Quality-First MCP-only migration)
-- CURRENT_SUBTASK: S3 — Expand MCP tool schemas
-- DONE_SUBTASKS: [S1, S2]
-- NEXT_SUBTASK: S4 — MCP-ify non-3D UI actions
+- CURRENT_SUBTASK: S4 — MCP-ify non-3D UI actions
+- DONE_SUBTASKS: [S1, S2, S3]
+- NEXT_SUBTASK: S5 — MCP-ify 3D interactions
 - HOW_TO_RESUME:
   1) Frontend: `npm run dev -- --host 127.0.0.1 --port 5173`
   2) MCP v2 WS gateway: `npx tsx mcp-server/v2/index.ts` (default `ws://127.0.0.1:3011`)
@@ -164,6 +164,14 @@ S2 test evidence (2026-02-11):
 - Playwright baseline: `npx playwright test tests/v2_smoke.spec.ts tests/v2_command_bar.spec.ts --reporter=line`
   - Result: ✅ `2 passed` (38.5s)
   - Evidence log: `/tmp/mcp_migration_playwright_s2.log`
+
+S3 test evidence (2026-02-11):
+- Build: `npm run build`
+  - Result: ✅ success
+  - Evidence log: `/tmp/mcp_migration_build_s3.log`
+- Playwright baseline: `npx playwright test tests/v2_smoke.spec.ts tests/v2_command_bar.spec.ts --reporter=line`
+  - Result: ✅ `2 passed` (40.8s)
+  - Evidence log: `/tmp/mcp_migration_playwright_s3.log`
 
 ## Archived Context (pre MCP-only migration)
 
