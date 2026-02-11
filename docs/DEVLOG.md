@@ -3,9 +3,9 @@
 > 時間基準：本次執行時間為 2026-02-11（local）。本檔用來記錄可中斷/可續跑的進度、決策與測試證據。
 
 ## Progress (Quality-First MCP-only migration)
-- CURRENT_SUBTASK: S4 — MCP-ify non-3D UI actions
-- DONE_SUBTASKS: [S1, S2, S3]
-- NEXT_SUBTASK: S5 — MCP-ify 3D interactions
+- CURRENT_SUBTASK: S5 — MCP-ify 3D interactions
+- DONE_SUBTASKS: [S1, S2, S3, S4]
+- NEXT_SUBTASK: S6 — SceneToolApi geometry access
 - HOW_TO_RESUME:
   1) Frontend: `npm run dev -- --host 127.0.0.1 --port 5173`
   2) MCP v2 WS gateway: `npx tsx mcp-server/v2/index.ts` (default `ws://127.0.0.1:3011`)
@@ -172,6 +172,16 @@ S3 test evidence (2026-02-11):
 - Playwright baseline: `npx playwright test tests/v2_smoke.spec.ts tests/v2_command_bar.spec.ts --reporter=line`
   - Result: ✅ `2 passed` (40.8s)
   - Evidence log: `/tmp/mcp_migration_playwright_s3.log`
+
+S4 test evidence (2026-02-11):
+- Build: `npm run build`
+  - Result: ✅ success
+  - Evidence log: `/tmp/mcp_migration_build_s4.log`
+- Playwright: `npx playwright test tests/v2_command_bar.spec.ts tests/v2_scrub_numbers.spec.ts tests/v2_smoke.spec.ts --reporter=line`
+  - Result: ✅ `3 passed` (1.3s)
+  - Evidence log: `/tmp/mcp_migration_playwright_s4e.log`
+- Note: fixed Node runtime bug (`crypto` global missing) by using `randomUUID` from `node:crypto` in `mcp-server/v2/*`.
+- Note: removed default dependency on local `public/test_model.glb` (826MB, untracked) by falling back to `fixture=boxes` when `cadUrl` is empty.
 
 ## Archived Context (pre MCP-only migration)
 

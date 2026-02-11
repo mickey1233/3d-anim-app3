@@ -1,0 +1,146 @@
+import { useThree } from '@react-three/fiber';
+import { useEffect } from 'react';
+import * as THREE from 'three';
+import { useV2Store } from '../../store/store';
+import { applyMateTransform, solveMateTopBottom } from './solver';
+
+export function MateExecutor() {
+  const { scene } = useThree();
+  const req = useV2Store((s) => s.mateRequest);
+  const clearMate = useV2Store((s) => s.clearMateRequest);
+  const setMarker = useV2Store((s) => s.setMarker);
+  const setPartOverride = useV2Store((s) => s.setPartOverride);
+  const setMateTrace = useV2Store((s) => s.setMateTrace);
+  const setMatePreview = useV2Store((s) => s.setMatePreview);
+  const matePick = useV2Store((s) => s.matePick);
+  const clearMatePick = useV2Store((s) => s.clearMatePick);
+
+  useEffect(() => {
+    if (!req) return;
+    const source = scene.getObjectByProperty('uuid', req.sourceId);
+    const target = scene.getObjectByProperty('uuid', req.targetId);
+    if (!source || !target) {
+      clearMate();
+      return;
+    }
+
+    const mode = req.mode || 'translate';
+    const twistSpec = req.twistSpec;
+    const beforePos = new THREE.Vector3();
+    const beforeQuat = new THREE.Quaternion();
+    source.getWorldPosition(beforePos);
+    source.getWorldQuaternion(beforeQuat);
+    const sourceMethod = req.sourceMethod || 'auto';
+    const targetMethod = req.targetMethod || 'auto';
+    const targetPick = matePick.target?.type === 'face' ? matePick.target : undefined;
+    const transform = solveMateTopBottom(
+      source,
+      target,
+      req.sourceFace,
+      req.targetFace,
+      mode,
+      twistSpec,
+      sourceMethod,
+      targetMethod,
+      matePick.source,
+      matePick.target,
+      req.sourceOffset,
+      req.targetOffset
+    );
+    if (!transform) {
+      clearMate();
+      return;
+    }
+
+    applyMateTransform(source, transform);
+    setPartOverride(req.sourceId, {
+      position: [source.position.x, source.position.y, source.position.z],
+      quaternion: [source.quaternion.x, source.quaternion.y, source.quaternion.z, source.quaternion.w],
+      scale: [source.scale.x, source.scale.y, source.scale.z],
+    });
+
+    const afterPos = new THREE.Vector3();
+    const afterQuat = new THREE.Quaternion();
+    source.getWorldPosition(afterPos);
+    source.getWorldQuaternion(afterQuat);
+
+    setMateTrace({
+      ts: Date.now(),
+      mode,
+      sourceId: req.sourceId,
+      targetId: req.targetId,
+      sourceFace: req.sourceFace,
+      targetFace: req.targetFace,
+      pivotWorld: [transform.pivotWorld.x, transform.pivotWorld.y, transform.pivotWorld.z],
+      translationWorld: [transform.translation.x, transform.translation.y, transform.translation.z],
+      rotationQuat: [transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w],
+      normal: transform.normalRotation
+        ? {
+            axisWorld: [
+              transform.normalRotation.axisWorld.x,
+              transform.normalRotation.axisWorld.y,
+              transform.normalRotation.axisWorld.z,
+            ],
+            angleDeg: transform.normalRotation.angleDeg,
+          }
+        : undefined,
+      twist: transform.twistRotation
+        ? {
+            axisWorld: [
+              transform.twistRotation.axisWorld.x,
+              transform.twistRotation.axisWorld.y,
+              transform.twistRotation.axisWorld.z,
+            ],
+            angleDeg: transform.twistRotation.angleDeg,
+            source: transform.twistRotation.source,
+          }
+        : undefined,
+      sourceBeforeWorld: {
+        position: [beforePos.x, beforePos.y, beforePos.z],
+        quaternion: [beforeQuat.x, beforeQuat.y, beforeQuat.z, beforeQuat.w],
+      },
+      sourceAfterWorld: {
+        position: [afterPos.x, afterPos.y, afterPos.z],
+        quaternion: [afterQuat.x, afterQuat.y, afterQuat.z, afterQuat.w],
+      },
+    });
+
+    setMarker('start', {
+      type: 'face',
+      partId: req.sourceId,
+      faceId: req.sourceFace,
+      position: [
+        transform.sourceFaceLocal.x,
+        transform.sourceFaceLocal.y,
+        transform.sourceFaceLocal.z,
+      ],
+      normal: [
+        transform.sourceNormalLocal.x,
+        transform.sourceNormalLocal.y,
+        transform.sourceNormalLocal.z,
+      ],
+    });
+
+    setMarker('end', {
+      type: 'face',
+      partId: req.targetId,
+      faceId: targetPick?.faceId || req.targetFace,
+      position: [
+        transform.targetFaceLocal.x,
+        transform.targetFaceLocal.y,
+        transform.targetFaceLocal.z,
+      ],
+      normal: [
+        transform.targetNormalLocal.x,
+        transform.targetNormalLocal.y,
+        transform.targetNormalLocal.z,
+      ],
+    });
+
+    clearMate();
+    clearMatePick();
+    setMatePreview({});
+  }, [req, scene, clearMate, setMarker, setPartOverride, matePick, clearMatePick, setMateTrace, setMatePreview]);
+
+  return null;
+}
