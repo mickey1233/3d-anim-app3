@@ -3,9 +3,9 @@
 > 時間基準：本次執行時間為 2026-02-11（local）。本檔用來記錄可中斷/可續跑的進度、決策與測試證據。
 
 ## Progress (Quality-First MCP-only migration)
-- CURRENT_SUBTASK: S1 — Baseline boot + evidence log
-- DONE_SUBTASKS: []
-- NEXT_SUBTASK: S2 — Inventory gaps and map tools
+- CURRENT_SUBTASK: S3 — Expand MCP tool schemas
+- DONE_SUBTASKS: [S1, S2]
+- NEXT_SUBTASK: S4 — MCP-ify non-3D UI actions
 - HOW_TO_RESUME:
   1) Frontend: `npm run dev -- --host 127.0.0.1 --port 5173`
   2) MCP v2 WS gateway: `npx tsx mcp-server/v2/index.ts` (default `ws://127.0.0.1:3011`)
@@ -119,6 +119,51 @@
 
 ### Known limitations (tracked for S8)
 - Current baseline tests still use `window.__V2_STORE__` direct state injection for speed/stability. This is explicitly against the MCP-only goal and will be removed in S8.
+
+### S2 — MCP coverage gap matrix (2026-02-11)
+
+Legend:
+- Status: `DONE` (already MCP-controlled), `PARTIAL` (some direct store/scene writes remain), `MISSING` (no tool exists yet)
+- "Current path" is where UI/3D code directly mutates state/scene today (violates MCP-only rule).
+
+| Area | Feature | Current path (direct) | Target MCP tool(s) | Status | Verification |
+| --- | --- | --- | --- | --- | --- |
+| Top bar | Undo/Redo buttons | `src/v2/app/AppShell.tsx` calls `useV2Store().undo/redo` | `history.undo`, `history.redo` | PARTIAL | Update/replace `tests/v2_smoke.spec.ts` & add MCP-only test (S8) |
+| View | Environment dropdown | `src/v2/ui/View/ViewPanel.tsx` calls `setEnvironment` | `view.set_environment` | MISSING | `tests/v2_command_bar.spec.ts` (later MCP-only) |
+| View | Grid toggle | `src/v2/ui/View/ViewPanel.tsx` calls `setGridVisible` | `view.set_grid_visible` | MISSING | `tests/v2_command_bar.spec.ts` (later MCP-only) |
+| View | Anchor markers toggle | `src/v2/ui/View/ViewPanel.tsx` calls `setAnchorsVisible` | `view.set_anchors_visible` | MISSING | Add small Playwright check for markers visibility (S8) |
+| Model | Import CAD file | `src/v2/ui/PartsPanel/ModelPanel.tsx` calls `setCadUrl` | `parts.set_cad_url` (or `parts.load_model`) | MISSING | Add Playwright: upload -> parts appear (S8) |
+| Parts | Select from list | `src/v2/ui/PartsPanel/PartsList.tsx` calls `setSelection` | `selection.set` | PARTIAL | Add MCP-only test: click part -> selection tool sets (S8) |
+| Canvas | Click select mesh | `src/v2/three/ModelLoader.tsx` calls `setSelection` | `interaction.pick` (preferred) or `selection.set` (by partId) | PARTIAL | Add Playwright: click canvas selects (S8) |
+| Canvas | Face pick (mate) | `src/v2/three/ModelLoader.tsx` calls `setMatePick` + `setPickMode` | `interaction.pick_face` / `mate.pick_face_commit` | MISSING | Add Playwright: enable pick -> click face -> tool returns frame (S6/S8) |
+| Selection | Position/rotation scrub | `src/v2/ui/Selection/SelectionPanel.tsx` calls `setPartOverride` | `action.set_part_transform` (absolute) or `action.translate`/`action.rotate` | MISSING | Add Playwright: scrub X changes transform (S8) |
+| Selection | Reset part/all | `src/v2/ui/Selection/SelectionPanel.tsx` calls `clearPartOverride/clearAllPartOverrides` | `action.reset_part`, `action.reset_all` | MISSING | Add Playwright: reset restores initial (S8) |
+| Gizmo | Translate/rotate drag | `src/v2/three/interaction/TransformGizmo.tsx` writes overrides | `interaction.gizmo_drag_begin/update/end` + `action.commit_preview` | MISSING | Add Playwright: drag -> preview -> commit (S5/S8) |
+| CommandBar | `env` / `grid` | `src/v2/ui/CommandBar/useCommandRunner.ts` calls `setEnvironment/setGridVisible` | `view.set_environment`, `view.set_grid_visible` | PARTIAL | Extend command tests (S8) |
+| CommandBar | `reset` | `src/v2/ui/CommandBar/useCommandRunner.ts` calls `clearAllPartOverrides/clearPartOverride` | `action.reset_all`, `action.reset_part` | PARTIAL | Add MCP-only command test (S8) |
+| Mate | Draft state | `src/v2/ui/MatePanel/MatePanel.tsx` calls `setMateDraft` in store | Move to local component state OR add `ui.set_mate_draft` | PARTIAL | Keep stable UI while switching execution (S4/S5) |
+| Mate | Apply mate | `src/v2/ui/MatePanel/MatePanel.tsx` calls `requestMate` | `action.generate_transform_plan` -> `preview.transform_plan` -> `action.commit_preview` | PARTIAL | Add E2E: mate preview/commit/undo (S7/S8) |
+| Mate | Solver executor | `src/v2/three/mating/MateExecutor.tsx` applies transform + sets markers | Replace with tool-driven preview renderer; markers via `preview.*` | PARTIAL | Verify mate no longer requires store request (S7) |
+| Steps | Add/select/delete/update | `src/v2/ui/Steps/StepsPanel.tsx` calls store actions | `steps.add`, `steps.select`, `steps.delete`, `steps.update_snapshot` | MISSING | Add Playwright CRUD test (S8) |
+| Timeline | Reorder steps | `src/v2/ui/Steps/TimelineBar.tsx` calls `moveStep` | `steps.move` | MISSING | `tests/v2_timeline_reorder.spec.ts` (rewrite MCP-only in S8) |
+| Timeline | Run/Stop playback | `src/v2/ui/Steps/TimelineBar.tsx` calls `startPlayback/stopPlayback` | `steps.playback_start`, `steps.playback_stop` | MISSING | `tests/v2_timeline_run.spec.ts` (rewrite MCP-only in S8) |
+| Playback | StepRunner overrides | `src/v2/three/animation/StepRunner.tsx` writes silent overrides | OK (internal), but entry points must be MCP tools | PARTIAL | Ensure UI start/stop is tool-driven (S4) |
+| VLM | Upload/reorder/delete images | `src/v2/ui/VLM/VlmPanel.tsx` uses store actions | `vlm.add_images`, `vlm.move_image`, `vlm.remove_image` | MISSING | `tests/v2_smoke.spec.ts` (rewrite MCP-only in S8) |
+| VLM | Analyze | `src/v2/ui/VLM/VlmPanel.tsx` calls `v2Client.request('vlm_analyze')` | `vlm.analyze` (tool wraps `vlm_analyze`) | MISSING | Add MCP-only VLM test (S8) |
+| Chat | Send to router | `src/v2/ui/Chat/ChatPanel.tsx` calls `router_execute` directly | OK (already server-controlled); optional `chat.send` tool later | DONE | `tests/v2_chat.spec.ts` (rewrite MCP-only later if needed) |
+
+Top-priority tool gaps to implement in S3 (unblocks S4/S5 quickly):
+- `view.set_environment`, `view.set_grid_visible`, `view.set_anchors_visible`
+- `parts.set_cad_url`
+- `action.set_part_transform`, `action.reset_part`, `action.reset_all`
+- `steps.*` CRUD + playback tools
+- `vlm.*` image ops + `vlm.analyze`
+- `interaction.pick`, `interaction.pick_face`, `interaction.gizmo_drag_*`
+
+S2 test evidence (2026-02-11):
+- Playwright baseline: `npx playwright test tests/v2_smoke.spec.ts tests/v2_command_bar.spec.ts --reporter=line`
+  - Result: ✅ `2 passed` (38.5s)
+  - Evidence log: `/tmp/mcp_migration_playwright_s2.log`
 
 ## Archived Context (pre MCP-only migration)
 
