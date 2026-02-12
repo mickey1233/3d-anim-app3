@@ -20,6 +20,11 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"],
+  "include": ["src", "shared"],
+  "exclude": [
+    "src/components/Geometry",
+    "src/components/UI/AssemblyTool.tsx",
+    "src/test_obb.ts"
+  ],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

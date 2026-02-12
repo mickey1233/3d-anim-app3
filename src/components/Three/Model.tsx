@@ -1,29 +1,39 @@
 /* eslint-disable react-hooks/exhaustive-deps */
 import React, { useEffect, useRef, useState } from 'react';
 import { useGLTF, Html, TransformControls } from '@react-three/drei';
-import { useThree, useFrame } from '@react-three/fiber';
+import { useThree, useFrame, useLoader } from '@react-three/fiber';
+import { USDZLoader } from 'three/examples/jsm/loaders/USDZLoader.js';
 import * as THREE from 'three';
 import { useAppStore } from '../../store/useAppStore';
+import { computeSmartOBB } from '../../utils/OBBUtils';
 
-// Inner Component that actually uses the hook
-const InnerModel = ({ url }: { url: string }) => {
+// --- Shared Interaction Logic ---
+const ModelInteraction = ({ scene }: { scene: THREE.Object3D }) => {
   const { 
       registerPart, selectPart, parts,
       pickingMode, setStartMarker, setEndMarker, startMarker, endMarker, 
-      setPickingMode
+      setPickingMode, selectedPartId,
+      selectedMarkerId, setSelectedMarkerId,
+      isTransformDragging
   } = useAppStore();
-  const { scene, gl, size, camera } = useThree();
-  const [modelScene, setModelScene] = useState<THREE.Group | null>(null);
+  const { gl, size, camera } = useThree();
+  const controls = useThree((state) => state.controls) as any;
+  
+  const [modelScene, setModelScene] = useState<THREE.Object3D | null>(null);
 
-  // Load GLTF - URL is guaranteed valid here
-  const gltf = useGLTF(url, true);
-
-  // Initial Part Registration
+  // 1. Initial Part Registration & Debugging
   useEffect(() => {
-    if (gltf.scene) {
-      gltf.scene.traverse((child) => {
+    if (scene) {
+      const box = new THREE.Box3().setFromObject(scene);
+      const sizeVec = new THREE.Vector3();
+      box.getSize(sizeVec);
+      const center = new THREE.Vector3();
+      box.getCenter(center);
+
+      scene.traverse((child) => {
         if ((child as THREE.Mesh).isMesh) {
           const mesh = child as THREE.Mesh;
+          mesh.userData.isPart = true;
           if (!parts[mesh.uuid]) {
             registerPart({
               uuid: mesh.uuid,
@@ -31,30 +41,37 @@ const InnerModel = ({ url }: { url: string }) => {
               position: [mesh.position.x, mesh.position.y, mesh.position.z],
               rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
               scale: [mesh.scale.x, mesh.scale.y, mesh.scale.z],
-              color: '#' + (mesh.material as THREE.MeshStandardMaterial).color?.getHexString() || '#ffffff'
+              color: (mesh.material as any).color ? '#' + (mesh.material as any).color.getHexString() : '#ffffff'
             });
           }
-          mesh.userData.isPart = true;
         }
       });
-      setModelScene(gltf.scene);
+      setModelScene(scene);
+      
+      // AUTO-FIT CAMERA (Keep this as it helps with large models visibility)
+      if (controls) {
+          const fitRatio = 1.2;
+          const maxSize = Math.max(sizeVec.x, sizeVec.y, sizeVec.z);
+          const fov = (camera as THREE.PerspectiveCamera).fov || 50;
+          const fitHeightDistance = maxSize / (2 * Math.atan((Math.PI * fov) / 360));
+          const fitDistance = fitRatio * fitHeightDistance;
+          
+          const direction = controls.target.clone().sub(camera.position).normalize().multiplyScalar(fitDistance);
+          
+          controls.target.copy(center);
+          camera.position.copy(center).sub(direction);
+          camera.lookAt(center);
+          controls.update();
+      }
     }
-  }, [url, gltf, registerPart]);
+  }, [scene, registerPart, camera, controls]);
 
+  // 2. Sync State -> 3D Object
   useEffect(() => {
     if (!modelScene) return;
     Object.values(parts).forEach(part => {
       const object = modelScene.getObjectByProperty('uuid', part.uuid);
       if (object) {
-        // NOTE: We do NOT reparent logic anymore to preserve R3F event bubbling.
-        // We will handle world/local conversion in the Animator.
-        
-        // However, we still need to apply initial positions?
-        // Actually the parts in store are just "registered" default positions initially?
-        // Or updated positions.
-        // If we don't reparent, we rely on the object being in its original hierarchy.
-        // We must apply the store transforms.
-        
         object.position.set(...part.position);
         object.rotation.set(...part.rotation);
         object.scale.set(...part.scale);
@@ -62,58 +79,36 @@ const InnerModel = ({ url }: { url: string }) => {
     });
   }, [parts, modelScene]);
 
-  const handlePointerDown = (e: any) => {
-      e.stopPropagation();
-      console.log(`[POINTER] Object: ${e.object.name}, Type: ${e.object.type}`);
-      (window as any).__DEBUG_R3F_OBJ__ = e.object.name || 'Unnamed Object';
-      handleClick(e);
-  };
-
+  // 3. Picking Logic
   const handleClick = (e: any) => {
-    // If in Picking Mode, handle Face Picking
+    e.stopPropagation();
+    
     if (pickingMode === 'start' || pickingMode === 'end') {
         const mesh = e.object as THREE.Mesh;
-        if (!mesh.isMesh) {
-             console.log("Picking: Ignored (Not a mesh)");
-             return;
-        }
-
+        if (!mesh.isMesh) return;
         const face = e.face;
-        if (!face) {
-             console.log("Picking: Ignored (No face data)");
-             return;
-        }
+        if (!face) return;
 
-        // --- NEW: Calculate Center of the Entire Coplanar Surface ---
-        // 1. Get Local Normal and a Point on the clicked face
+        // Face Logic (Coplanar Smart Snap)
         const localNormal = face.normal.clone().normalize();
         const posAttr = mesh.geometry.attributes.position;
         const indexAttr = mesh.geometry.index;
         
-        // Helper to get vertex at index
         const getV = (i: number) => {
             const v = new THREE.Vector3();
             v.fromBufferAttribute(posAttr, i);
             return v;
         };
         
-        // Point on plane (Vertex A of clicked face)
         const planePoint = getV(face.a);
-        
-        // 2. Identify all triangles that are coplanar
-        // Criteria: Same Normal (dot > 0.99) AND Coplanar (dist < 0.001)
-        
         const triangleCount = indexAttr ? indexAttr.count / 3 : posAttr.count / 3;
+        const coplanarBox = new THREE.Box3();
         
         const triNormal = new THREE.Vector3();
         const triA = new THREE.Vector3();
         const triB = new THREE.Vector3();
         const triC = new THREE.Vector3();
-        
-        // Bounding Box for Coplanar Vertices
-        const coplanarBox = new THREE.Box3();
-        let matchCount = 0;
-        
+
         for (let i = 0; i < triangleCount; i++) {
             let a, b, c;
             if (indexAttr) {
@@ -121,29 +116,20 @@ const InnerModel = ({ url }: { url: string }) => {
                 b = indexAttr.getY(i * 3);
                 c = indexAttr.getZ(i * 3);
             } else {
-                a = i * 3;
-                b = i * 3 + 1;
-                c = i * 3 + 2;
+                a = i * 3; b = i * 3 + 1; c = i * 3 + 2;
             }
-            
             triA.fromBufferAttribute(posAttr, a);
             triB.fromBufferAttribute(posAttr, b);
             triC.fromBufferAttribute(posAttr, c);
             
-            // Calc Normal
             triNormal.subVectors(triC, triB).cross(new THREE.Vector3().subVectors(triA, triB)).normalize();
             
-            // Check Normal match
             if (triNormal.dot(localNormal) > 0.99) {
-                // Check if Coplanar
                 const dist = new THREE.Vector3().subVectors(triA, planePoint).dot(localNormal);
-                
                 if (Math.abs(dist) < 0.001) {
-                    // Coplanar! Add vertices to Box
                     coplanarBox.expandByPoint(triA);
                     coplanarBox.expandByPoint(triB);
                     coplanarBox.expandByPoint(triC);
-                    matchCount++;
                 }
             }
         }
@@ -151,19 +137,12 @@ const InnerModel = ({ url }: { url: string }) => {
         let centerLocal = new THREE.Vector3();
         if (!coplanarBox.isEmpty()) {
              coplanarBox.getCenter(centerLocal);
-             console.log(`[SNAP] Found ${matchCount} coplanar triangles. Box Center:`, centerLocal);
         } else {
-             // Fallback
              centerLocal.copy(planePoint);
-             console.log("[SNAP] No coplanar faces found, using single point.");
         }
         
-        // Convert to World Space
         const centerWorld = centerLocal.clone().applyMatrix4(mesh.matrixWorld);
         const pointData = [centerWorld.x, centerWorld.y, centerWorld.z] as [number, number, number];
-        
-        console.log(`[SNAP] Final World Point:`, pointData);
-        // -----------------------------------------------------------
 
         if (pickingMode === 'start') {
              setStartMarker(pointData);
@@ -175,172 +154,133 @@ const InnerModel = ({ url }: { url: string }) => {
         return; 
     }
 
-    // Normal Selection
+    // Normal Part Selection
     if (e.object.userData.isPart) {
-      console.log(`Select Part: ${e.object.name}`);
       selectPart(e.object.uuid);
     } else {
-      console.log(`Deselect (Clicked ${e.object.type})`);
       selectPart(null);
     }
   };
 
-  // Debug Camera
-  useFrame(({ camera }) => {
-      // Log camera if needed
-  });
-
   const handlePointerMissed = (e: any) => {
-      console.log('--- POINTER MISSED ---', e.type);
+      if (isTransformDragging) return;
+      setSelectedMarkerId(null);
   };
 
-  const controls = useThree((state) => state.controls);
-  const { selectedPartId } = useAppStore();
-  const [selectedMarkerId, setSelectedMarkerId] = useState<'start' | 'end' | null>(null);
-
   return (
-    <group onPointerMissed={(e) => {
-        handlePointerMissed(e);
-        setSelectedMarkerId(null);
-    }}>
-
-
-        {/* Actual Model */}
+    <group onPointerMissed={handlePointerMissed}>
+        {/* The Scenes */}
         <primitive 
-            object={gltf.scene} 
-            onPointerDown={handlePointerDown}
+            object={scene} 
+            onClick={handleClick}
         />
       
         {/* Markers */}
         {startMarker && (
             <DraggableMarker 
+                id="start"
                 position={startMarker.position} 
                 color="#4ade80" 
                 label="Start"
                 onDragEnd={(pos) => setStartMarker([pos.x, pos.y, pos.z])}
-                controls={controls}
                 isSelected={selectedMarkerId === 'start'}
                 onSelect={() => setSelectedMarkerId('start')}
             />
         )}
         {endMarker && (
             <DraggableMarker 
+                id="end"
                 position={endMarker.position} 
                 color="#60a5fa" 
                 label="End"
                 onDragEnd={(pos) => setEndMarker([pos.x, pos.y, pos.z])}
-                controls={controls}
                 isSelected={selectedMarkerId === 'end'}
                 onSelect={() => setSelectedMarkerId('end')}
             />
         )}
 
         {/* Highlight Selected Part */}
-        {selectedPartId && <PartHighlighter uuid={selectedPartId} scene={gltf.scene} />}
-      
-        {/* Labels - Filtered to only show registered parts */}
-
+        {selectedPartId && <PartHighlighter uuid={selectedPartId} scene={scene} />}
     </group>
   );
 };
 
-// Component to Highlight Selected Part
-import { computeSmartOBB } from '../../utils/OBBUtils';
+// --- Models Logic ---
 
-const PartHighlighter = ({ uuid, scene }: { uuid: string, scene: THREE.Group }) => {
+const GLTFModel = ({ url }: { url: string }) => {
+    const gltf = useGLTF(url, true);
+    return <ModelInteraction scene={gltf.scene} />;
+};
+
+const USDModel = ({ url }: { url: string }) => {
+    const scene = useLoader(USDZLoader, url);
+    
+    useEffect(() => {
+        if (scene) {
+            console.log("[USDModel] Loaded Scene:", scene);
+            const box = new THREE.Box3().setFromObject(scene);
+            console.log("[USDModel] Bounding Box:", box);
+            console.log("[USDModel] Size:", box.getSize(new THREE.Vector3()));
+        }
+    }, [scene]);
+
+    return <ModelInteraction scene={scene as THREE.Object3D} />;
+};
+
+export const Model = () => {
+    const { cadUrl, cadFileName } = useAppStore();
+    if (!cadUrl) return null;
+
+    const isUSD = cadFileName?.toLowerCase().endsWith('.usd') || cadFileName?.toLowerCase().endsWith('.usdz');
+
+    return (
+        <React.Suspense fallback={null}>
+            {isUSD ? <USDModel url={cadUrl} /> : <GLTFModel url={cadUrl} />}
+        </React.Suspense>
+    );
+};
+
+// --- Helpers ---
+
+const PartHighlighter = ({ uuid, scene }: { uuid: string, scene: THREE.Object3D }) => {
    const [helper, setHelper] = useState<THREE.Object3D | null>(null);
+   const trackedMeshRef = useRef<THREE.Mesh | null>(null);
 
    useFrame(() => {
-       if (helper && scene) {
-           const obj = scene.getObjectByProperty('uuid', uuid);
-           if (obj && trackedMeshRef.current && helper.userData.basis) {
-                // Determine Final Matrix: Object World * PCA Basis
-                // Helper matrix = MeshWorld * PCAKey
-                const meshWorld = trackedMeshRef.current.matrixWorld;
-                const pcaBasis = helper.userData.basis as THREE.Matrix4;
-                
-                helper.matrix.multiplyMatrices(meshWorld, pcaBasis);
-           }
+       if (helper && scene && trackedMeshRef.current && helper.userData.basis) {
+            const meshWorld = trackedMeshRef.current.matrixWorld;
+            const pcaBasis = helper.userData.basis as THREE.Matrix4;
+            helper.matrix.multiplyMatrices(meshWorld, pcaBasis);
        }
    });
-
-   // Ref to store the tracked mesh for useFrame
-   const trackedMeshRef = useRef<THREE.Mesh | null>(null);
 
    useEffect(() => {
       const obj = scene.getObjectByProperty('uuid', uuid);
       if (obj) {
-          // Force update to ensure clean state
           obj.updateWorldMatrix(true, true);
-
-          // 1. Find all visible meshes
           const meshes: THREE.Mesh[] = [];
           obj.traverse((child) => {
-              if ((child as THREE.Mesh).isMesh && child.visible) {
-                  meshes.push(child as THREE.Mesh);
-              }
+              if ((child as THREE.Mesh).isMesh && child.visible) meshes.push(child as THREE.Mesh);
           });
 
-          // 2. Single Mesh -> Show OBB (Tight & Oriented via PCA)
           if (meshes.length === 1) {
               const mesh = meshes[0];
               trackedMeshRef.current = mesh; 
-
-              // Use Smart PCA OBB
               const { center, size, basis } = computeSmartOBB(mesh);
               
-              // Create Wireframe Box
               const geom = new THREE.BoxGeometry(size.x, size.y, size.z);
               const edges = new THREE.EdgesGeometry(geom);
               const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xffff00 }));
               
-              // Store Basis for Sync
-              line.userData.basis = basis;
-              
-              // Offset geometry to match PCA center (which is in local space relative to mesh)
-              // But we are applying "basis" check? 
-              // computeSmartOBB returns center in LOCAL SPACE (relative to mesh pivot), but already "rotated" into Basis? NO.
-              // It returns center in LOCAL SPACE.
-              // BUT if we apply `basis` as a rotation, the box is aligned to basis.
-              // We need to transform the box geometry to be centered at `center`.
-              // But `basis` rotates around (0,0,0).
-              // Let's think: 
-              // mesh.matrixWorld transforms Local -> World.
-              // basis transforms Eigen -> Local (Pure Rotation).
-              // BoxGeometry is AABB in Eigen Space.
-              // `center` is in Local Space.
-              
-              // Decompose:
-              // We want Helper transform T_h.
-              // T_h * v_box = T_mesh * v_local
-              // v_local = Basis * v_eigen + Center? No.
-              // The PCA Logic: v_local = Center + Basis * v_box_centered
-              // So T_h = T_mesh
-              // And inside T_h, we effectively render: Basis * v + Center_local_rotated?
-              
-              // EASIER WAY:
-              // Construct the Matrix4 that represents the OBB Frame in LOCAL Space.
-              // Position = center. Rotation = basis. Scale = 1.
-              // Construct the Matrix4 that represents the OBB Frame in LOCAL Space.
               const localOBBMatrix = new THREE.Matrix4();
-              
-              // Wait, basis IS the rotation matrix.
               localOBBMatrix.copy(basis);
               localOBBMatrix.setPosition(center);
               
-              // Store this LOCAL offset matrix.
               line.userData.basis = localOBBMatrix;
-
-              // Apply World Matrix (Initial)
-              // line.matrix = mesh.matrixWorld * localOBBMatrix
               line.matrixAutoUpdate = false;
               line.matrix.multiplyMatrices(mesh.matrixWorld, localOBBMatrix);
-              
-              console.log(`[PCA-OBB] Highlighting Single Mesh: ${mesh.name}`);
               setHelper(line);
-          } 
-          // 3. Multiple Meshes -> Fallback As Before
-          else {
+          } else {
               trackedMeshRef.current = null;
               const box = new THREE.Box3();
               let foundMesh = false;
@@ -362,76 +302,85 @@ const PartHighlighter = ({ uuid, scene }: { uuid: string, scene: THREE.Group }) 
    
    if (!helper) return null;
    return <primitive object={helper} />;
-}
+};
 
-const DraggableMarker = ({ position, color, label, onDragEnd, controls, isSelected, onSelect }: { 
+const DraggableMarker = ({ id, position, color, label, onDragEnd, isSelected, onSelect }: { 
+    id: string;
     position: [number, number, number], 
     color: string, 
     label: string, 
     onDragEnd: (pos: THREE.Vector3) => void,
-    controls: any,
     isSelected: boolean,
     onSelect: () => void
 }) => {
     const transformRef = useRef<any>(null);
     const meshRef = useRef<THREE.Mesh>(null);
+    const setTransformDragging = useAppStore((s) => s.setTransformDragging);
+    const onDragEndRef = useRef(onDragEnd);
+
+    useEffect(() => {
+        onDragEndRef.current = onDragEnd;
+    }, [onDragEnd]);
     
-    // Manage OrbitControls enablement during drag
     useEffect(() => {
         if (transformRef.current) {
             const controlsObj = transformRef.current;
             const callback = (event: any) => {
                 const isDragging = event.value;
-                if (controls) controls.enabled = !isDragging;
-                
-                // Sync on drag end
-                if (!isDragging && meshRef.current) {
-                    onDragEnd(meshRef.current.position);
+                setTransformDragging(id, !!isDragging);
+                if (isDragging) {
+                    const forceEnd = () => setTransformDragging(id, false);
+                    window.addEventListener('pointerup', forceEnd, { once: true });
+                    window.addEventListener('pointercancel', forceEnd, { once: true });
+                    window.addEventListener('blur', forceEnd, { once: true });
                 }
+                if (!isDragging && meshRef.current) onDragEndRef.current(meshRef.current.position);
             };
             controlsObj.addEventListener('dragging-changed', callback);
-            return () => controlsObj.removeEventListener('dragging-changed', callback);
+            return () => {
+                controlsObj.removeEventListener('dragging-changed', callback);
+                setTransformDragging(id, false);
+            };
         }
-    }, [controls, onDragEnd]);
+    }, [id, setTransformDragging]);
 
     return (
         <TransformControls 
             ref={transformRef}
             mode="translate"
+            size={1.6}
             enabled={isSelected}
-            showX={isSelected}
-            showY={isSelected}
-            showZ={isSelected}
-            // If not selected, we don't want the gizmo to intercept rays, 
-            // but we want the mesh to be clickable.
+            showX={isSelected} showY={isSelected} showZ={isSelected}
+            onPointerDown={(e) => {
+                e.stopPropagation();
+                onSelect();
+            }}
         >
             <mesh 
                 ref={meshRef} 
                 position={new THREE.Vector3(...position)}
-                onClick={(e) => {
+                onPointerDown={(e) => {
                     e.stopPropagation();
+                    // Ensure we keep receiving pointer events even if leaving the canvas.
+                    const target = e.target as any;
+                    target?.setPointerCapture?.(e.pointerId);
                     onSelect();
                 }}
             >
-                <sphereGeometry args={[0.08, 16, 16]} />
-                <meshBasicMaterial 
-                    color={isSelected ? '#ffffff' : color} 
-                    depthTest={false} 
-                    transparent 
-                    opacity={0.9} 
-                />
-                <Html position={[0, 0.15, 0]} distanceFactor={10} pointerEvents="none" center>
-                    <div style={{color: isSelected ? '#ffffff' : color}} className="text-[10px] font-bold bg-black/60 px-1.5 py-0.5 rounded border border-white/20 whitespace-nowrap backdrop-blur-sm shadow-sm transition-colors">
+                <sphereGeometry args={[0.04, 18, 18]} />
+                <meshBasicMaterial color={isSelected ? '#ffffff' : color} depthTest={false} transparent opacity={0.9} />
+                <Html position={[0.025, 0, 0]} pointerEvents="none">
+                    <div 
+                        style={{
+                            color: isSelected ? '#ffffff' : color,
+                            transform: 'translateX(4px)'
+                        }} 
+                        className="text-[10px] font-bold bg-black/60 px-1 py-0.5 rounded border border-white/20 whitespace-nowrap backdrop-blur-sm shadow-sm transition-colors"
+                    >
                         {label}
                     </div>
                 </Html>
             </mesh>
         </TransformControls>
     )
-}
-
-export const Model = () => {
-  const { cadUrl } = useAppStore();
-  if (!cadUrl) return null;
-  return <InnerModel url={cadUrl} />;
-}
+};

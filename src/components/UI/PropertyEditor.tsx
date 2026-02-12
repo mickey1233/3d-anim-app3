@@ -2,7 +2,7 @@ import React from 'react';
 import { useAppStore } from '../../store/useAppStore';
 
 export const PropertyEditor: React.FC = () => {
-  const { parts, selectedPartId, updatePart } = useAppStore();
+  const { parts, selectedPartId, updatePart, environmentPreset, setEnvironmentPreset, floorStyle, setFloorStyle } = useAppStore();
   
   const selectedPart = selectedPartId ? parts[selectedPartId] : null;
 
@@ -55,6 +55,38 @@ export const PropertyEditor: React.FC = () => {
       <InputGroup label="Position" type="position" values={selectedPart.position} />
       <InputGroup label="Rotation" type="rotation" values={selectedPart.rotation} />
       <InputGroup label="Scale" type="scale" values={selectedPart.scale} />
+      
+      <div className="h-px bg-white/10 my-4" />
+      
+      {/* Scene Settings */}
+      <h3 className="text-xs uppercase text-[var(--text-secondary)] font-bold mb-2 tracking-wider">Scene Settings</h3>
+      
+      <div className="flex flex-col gap-3">
+          <div>
+              <label className="text-[10px] text-gray-500 block mb-1">Environment (Sky)</label>
+              <select 
+                  value={environmentPreset}
+                  onChange={(e) => setEnvironmentPreset(e.target.value as any)}
+                  className="w-full bg-[rgba(0,0,0,0.3)] border border-white/10 rounded px-2 py-1 text-xs text-white"
+              >
+                  {['warehouse', 'city', 'sunset', 'studio', 'night', 'apartment', 'forest', 'dawn', 'lobby', 'park'].map(p => (
+                      <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
+                  ))}
+              </select>
+          </div>
+          <div>
+              <label className="text-[10px] text-gray-500 block mb-1">Floor Style</label>
+              <select 
+                  value={floorStyle}
+                  onChange={(e) => setFloorStyle(e.target.value as any)}
+                  className="w-full bg-[rgba(0,0,0,0.3)] border border-white/10 rounded px-2 py-1 text-xs text-white"
+              >
+                  <option value="grid">Grid</option>
+                  <option value="reflective">Reflective (Mirror)</option>
+                  <option value="none">None</option>
+              </select>
+          </div>
+      </div>
     </div>
   );
 };

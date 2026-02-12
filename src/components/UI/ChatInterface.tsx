@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Send, Bot, User } from 'lucide-react';
+import { Send, Bot, User, Eye, Loader2 } from 'lucide-react';
 import { mcpBridge } from '../../services/MCPBridge';
+import { useAppStore } from '../../store/useAppStore';
 
 interface ChatMessage {
     id: string;
@@ -12,18 +13,21 @@ interface ChatMessage {
 export const ChatInterface: React.FC = () => {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [inputValue, setInputValue] = useState('');
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
     const messagesEndRef = useRef<HTMLDivElement>(null);
+    const { images, parts } = useAppStore();
 
     useEffect(() => {
         // Register handler for server responses (AI replies)
         mcpBridge.registerHandler('chat_response', async (_cmd, args: { text: string }) => {
             addMessage('bot', args.text);
+            setIsAnalyzing(false);
             return { success: true };
         });
 
         // Initial welcome message
         if (messages.length === 0) {
-            addMessage('bot', 'Ready. Type a command like "move Part1 bottom to Part2 top".');
+            addMessage('bot', 'Ready. Type a command or click "Analyze" to inspect uploaded images.');
         }
     }, []);
 
@@ -53,6 +57,49 @@ export const ChatInterface: React.FC = () => {
         setInputValue('');
     };
 
+    const handleAnalyze = async () => {
+        if (images.length === 0) {
+            addMessage('bot', "⚠️ No images found. Please upload images in the 'Image Uploader' tab first.");
+            return;
+        }
+
+        setIsAnalyzing(true);
+        addMessage('user', `Analyze ${images.length} images...`);
+
+        try {
+            const payload = await Promise.all(images.map(async (img) => {
+                // Fetch blob data from blob: URL
+                const blob = await fetch(img.url).then(r => r.blob());
+                return new Promise<{ name: string, data: string, mime: string }>((resolve) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => {
+                        const base64 = (reader.result as string).split(',')[1];
+                        resolve({
+                            name: img.name,
+                            data: base64,
+                            mime: blob.type
+                        });
+                    };
+                    reader.readAsDataURL(blob);
+                });
+            }));
+
+            // Extract Part Details (Name + Color)
+            const partDetails = Object.values(parts).map(p => ({
+                name: p.name,
+                color: p.color || "unknown"
+            }));
+            console.log("Transmitting Part Details:", partDetails);
+
+            mcpBridge.sendImageAnalysis(payload, partDetails);
+
+        } catch (e) {
+            console.error("Analysis Failed:", e);
+            setIsAnalyzing(false);
+            addMessage('bot', "❌ Failed to prepare images for analysis.");
+        }
+    };
+
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
             handleSend();
@@ -60,10 +107,21 @@ export const ChatInterface: React.FC = () => {
     };
 
     return (
-        <div className="bg-black/40 backdrop-blur-md rounded-lg border border-white/10 flex flex-col h-[300px] text-xs">
-            <div className="p-3 border-b border-white/10 flex items-center gap-2">
-                <Bot className="w-4 h-4 text-purple-400" />
-                <span className="font-bold text-white uppercase tracking-wider">AI Assistant</span>
+        <div className="bg-black/40 backdrop-blur-md rounded-lg border border-white/10 flex flex-col h-full text-xs">
+            <div className="p-3 border-b border-white/10 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                    <Bot className="w-4 h-4 text-purple-400" />
+                    <span className="font-bold text-white uppercase tracking-wider">AI Assistant</span>
+                </div>
+                <button 
+                    onClick={handleAnalyze} 
+                    disabled={isAnalyzing}
+                    className="flex items-center gap-1.5 px-2 py-1 bg-white/10 hover:bg-white/20 rounded text-[10px] text-[var(--accent-color)] border border-white/10 transition-colors disabled:opacity-50"
+                    title="Analyze uploaded images to auto-generate commands"
+                >
+                    {isAnalyzing ? <Loader2 className="w-3 h-3 animate-spin" /> : <Eye className="w-3 h-3" />}
+                    <span>{isAnalyzing ? 'Thinking...' : 'Analyze Scene'}</span>
+                </button>
             </div>
 
             <div className="flex-1 overflow-y-auto p-3 flex flex-col gap-2 custom-scrollbar">

@@ -2,26 +2,79 @@ import React from 'react';
 import { useV2Store } from '../../store/store';
 import { ANCHOR_METHOD_OPTIONS } from '../../three/mating/anchorMethods';
 import { ScrubbableNumber } from '../controls/ScrubbableNumber';
+import { callMcpTool, extractToolErrorMessage } from '../../network/mcpToolsClient';
 
 export function MatePanel() {
-  const parts = useV2Store((s) => s.parts);
+  const partOrder = useV2Store((s) => s.parts.order);
+  const partById = useV2Store((s) => s.parts.byId);
   const setPickMode = useV2Store((s) => s.setPickFaceMode);
   const clearMatePick = useV2Store((s) => s.clearMatePick);
-  const clearMatePickFor = useV2Store((s) => s.clearMatePickFor);
   const clearMarkers = useV2Store((s) => s.clearMarkers);
   const clearPartOverride = useV2Store((s) => s.clearPartOverride);
   const mateDraft = useV2Store((s) => s.mateDraft);
   const setMateDraft = useV2Store((s) => s.setMateDraft);
-  const setSelection = useV2Store((s) => s.setSelection);
   const matePreview = useV2Store((s) => s.matePreview);
-  const requestMate = useV2Store((s) => s.requestMate);
-  const partList = parts.order.map((id) => parts.byId[id]).filter(Boolean);
+  const partList = React.useMemo(
+    () => partOrder.map((id) => partById[id]).filter(Boolean),
+    [partOrder, partById]
+  );
+  const [isApplying, setIsApplying] = React.useState(false);
+  const [applyError, setApplyError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     setPickMode('idle');
     clearMatePick();
     clearMarkers();
   }, [setPickMode, clearMatePick, clearMarkers]);
+
+  const applyMate = async () => {
+    if (!mateDraft.sourceId || !mateDraft.targetId) return;
+    if (isApplying) return;
+
+    const sourceName = partById[mateDraft.sourceId]?.name || 'source';
+    const targetName = partById[mateDraft.targetId]?.name || 'target';
+
+    setIsApplying(true);
+    setApplyError(null);
+    try {
+      const result = await callMcpTool('action.mate_execute', {
+        sourcePart: { partId: mateDraft.sourceId },
+        targetPart: { partId: mateDraft.targetId },
+        sourceFace: mateDraft.sourceFace,
+        targetFace: mateDraft.targetFace,
+        sourceMethod: mateDraft.sourceMethod,
+        targetMethod: mateDraft.targetMethod,
+        sourceOffset: mateDraft.sourceOffset,
+        targetOffset: mateDraft.targetOffset,
+        mode: mateDraft.mode,
+        mateMode: mateDraft.mode === 'both' ? 'face_insert_arc' : 'face_flush',
+        pathPreference: 'auto',
+        twist: {
+          angleDeg: mateDraft.twistAngleDeg,
+          axis: mateDraft.twistAxis,
+          axisSpace: mateDraft.twistAxisSpace,
+          constraint: 'free',
+        },
+        commit: true,
+        pushHistory: true,
+        stepLabel: `Mate ${sourceName} to ${targetName}`,
+      });
+
+      const error = extractToolErrorMessage(result);
+      if (error) {
+        setApplyError(error);
+        return;
+      }
+
+      setPickMode('idle');
+      clearMatePick();
+      clearMarkers();
+    } catch (err: any) {
+      setApplyError(String(err?.message || err || 'mate failed'));
+    } finally {
+      setIsApplying(false);
+    }
+  };
 
   const setSourceOffsetAxis = (axis: number, value: number) => {
     const next = [...mateDraft.sourceOffset] as [number, number, number];
@@ -44,9 +97,7 @@ export function MatePanel() {
         value={mateDraft.sourceId}
         onChange={(e) => {
           const next = e.target.value;
-          setMateDraft({ sourceId: next });
-          clearMatePickFor('source');
-          setSelection(next || null, 'dropdown');
+          setMateDraft({ sourceId: next }, 'source');
         }}
         data-testid="mate-source"
         className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
@@ -64,9 +115,7 @@ export function MatePanel() {
         value={mateDraft.targetId}
         onChange={(e) => {
           const next = e.target.value;
-          setMateDraft({ targetId: next });
-          clearMatePickFor('target');
-          setSelection(next || null, 'dropdown');
+          setMateDraft({ targetId: next }, 'target');
         }}
         data-testid="mate-target"
         className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
@@ -85,8 +134,7 @@ export function MatePanel() {
           <select
             value={mateDraft.sourceFace}
             onChange={(e) => {
-              setMateDraft({ sourceFace: e.target.value as any });
-              clearMatePickFor('source');
+              setMateDraft({ sourceFace: e.target.value as any }, 'source');
             }}
             data-testid="mate-source-face"
             className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs w-full"
@@ -104,8 +152,7 @@ export function MatePanel() {
           <select
             value={mateDraft.targetFace}
             onChange={(e) => {
-              setMateDraft({ targetFace: e.target.value as any });
-              clearMatePickFor('target');
+              setMateDraft({ targetFace: e.target.value as any }, 'target');
             }}
             data-testid="mate-target-face"
             className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs w-full"
@@ -126,9 +173,9 @@ export function MatePanel() {
           <select
             value={mateDraft.sourceMethod}
             onChange={(e) => {
-              setMateDraft({ sourceMethod: e.target.value as any });
-              clearMatePickFor('source');
+              setMateDraft({ sourceMethod: e.target.value as any }, 'source');
             }}
+            data-testid="mate-source-method"
             className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs w-full"
           >
             {ANCHOR_METHOD_OPTIONS.map((opt) => (
@@ -147,9 +194,9 @@ export function MatePanel() {
           <select
             value={mateDraft.targetMethod}
             onChange={(e) => {
-              setMateDraft({ targetMethod: e.target.value as any });
-              clearMatePickFor('target');
+              setMateDraft({ targetMethod: e.target.value as any }, 'target');
             }}
+            data-testid="mate-target-method"
             className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs w-full"
           >
             {ANCHOR_METHOD_OPTIONS.map((opt) => (
@@ -301,33 +348,19 @@ export function MatePanel() {
           <button
             type="button"
             className="w-full py-2 rounded bg-[var(--accent-color)] text-xs font-bold hover:brightness-110 disabled:opacity-40"
-            disabled={!mateDraft.sourceId || !mateDraft.targetId}
+            disabled={!mateDraft.sourceId || !mateDraft.targetId || isApplying}
             data-testid="mate-apply"
             onClick={() => {
-              if (!mateDraft.sourceId || !mateDraft.targetId) return;
-              requestMate({
-                sourceId: mateDraft.sourceId,
-                targetId: mateDraft.targetId,
-                sourceFace: mateDraft.sourceFace,
-                targetFace: mateDraft.targetFace,
-                mode: mateDraft.mode,
-                sourceMethod: mateDraft.sourceMethod,
-                targetMethod: mateDraft.targetMethod,
-                sourceOffset: mateDraft.sourceOffset,
-                targetOffset: mateDraft.targetOffset,
-                twistSpec:
-                  mateDraft.mode !== 'translate' && Math.abs(mateDraft.twistAngleDeg) > 1e-6
-                    ? {
-                        axisSpace: mateDraft.twistAxisSpace,
-                        axis: mateDraft.twistAxis,
-                        angleDeg: mateDraft.twistAngleDeg,
-                      }
-                    : undefined,
-              });
+              void applyMate();
             }}
           >
-            Apply Mate
+            {isApplying ? 'Applying…' : 'Apply Mate'}
           </button>
+          {applyError ? (
+            <div className="mt-2 text-[10px] text-red-300 break-words" data-testid="mate-apply-error">
+              {applyError}
+            </div>
+          ) : null}
         </div>
       </div>
     </div>

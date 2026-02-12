@@ -2,7 +2,6 @@ import React from 'react';
 import { useAppStore } from '../../store/useAppStore';
 import { Play, Plus, RotateCcw, Save, MousePointerClick, ChevronRight, ChevronDown, Trash2, Settings } from 'lucide-react';
 import { SequenceList } from './SequenceList';
-import { ChatInterface } from './ChatInterface';
 
 export const AnimationStudio: React.FC = () => {
     const [editingStepId, setEditingStepId] = React.useState<string | null>(null);
@@ -71,7 +70,7 @@ export const AnimationStudio: React.FC = () => {
     };
 
     return (
-        <div className="bg-black/40 backdrop-blur-md rounded-lg p-4 border border-white/10 flex flex-col gap-4 max-h-[calc(100vh-200px)] overflow-y-auto custom-scrollbar">
+        <div className="bg-black/40 backdrop-blur-md rounded-lg p-4 border border-white/10 flex flex-col gap-4">
             <h3 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
                 <Settings className="w-4 h-4 text-[var(--accent-color)]" />
                 Animation Studio
@@ -233,7 +232,7 @@ export const AnimationStudio: React.FC = () => {
                             className="flex-1 py-2 bg-[var(--accent-color)] text-white font-bold rounded hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2 text-xs"
                         >
                             <Play className="w-3 h-3" />
-                            RUN
+                            PLAY
                         </button>
 
                         {editingStepId ? (
@@ -281,9 +280,6 @@ export const AnimationStudio: React.FC = () => {
                  <SequenceList onSelect={handleSelectStep} />
                  
                  <div className="h-px bg-white/10 my-1" />
-
-                 {/* Chat Interface */}
-                 <ChatInterface />
 
                 <button 
                     onClick={() => useAppStore.getState().setCadUrl('/demo/Spark.glb', 'Spark.glb')}

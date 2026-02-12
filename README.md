@@ -1,24 +1,23 @@
-# 3D Animation App (Pure 3D Workflow)
+# 3D CAD Assembly & Animation Studio (v2)
 
-This project is a React-based 3D application for animating CAD parts using a geometry-based workflow. It has been refactored to remove image-based AI features and rely solely on 3D interaction.
+This repo is undergoing a **full v2 rebuild** focused on a product-grade 3D CAD assembly / SOP workflow:
+- v2 is now the default UI (legacy still available via query param).
+- v2 uses a typed WS protocol, command router (mock provider), and a new responsive single-page layout.
 
-## Features
+## Features (v2 in progress)
 
-### New Functionality (3D Animation)
-- **Face-to-Face picking**: Select Start/End points by clicking on 3D object faces (Triangle Centroid).
-- **Animation Studio**:
-  - Select "Moving Object".
-  - visual Start/End markers (Draggable).
-  - Configurable Duration and Easing.
-  - "Run Animation" to interpolate position.
-- **Scene Graph**: View and select objects from a list.
+### v2 Core (current)
+- **Single-page responsive layout** with collapsible panels (no cut-off content).
+- **Parts list** + selection + transform gizmo (orbit disabled while dragging).
+- **Face-based mating (Top/Bottom)** with lighter preview markers and faster auto-anchor resolution.
+- **SOP steps panel + timeline bar** (add/select).
+- **Command bar** (mock router; structured tool calls + trace).
+- **AI Chat router (mock provider)** with mixed Q&A + natural-language control.
+- **VLM panel** (multi-image upload/reorder/delete + mock analyze).
 
-### Retained Features (Non-negotiable)
-- **3D Selection**: Click objects in canvas or list.
-- **Property Editor**: Modify Translate/Rotate/Scale (Real-time).
-- **Bounding Box**: Visual feedback on selection.
-- **Labels**: Object names displayed in 3D.
-- **CAD Import**: Supports `.glb`, `.gltf`.
+### Legacy (v1)
+Legacy UI remains accessible for comparison:
+`http://localhost:5173/?legacy=1`
 
 ## Setup & Run
 
@@ -27,38 +26,77 @@ This project is a React-based 3D application for animating CAD parts using a geo
    npm install
    ```
 
-2. **Run Dev Server**:
+2. **Run Dev Server (frontend)**:
    ```bash
    npm run dev
    ```
-   Access at `http://localhost:5173`.
+   Access at `http://localhost:5173` (v2 default).
+
+3. **Run v2 WS Gateway (backend)**:
+   ```bash
+   npx tsx mcp-server/v2/index.ts
+   ```
+   Default port: `ws://localhost:3011`
+   Default router provider: `mock` (`ROUTER_PROVIDER=mock`).
+
+### Optional: Real LLM assist (with safe fallback)
+- Default behavior stays deterministic mock routing.
+- To enable real-model assist for chat Q&A + mate inference:
+  ```bash
+  export ROUTER_LLM_ENABLE=1
+  export ROUTER_LLM_PROVIDER=auto   # auto | ollama | gemini
+  ```
+- **Ollama mode**:
+  ```bash
+  export OLLAMA_BASE_URL=http://127.0.0.1:11434
+  export OLLAMA_MODEL=qwen2.5:7b-instruct
+  ```
+- **Gemini mode**:
+  ```bash
+  export GEMINI_API_KEY=your_key
+  export GEMINI_MODEL=gemini-1.5-flash
+  ```
+- If real provider is unavailable/timeouts, router automatically falls back to mock heuristics.
+
+## Chat Examples (v2)
+
+- Q&A:
+  - `我要如何新增step`
+  - `這個 usd model 是什麼`
+- Natural control:
+  - `mate part1 and part2`
+  - `mate part1 bottom and part2 top use object aabb method`
+  - `請幫我把 part1 跟 part2 對齊`
+  - `切到 rotate 模式`
+  - `把格線關掉`
 
 ## Testing
 
-### Manual Acceptance Test
-1. **Load Demo**: Click "Load Demo (Spark.glb)" in the sidebar.
-2. **Select Object**: Choose "Part1 (Lid)" from the "Target Object" dropdown in Animation Studio.
-3. **Pick Start**: 
-   - Click "Pick Start" button (Icon).
-   - Click on the Lid's top face in the 3D scene.
-   - Verify a **Green Marker** appears.
-4. **Pick End**:
-   - Click "Pick End" button.
-   - Click on the Base's top face.
-   - Verify a **Blue Marker** appears.
-5. **Adjust**: Drag the markers to fine-tune positions.
-6. **Run**: Click "RUN" and watch the Lid move to the Base.
+### Manual v2 Smoke
+1. Open `http://localhost:5173`
+2. Select a part in the left panel
+3. Use **Mate** panel to align Top/Bottom
+4. Add a step and verify timeline updates
+5. Upload images in VLM panel → Analyze (mock)
 
 ### Automated Smoke Test (Playwright)
-A Playwright test file is provided in `tests/smoke.spec.ts`.
+v2 smoke test: `tests/v2_smoke.spec.ts`
 
 To run (requires Playwright setup):
 ```bash
 npx playwright test
 ```
 
-## Project Structure
-- `src/components/Three`: 3D Logic (`Scene.tsx`, `Model.tsx`).
-- `src/components/UI`: UI Panels (`AnimationStudio.tsx`, `Sidebar.tsx`).
-- `src/store`: Global State (`useAppStore.ts`).
-- `public/demo`: Sample CAD files.
+## Devflow (tri-agent automation)
+
+- Automated Plan→PRD→Implementation→Testing pipeline (only pauses for Plan/PRD approval): `docs/DEVFLOW.md`
+- CLI: `npm run devflow -- "your requirement"` (or `./devflow "your requirement"`)
+- API server: `npm run devflow:server`
+- Web UI: start `npm run devflow:server` then open `http://127.0.0.1:4170/`
+
+## Project Structure (v2)
+- `src/v2/app`: AppShell / layout
+- `src/v2/three`: v2 Canvas + mating + anchors
+- `src/v2/store`: v2 state + history
+- `mcp-server/v2`: v2 WS gateway + router + VLM mock
+- `shared/schema`: zod schemas (protocol/tools/trace/vlm)

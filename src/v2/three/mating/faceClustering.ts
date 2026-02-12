@@ -13,7 +13,22 @@ export type FaceCluster = {
 const NORMAL_DOT_THRESHOLD = 0.995;
 const PLANE_EPS = 1e-3;
 
+type FaceClusterCacheEntry = {
+  posVersion: number;
+  indexVersion: number;
+  clusters: FaceCluster[];
+};
+
+const faceClusterCache = new WeakMap<THREE.BufferGeometry, FaceClusterCacheEntry>();
+
 export function clusterPlanarFaces(geometry: THREE.BufferGeometry): FaceCluster[] {
+  const posVersion = (geometry.attributes.position as any)?.version ?? 0;
+  const indexVersion = geometry.index?.version ?? -1;
+  const cached = faceClusterCache.get(geometry);
+  if (cached && cached.posVersion === posVersion && cached.indexVersion === indexVersion) {
+    return cached.clusters;
+  }
+
   const pos = geometry.attributes.position;
   const index = geometry.index;
   const clusters: FaceCluster[] = [];
@@ -69,6 +84,13 @@ export function clusterPlanarFaces(geometry: THREE.BufferGeometry): FaceCluster[
   clusters.forEach((c) => {
     if (c.area > 0) c.center.multiplyScalar(1 / c.area);
     c.tangent = computeClusterTangent(c);
+    c.points = [];
+  });
+
+  faceClusterCache.set(geometry, {
+    posVersion,
+    indexVersion,
+    clusters,
   });
 
   return clusters;

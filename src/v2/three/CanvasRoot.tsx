@@ -12,24 +12,40 @@ import { PartTransformSync } from './interaction/PartTransformSync';
 import { useV2Store } from '../store/store';
 import { GeneratedBackground } from './backgrounds/GeneratedBackground';
 import { BoxesFixture } from './fixtures/BoxesFixture';
+import { SideFixture } from './fixtures/SideFixture';
+import { LidFixture } from './fixtures/LidFixture';
+import { ShelfFixture } from './fixtures/ShelfFixture';
+import { SlotFixture } from './fixtures/SlotFixture';
 import { StepRunner } from './animation/StepRunner';
+import { SceneRegistryBridge } from './SceneRegistryBridge';
 
 export function CanvasRoot() {
   const view = useV2Store((s) => s.view);
   const cadUrl = useV2Store((s) => s.cadUrl);
-  const useFixture =
-    typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('fixture') === 'boxes';
-  const shouldUseFixture = useFixture || !cadUrl;
+  const fixtureId = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('fixture') : null;
+  const shouldUseFixture = Boolean(fixtureId) || !cadUrl;
+  const fixture = fixtureId || 'boxes';
 
   return (
     <div className="w-full h-full">
       <Canvas camera={{ position: [4, 4, 4], fov: 50 }}>
+        <SceneRegistryBridge />
         <ambientLight intensity={0.6} />
         <directionalLight position={[6, 8, 5]} intensity={1.2} castShadow />
         <GeneratedBackground />
         <OrbitCoordinator />
         {shouldUseFixture ? (
-          <BoxesFixture />
+          fixture === 'side' ? (
+            <SideFixture />
+          ) : fixture === 'lid' ? (
+            <LidFixture />
+          ) : fixture === 'shelf' ? (
+            <ShelfFixture />
+          ) : fixture === 'slot' ? (
+            <SlotFixture />
+          ) : (
+            <BoxesFixture />
+          )
         ) : (
           <React.Suspense fallback={null}>
             <ModelLoader />

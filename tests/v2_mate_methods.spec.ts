@@ -15,6 +15,7 @@ test.describe('v2 mate methods', () => {
       const state = store.getState();
       const sourceId = state.parts.order[0];
       const targetId = state.parts.order[1];
+      store.getState().setWorkspaceSection('mate');
       store.getState().setMateDraft({
         sourceId,
         targetId,

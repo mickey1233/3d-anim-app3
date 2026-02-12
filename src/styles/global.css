@@ -22,11 +22,13 @@ body {
   font-family: var(--font-family);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+  min-height: 100dvh;
 }
 
 #root {
   width: 100vw;
-  height: 100vh;
+  height: 100dvh;
+  min-height: 100dvh;
 }
 
 ::-webkit-scrollbar {

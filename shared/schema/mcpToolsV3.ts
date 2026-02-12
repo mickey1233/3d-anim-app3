@@ -385,6 +385,59 @@ const QueryListMateModesDataSchema = z.object({
   ),
 });
 
+const QueryModelInfoArgsSchema = z.object({
+  verbosity: z.enum(['summary', 'detailed']).default('summary'),
+});
+const QueryModelInfoDataSchema = z.object({
+  model: z.object({
+    cadFileName: z.string().nullable(),
+    cadUrl: z.string().nullable(),
+    partCount: z.number().int().nonnegative(),
+    partNames: z.array(NonEmptyStringSchema),
+    stepCount: z.number().int().nonnegative(),
+    currentStepId: z.string().nullable(),
+    selectionPartId: z.string().nullable(),
+    interactionMode: InteractionModeSchema,
+    sceneBoundingBoxWorld: BoundingBoxSchema.nullable(),
+  }),
+});
+
+const QueryMateSuggestionsArgsSchema = z.object({
+  sourcePart: PartRefSchema,
+  targetPart: PartRefSchema,
+  instruction: z.string().optional(),
+  preferredSourceFace: FaceIdSchema.optional(),
+  preferredTargetFace: FaceIdSchema.optional(),
+  sourceMethod: AnchorMethodSchema.default('auto'),
+  targetMethod: AnchorMethodSchema.default('auto'),
+  maxPairs: z.number().int().min(1).max(36).default(12),
+});
+const QueryMateSuggestionsDataSchema = z.object({
+  source: ResolvedPartSchema,
+  target: ResolvedPartSchema,
+  intent: z.enum(['default', 'cover', 'insert']),
+  suggestedMode: z.enum(['translate', 'twist', 'both']),
+  expectedFromCenters: z.object({
+    sourceFace: FaceIdSchema,
+    targetFace: FaceIdSchema,
+  }),
+  sourceBoxWorld: BoundingBoxSchema,
+  targetBoxWorld: BoundingBoxSchema,
+  ranking: z.array(
+    z.object({
+      sourceFace: FaceIdSchema,
+      targetFace: FaceIdSchema,
+      sourceMethod: AnchorMethodSchema,
+      targetMethod: AnchorMethodSchema,
+      score: z.number(),
+      facingScore: z.number(),
+      approachScore: z.number(),
+      distanceScore: z.number(),
+      expectedFaceScore: z.number(),
+    })
+  ),
+});
+
 const ActionTranslateArgsSchema = z
   .object({
     part: PartRefSchema,
@@ -426,6 +479,8 @@ const GeneratePlanArgsSchema = z.object({
   operation: z.enum(['translate', 'rotate', 'align', 'mate', 'twist', 'both']),
   source: FeatureRefSchema,
   target: FeatureRefSchema.optional(),
+  sourceOffset: Vec3Schema.optional(),
+  targetOffset: Vec3Schema.optional(),
   mateMode: MateModeSchema.optional(),
   pathPreference: z.enum(['auto', 'line', 'arc', 'screw']).default('auto'),
   durationMs: z.number().positive().default(900),
@@ -461,6 +516,103 @@ const GeneratePlanArgsSchema = z.object({
 });
 const GeneratePlanDataSchema = z.object({
   plan: TransformPlanSchema,
+});
+
+const ActionMateExecuteArgsSchema = z.object({
+  sourcePart: PartRefSchema,
+  targetPart: PartRefSchema,
+  sourceFace: FaceIdSchema.default('bottom'),
+  targetFace: FaceIdSchema.default('top'),
+  sourceMethod: AnchorMethodSchema.default('auto'),
+  targetMethod: AnchorMethodSchema.default('auto'),
+  sourceOffset: Vec3Schema.optional(),
+  targetOffset: Vec3Schema.optional(),
+  mode: z.enum(['translate', 'twist', 'both']).default('translate'),
+  mateMode: MateModeSchema.optional(),
+  pathPreference: z.enum(['auto', 'line', 'arc', 'screw']).default('auto'),
+  durationMs: z.number().positive().default(900),
+  sampleCount: z.number().int().min(2).max(240).default(60),
+  flip: z.boolean().default(false),
+  offset: z.number().default(0),
+  clearance: z.number().default(0),
+  twist: z
+    .object({
+      angleDeg: z.number().default(0),
+      axis: TwistAxisSchema.default('normal'),
+      axisSpace: TwistAxisSpaceSchema.default('target_face'),
+      constraint: z.enum(['free', 'normal_only', 'world_axis_only']).default('free'),
+    })
+    .default({
+      angleDeg: 0,
+      axis: 'normal',
+      axisSpace: 'target_face',
+      constraint: 'free',
+    }),
+  arc: z
+    .object({
+      height: z.number().default(0),
+      lateralBias: z.number().default(0),
+    })
+    .default({
+      height: 0,
+      lateralBias: 0,
+    }),
+  autoCorrectSelection: z.boolean().default(true),
+  autoSwapSourceTarget: z.boolean().default(true),
+  enforceNormalPolicy: z.enum(['none', 'source_out_target_in']).default('source_out_target_in'),
+  commit: z.boolean().default(true),
+  pushHistory: z.boolean().default(true),
+  stepLabel: z.string().optional(),
+});
+const ActionMateExecuteDataSchema = z.object({
+  source: ResolvedPartSchema,
+  target: ResolvedPartSchema,
+  plan: TransformPlanSchema,
+  preview: PreviewStateSchema,
+  committed: z.boolean(),
+  historyId: z.string().optional(),
+  transform: PartTransformSchema.optional(),
+});
+
+const ActionSmartMateExecuteArgsSchema = z.object({
+  sourcePart: PartRefSchema,
+  targetPart: PartRefSchema,
+  instruction: z.string().optional(),
+  sourceFace: FaceIdSchema.optional(),
+  targetFace: FaceIdSchema.optional(),
+  sourceMethod: AnchorMethodSchema.optional(),
+  targetMethod: AnchorMethodSchema.optional(),
+  sourceOffset: Vec3Schema.optional(),
+  targetOffset: Vec3Schema.optional(),
+  mode: z.enum(['translate', 'twist', 'both']).optional(),
+  mateMode: MateModeSchema.optional(),
+  pathPreference: z.enum(['auto', 'line', 'arc', 'screw']).default('auto'),
+  durationMs: z.number().positive().default(900),
+  sampleCount: z.number().int().min(2).max(240).default(60),
+  flip: z.boolean().default(false),
+  offset: z.number().default(0),
+  clearance: z.number().default(0),
+  commit: z.boolean().default(true),
+  pushHistory: z.boolean().default(true),
+  stepLabel: z.string().optional(),
+});
+const ActionSmartMateExecuteDataSchema = z.object({
+  source: ResolvedPartSchema,
+  target: ResolvedPartSchema,
+  chosen: z.object({
+    sourceFace: FaceIdSchema,
+    targetFace: FaceIdSchema,
+    sourceMethod: AnchorMethodSchema,
+    targetMethod: AnchorMethodSchema,
+    mode: z.enum(['translate', 'twist', 'both']),
+    mateMode: MateModeSchema,
+    pathPreference: z.enum(['auto', 'line', 'arc', 'screw']),
+  }),
+  plan: TransformPlanSchema,
+  preview: PreviewStateSchema,
+  committed: z.boolean(),
+  historyId: z.string().optional(),
+  transform: PartTransformSchema.optional(),
 });
 
 const PreviewTransformPlanArgsSchema = z
@@ -536,6 +688,21 @@ const ViewSetAnchorsVisibleArgsSchema = z.object({
   visible: z.boolean(),
 });
 const ViewSetAnchorsVisibleDataSchema = z.object({ view: ViewStateSchema });
+
+const ViewCaptureImageArgsSchema = z.object({
+  maxWidthPx: z.number().int().min(64).max(2048).default(1024),
+  maxHeightPx: z.number().int().min(64).max(2048).default(768),
+  format: z.enum(['png', 'jpeg']).default('png'),
+  jpegQuality: z.number().min(0.1).max(1).default(0.92),
+});
+const ViewCaptureImageDataSchema = z.object({
+  image: z.object({
+    dataUrl: NonEmptyStringSchema,
+    mimeType: NonEmptyStringSchema,
+    widthPx: z.number().int().positive(),
+    heightPx: z.number().int().positive(),
+  }),
+});
 
 const PartsSetCadUrlArgsSchema = z.object({
   url: NonEmptyStringSchema,
@@ -722,6 +889,37 @@ const RotateDragEndDataSchema = z.object({
   historyId: z.string().optional(),
 });
 
+const GizmoKindSchema = z.enum(['translate', 'rotate']);
+
+const GizmoDragBeginArgsSchema = z.object({
+  part: PartRefSchema,
+  kind: GizmoKindSchema,
+});
+
+const GizmoDragUpdateArgsSchema = z.object({
+  sessionId: NonEmptyStringSchema,
+  transformWorld: PartTransformSchema,
+});
+
+const GizmoDragEndArgsSchema = z.object({
+  sessionId: NonEmptyStringSchema,
+  commit: z.boolean().default(true),
+});
+
+const GizmoDragDataSchema = z.object({
+  sessionId: NonEmptyStringSchema,
+  part: ResolvedPartSchema,
+  kind: GizmoKindSchema,
+  preview: PreviewStateSchema,
+  transform: PartTransformSchema,
+});
+
+const GizmoDragEndDataSchema = z.object({
+  sessionId: NonEmptyStringSchema,
+  committed: z.boolean(),
+  historyId: z.string().optional(),
+});
+
 export const MCPToolSchemas = {
   'selection.get': {
     args: SelectionGetArgsSchema,
@@ -759,6 +957,14 @@ export const MCPToolSchemas = {
     args: QueryListMateModesArgsSchema,
     result: makeToolResultSchema(QueryListMateModesDataSchema),
   },
+  'query.model_info': {
+    args: QueryModelInfoArgsSchema,
+    result: makeToolResultSchema(QueryModelInfoDataSchema),
+  },
+  'query.mate_suggestions': {
+    args: QueryMateSuggestionsArgsSchema,
+    result: makeToolResultSchema(QueryMateSuggestionsDataSchema),
+  },
   'view.set_environment': {
     args: ViewSetEnvironmentArgsSchema,
     result: makeToolResultSchema(ViewSetEnvironmentDataSchema),
@@ -770,6 +976,10 @@ export const MCPToolSchemas = {
   'view.set_anchors_visible': {
     args: ViewSetAnchorsVisibleArgsSchema,
     result: makeToolResultSchema(ViewSetAnchorsVisibleDataSchema),
+  },
+  'view.capture_image': {
+    args: ViewCaptureImageArgsSchema,
+    result: makeToolResultSchema(ViewCaptureImageDataSchema),
   },
   'parts.set_cad_url': {
     args: PartsSetCadUrlArgsSchema,
@@ -798,6 +1008,14 @@ export const MCPToolSchemas = {
   'action.generate_transform_plan': {
     args: GeneratePlanArgsSchema,
     result: makeToolResultSchema(GeneratePlanDataSchema),
+  },
+  'action.mate_execute': {
+    args: ActionMateExecuteArgsSchema,
+    result: makeToolResultSchema(ActionMateExecuteDataSchema),
+  },
+  'action.smart_mate_execute': {
+    args: ActionSmartMateExecuteArgsSchema,
+    result: makeToolResultSchema(ActionSmartMateExecuteDataSchema),
   },
   'preview.transform_plan': {
     args: PreviewTransformPlanArgsSchema,
@@ -887,6 +1105,18 @@ export const MCPToolSchemas = {
     args: RotateDragEndArgsSchema,
     result: makeToolResultSchema(RotateDragEndDataSchema),
   },
+  'interaction.gizmo_drag_begin': {
+    args: GizmoDragBeginArgsSchema,
+    result: makeToolResultSchema(GizmoDragDataSchema),
+  },
+  'interaction.gizmo_drag_update': {
+    args: GizmoDragUpdateArgsSchema,
+    result: makeToolResultSchema(GizmoDragDataSchema),
+  },
+  'interaction.gizmo_drag_end': {
+    args: GizmoDragEndArgsSchema,
+    result: makeToolResultSchema(GizmoDragEndDataSchema),
+  },
 } as const;
 
 export type MCPToolRegistry = typeof MCPToolSchemas;
@@ -902,9 +1132,12 @@ export const MCPToolNameSchema = z.enum([
   'query.local_frame',
   'query.bounding_box',
   'query.list_mate_modes',
+  'query.model_info',
+  'query.mate_suggestions',
   'view.set_environment',
   'view.set_grid_visible',
   'view.set_anchors_visible',
+  'view.capture_image',
   'parts.set_cad_url',
   'action.translate',
   'action.rotate',
@@ -912,6 +1145,8 @@ export const MCPToolNameSchema = z.enum([
   'action.reset_part',
   'action.reset_all',
   'action.generate_transform_plan',
+  'action.mate_execute',
+  'action.smart_mate_execute',
   'preview.transform_plan',
   'preview.cancel',
   'preview.status',
@@ -934,6 +1169,9 @@ export const MCPToolNameSchema = z.enum([
   'interaction.rotate_drag_begin',
   'interaction.rotate_drag_update',
   'interaction.rotate_drag_end',
+  'interaction.gizmo_drag_begin',
+  'interaction.gizmo_drag_update',
+  'interaction.gizmo_drag_end',
 ]);
 
 const typedRequestSchemas = [
@@ -946,9 +1184,12 @@ const typedRequestSchemas = [
   z.object({ tool: z.literal('query.local_frame'), args: QueryLocalFrameArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('query.bounding_box'), args: QueryBoundingBoxArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('query.list_mate_modes'), args: QueryListMateModesArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('query.model_info'), args: QueryModelInfoArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('query.mate_suggestions'), args: QueryMateSuggestionsArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('view.set_environment'), args: ViewSetEnvironmentArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('view.set_grid_visible'), args: ViewSetGridVisibleArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('view.set_anchors_visible'), args: ViewSetAnchorsVisibleArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('view.capture_image'), args: ViewCaptureImageArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('parts.set_cad_url'), args: PartsSetCadUrlArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('action.translate'), args: ActionTranslateArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('action.rotate'), args: ActionRotateArgsSchema, meta: ToolMetaSchema.optional() }),
@@ -956,6 +1197,8 @@ const typedRequestSchemas = [
   z.object({ tool: z.literal('action.reset_part'), args: ActionResetPartArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('action.reset_all'), args: ActionResetAllArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('action.generate_transform_plan'), args: GeneratePlanArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('action.mate_execute'), args: ActionMateExecuteArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('action.smart_mate_execute'), args: ActionSmartMateExecuteArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('preview.transform_plan'), args: PreviewTransformPlanArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('preview.cancel'), args: PreviewCancelArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('preview.status'), args: PreviewStatusArgsSchema, meta: ToolMetaSchema.optional() }),
@@ -978,6 +1221,9 @@ const typedRequestSchemas = [
   z.object({ tool: z.literal('interaction.rotate_drag_begin'), args: RotateDragBeginArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('interaction.rotate_drag_update'), args: RotateDragUpdateArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('interaction.rotate_drag_end'), args: RotateDragEndArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('interaction.gizmo_drag_begin'), args: GizmoDragBeginArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('interaction.gizmo_drag_update'), args: GizmoDragUpdateArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('interaction.gizmo_drag_end'), args: GizmoDragEndArgsSchema, meta: ToolMetaSchema.optional() }),
 ] as const;
 
 export const MCPToolRequestSchema = z.discriminatedUnion('tool', typedRequestSchemas);

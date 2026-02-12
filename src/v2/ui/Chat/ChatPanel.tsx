@@ -15,9 +15,14 @@ export function ChatPanel() {
   const messages = useV2Store((s) => s.chat.messages);
   const appendChatMessage = useV2Store((s) => s.appendChatMessage);
   const parts = useV2Store((s) => s.parts);
+  const cadFileName = useV2Store((s) => s.cadFileName);
+  const steps = useV2Store((s) => s.steps);
+  const selectionPartId = useV2Store((s) => s.selection.partId);
+  const interactionMode = useV2Store((s) => s.interaction.mode);
+  const getPartTransform = useV2Store((s) => s.getPartTransform);
   const wsConnected = useV2Store((s) => s.connection.wsConnected);
   const wsError = useV2Store((s) => s.connection.wsError);
-  const { runLocalCommand, helpText } = useCommandRunner();
+  const { helpText } = useCommandRunner();
 
   const appendMessage = React.useCallback(
     (role: ChatMessage['role'], text: string) => {
@@ -37,26 +42,53 @@ export function ChatPanel() {
       return;
     }
 
-    const local = await runLocalCommand(text);
-    if (local !== null) {
-      appendMessage('assistant', local);
-      return;
-    }
-
     if (!wsConnected) {
       appendMessage('assistant', 'Router error: WS not connected');
       return;
     }
 
-    const ctx = { parts: parts.order.map((id) => ({ id, name: parts.byId[id]?.name || id })) };
+    const ctx = {
+      cadFileName: cadFileName || null,
+      stepCount: steps.list.length,
+      currentStepId: steps.currentStepId,
+      selectionPartId,
+      interactionMode,
+      parts: parts.order.map((id) => {
+        const transform = getPartTransform(id);
+        const scale = transform?.scale || [1, 1, 1];
+        return {
+          id,
+          name: parts.byId[id]?.name || id,
+          position: transform?.position,
+          bboxSize: [Math.abs(scale[0]), Math.abs(scale[1]), Math.abs(scale[2])] as [number, number, number],
+        };
+      }),
+    };
     try {
       const res: any = await v2Client.request('router_execute', { text, context: ctx });
-      const reply = res?.replyText || `已執行 ${res?.trace?.toolCalls?.length ?? 0} 個工具`;
+      const toolCount = res?.trace?.toolCalls?.length ?? 0;
+      const reply =
+        res?.replyText ||
+        (toolCount > 0
+          ? `已執行 ${toolCount} 個工具。`
+          : '我聽到了。你可以直接用自然句子說你想操作的功能，我會嘗試自動執行。');
       appendMessage('assistant', reply);
     } catch (e: any) {
       appendMessage('assistant', `Router error: ${e?.message || 'unknown'}`);
     }
-  }, [appendMessage, helpText, parts, runLocalCommand, value, wsConnected]);
+  }, [
+    appendMessage,
+    cadFileName,
+    getPartTransform,
+    helpText,
+    interactionMode,
+    parts,
+    selectionPartId,
+    steps.currentStepId,
+    steps.list.length,
+    value,
+    wsConnected,
+  ]);
 
   return (
     <div className="flex flex-col gap-2">

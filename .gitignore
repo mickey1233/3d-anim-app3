@@ -16,6 +16,14 @@ dist/
 .vite/
 node_modules/.vite/
 
+# Large binaries
+lib/
+bin/ollama
+ollama
+assets/
+CAD/
+public/test_model.glb
+
 # Misc
 *.tgz
 *.zip

@@ -9,6 +9,9 @@ import type {
 import { useV2Store, type FaceId as StoreFaceId, type InteractionMode, type PartTransform } from '../store/store';
 import { ENVIRONMENT_PRESETS } from '../three/backgrounds/backgrounds';
 import { v2Client } from './client';
+import { getV2Camera, getV2ObjectByPartId, getV2Renderer, getV2Scene, getV2ViewportPx } from '../three/SceneRegistry';
+import { resolveAnchor } from '../three/mating/anchorMethods';
+import { solveMateTopBottom } from '../three/mating/solver';
 
 type ToolErrorCode =
   | 'INVALID_ARGUMENT'
@@ -161,6 +164,312 @@ const IDENTITY_Q: [number, number, number, number] = [0, 0, 0, 1];
 
 const STORE_FACES: StoreFaceId[] = ['top', 'bottom', 'left', 'right', 'front', 'back'];
 
+type MateExecMode = 'translate' | 'twist' | 'both';
+type AnchorMethodId = 'auto' | 'planar_cluster' | 'geometry_aabb' | 'object_aabb' | 'extreme_vertices' | 'obb_pca' | 'picked';
+type MateIntentKind = 'default' | 'cover' | 'insert';
+
+type FaceAnchorCandidate = {
+  face: StoreFaceId;
+  method: AnchorMethodId;
+  centerWorld: THREE.Vector3;
+  normalWorld: THREE.Vector3;
+  areaHint: number;
+};
+
+type FacePairSuggestion = {
+  sourceFace: StoreFaceId;
+  targetFace: StoreFaceId;
+  sourceMethod: AnchorMethodId;
+  targetMethod: AnchorMethodId;
+  score: number;
+  ranking: Array<{
+    sourceFace: StoreFaceId;
+    targetFace: StoreFaceId;
+    sourceMethod: AnchorMethodId;
+    targetMethod: AnchorMethodId;
+    score: number;
+    facingScore: number;
+    approachScore: number;
+    distanceScore: number;
+    expectedFaceScore: number;
+  }>;
+};
+
+function parseOffsetTuple(value: unknown): [number, number, number] {
+  if (!Array.isArray(value) || value.length < 3) return [0, 0, 0];
+  const x = Number(value[0]);
+  const y = Number(value[1]);
+  const z = Number(value[2]);
+  return [Number.isFinite(x) ? x : 0, Number.isFinite(y) ? y : 0, Number.isFinite(z) ? z : 0];
+}
+
+function normalizeInstructionText(value: unknown) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function instructionIncludesAny(instruction: string, tokens: string[]) {
+  return tokens.some((token) => instruction.includes(token));
+}
+
+function inferMateIntentKind(instruction: string): MateIntentKind {
+  if (
+    instructionIncludesAny(instruction, [
+      'slot',
+      'insert',
+      'plug',
+      'socket',
+      'into',
+      '插槽',
+      '插入',
+      '塞進',
+      '塞进',
+      '卡入',
+    ])
+  ) {
+    return 'insert';
+  }
+  if (
+    instructionIncludesAny(instruction, [
+      'cover',
+      'lid',
+      'cap',
+      'close',
+      '蓋',
+      '盖',
+      '合上',
+      '蓋上',
+      '盖上',
+    ])
+  ) {
+    return 'cover';
+  }
+  return 'default';
+}
+
+function inferModeFromInstruction(instruction: string): MateExecMode | null {
+  const hasTwist = instructionIncludesAny(instruction, ['twist', 'rotate', 'spin', '旋轉', '旋转', '轉動', '转动']);
+  const hasArc = instructionIncludesAny(instruction, ['arc', 'cover', 'lid', 'cap', 'insert', 'slot', '蓋', '盖', '插入', '插槽']);
+  if (hasTwist && hasArc) return 'both';
+  if (hasArc) return 'both';
+  if (hasTwist) return 'twist';
+  return null;
+}
+
+function methodFromInstruction(instruction: string): AnchorMethodId | null {
+  const table: Array<{ method: AnchorMethodId; tokens: string[] }> = [
+    { method: 'object_aabb', tokens: ['object aabb', 'object_aabb', 'obj aabb', '对象aabb', '物件aabb'] },
+    { method: 'geometry_aabb', tokens: ['geometry aabb', 'geometry_aabb', 'geo aabb', 'mesh aabb', '幾何aabb', '几何aabb'] },
+    { method: 'planar_cluster', tokens: ['planar cluster', 'planar_cluster', '平面分群', '平面聚類', '平面聚类'] },
+    { method: 'extreme_vertices', tokens: ['extreme vertices', 'extreme_vertices', '極值', '极值'] },
+    { method: 'obb_pca', tokens: ['obb pca', 'obb', 'pca'] },
+    { method: 'picked', tokens: ['picked', 'pick face', '手動選面', '手动选面'] },
+    { method: 'auto', tokens: ['auto', '自動', '自动'] },
+  ];
+  for (const row of table) {
+    if (instructionIncludesAny(instruction, row.tokens)) return row.method;
+  }
+  return null;
+}
+
+function overlapRatio1D(
+  firstMin: number,
+  firstMax: number,
+  secondMin: number,
+  secondMax: number
+) {
+  const overlap = Math.max(0, Math.min(firstMax, secondMax) - Math.max(firstMin, secondMin));
+  const base = Math.max(1e-6, Math.min(firstMax - firstMin, secondMax - secondMin));
+  return overlap / base;
+}
+
+function inferIntentFromGeometry(sourceObject: THREE.Object3D, targetObject: THREE.Object3D): MateIntentKind | null {
+  const sourceBox = new THREE.Box3().setFromObject(sourceObject);
+  const targetBox = new THREE.Box3().setFromObject(targetObject);
+  if (sourceBox.isEmpty() || targetBox.isEmpty()) return null;
+
+  const sourceCenter = sourceBox.getCenter(new THREE.Vector3());
+  const targetCenter = targetBox.getCenter(new THREE.Vector3());
+  const sourceSize = sourceBox.getSize(new THREE.Vector3());
+  const targetSize = targetBox.getSize(new THREE.Vector3());
+  const delta = targetCenter.clone().sub(sourceCenter);
+
+  const overlapX = overlapRatio1D(sourceBox.min.x, sourceBox.max.x, targetBox.min.x, targetBox.max.x);
+  const overlapY = overlapRatio1D(sourceBox.min.y, sourceBox.max.y, targetBox.min.y, targetBox.max.y);
+  const overlapZ = overlapRatio1D(sourceBox.min.z, sourceBox.max.z, targetBox.min.z, targetBox.max.z);
+
+  const sourceFitsWithinTargetXY = sourceSize.x <= targetSize.x * 0.94 && sourceSize.z <= targetSize.z * 0.94;
+  const sourceFitsWithinTargetXZ = sourceSize.x <= targetSize.x * 0.94 && sourceSize.y <= targetSize.y * 0.94;
+  const sourceFitsWithinTargetYZ = sourceSize.y <= targetSize.y * 0.94 && sourceSize.z <= targetSize.z * 0.94;
+
+  if ((sourceFitsWithinTargetXY && overlapX > 0.45 && overlapZ > 0.45) ||
+      (sourceFitsWithinTargetXZ && overlapX > 0.45 && overlapY > 0.45) ||
+      (sourceFitsWithinTargetYZ && overlapY > 0.45 && overlapZ > 0.45)) {
+    return 'insert';
+  }
+
+  const stackedAlongY = Math.abs(delta.y) > (sourceSize.y + targetSize.y) * 0.22 && overlapX > 0.5 && overlapZ > 0.5;
+  if (stackedAlongY) return 'cover';
+
+  return null;
+}
+
+function defaultModeForIntent(intent: MateIntentKind): MateExecMode {
+  if (intent === 'cover') return 'both';
+  return 'translate';
+}
+
+function getExpectedFacePairFromCenters(sourceCenter: THREE.Vector3, targetCenter: THREE.Vector3) {
+  const delta = targetCenter.clone().sub(sourceCenter);
+  const absDelta = new THREE.Vector3(Math.abs(delta.x), Math.abs(delta.y), Math.abs(delta.z));
+  if (absDelta.x >= absDelta.y && absDelta.x >= absDelta.z) {
+    return delta.x >= 0
+      ? { sourceFace: 'right' as StoreFaceId, targetFace: 'left' as StoreFaceId }
+      : { sourceFace: 'left' as StoreFaceId, targetFace: 'right' as StoreFaceId };
+  }
+  if (absDelta.y >= absDelta.x && absDelta.y >= absDelta.z) {
+    return delta.y >= 0
+      ? { sourceFace: 'top' as StoreFaceId, targetFace: 'bottom' as StoreFaceId }
+      : { sourceFace: 'bottom' as StoreFaceId, targetFace: 'top' as StoreFaceId };
+  }
+  return delta.z >= 0
+    ? { sourceFace: 'front' as StoreFaceId, targetFace: 'back' as StoreFaceId }
+    : { sourceFace: 'back' as StoreFaceId, targetFace: 'front' as StoreFaceId };
+}
+
+function buildMethodPriority(params: {
+  explicit?: AnchorMethodId | null;
+  instructionMethod?: AnchorMethodId | null;
+  intent: MateIntentKind;
+  role: 'source' | 'target';
+}): AnchorMethodId[] {
+  const { explicit, instructionMethod, intent, role } = params;
+  if (explicit) return [explicit];
+  if (instructionMethod && instructionMethod !== 'auto') {
+    return [instructionMethod, 'planar_cluster', 'geometry_aabb', 'object_aabb'];
+  }
+
+  if (intent === 'insert') {
+    return role === 'source'
+      ? ['extreme_vertices', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'auto']
+      : ['planar_cluster', 'extreme_vertices', 'geometry_aabb', 'object_aabb', 'auto'];
+  }
+
+  if (intent === 'cover') {
+    return ['auto', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'extreme_vertices'];
+  }
+
+  return ['auto', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'extreme_vertices'];
+}
+
+function resolveFaceCandidate(
+  object: THREE.Object3D,
+  face: StoreFaceId,
+  methods: AnchorMethodId[]
+): FaceAnchorCandidate | null {
+  object.updateWorldMatrix(true, false);
+  for (const method of methods) {
+    const anchor = resolveAnchor({ object, faceId: face, method });
+    if (!anchor) continue;
+    const centerWorld = anchor.centerLocal.clone().applyMatrix4(object.matrixWorld);
+    const normalWorld = normalize(anchor.normalLocal.clone().transformDirection(object.matrixWorld), new THREE.Vector3(0, 1, 0));
+    return {
+      face,
+      method,
+      centerWorld,
+      normalWorld,
+      areaHint: Number(anchor.debug?.area || 0),
+    };
+  }
+  return null;
+}
+
+function inferBestFacePair(params: {
+  sourceObject: THREE.Object3D;
+  targetObject: THREE.Object3D;
+  sourceMethods: AnchorMethodId[];
+  targetMethods: AnchorMethodId[];
+  preferredSourceFace?: StoreFaceId | null;
+  preferredTargetFace?: StoreFaceId | null;
+  limit?: number;
+}): FacePairSuggestion | null {
+  const {
+    sourceObject,
+    targetObject,
+    sourceMethods,
+    targetMethods,
+    preferredSourceFace,
+    preferredTargetFace,
+    limit,
+  } = params;
+
+  const sourceCenter = new THREE.Box3().setFromObject(sourceObject).getCenter(new THREE.Vector3());
+  const targetCenter = new THREE.Box3().setFromObject(targetObject).getCenter(new THREE.Vector3());
+  const sourceToTarget = targetCenter.clone().sub(sourceCenter);
+  const sourceToTargetDir = normalize(sourceToTarget, new THREE.Vector3(0, 1, 0));
+  const expectedFaces = getExpectedFacePairFromCenters(sourceCenter, targetCenter);
+
+  const sourceFaces = preferredSourceFace ? [preferredSourceFace] : STORE_FACES;
+  const targetFaces = preferredTargetFace ? [preferredTargetFace] : STORE_FACES;
+
+  const sourceCandidates = sourceFaces
+    .map((face) => resolveFaceCandidate(sourceObject, face, sourceMethods))
+    .filter(Boolean) as FaceAnchorCandidate[];
+  const targetCandidates = targetFaces
+    .map((face) => resolveFaceCandidate(targetObject, face, targetMethods))
+    .filter(Boolean) as FaceAnchorCandidate[];
+
+  if (!sourceCandidates.length || !targetCandidates.length) return null;
+
+  const ranking: FacePairSuggestion['ranking'] = [];
+  for (const sourceCandidate of sourceCandidates) {
+    for (const targetCandidate of targetCandidates) {
+      const facingScore = (sourceCandidate.normalWorld.dot(targetCandidate.normalWorld.clone().negate()) + 1) * 0.5;
+      const sourceApproach = (sourceCandidate.normalWorld.dot(sourceToTargetDir) + 1) * 0.5;
+      const targetApproach = (targetCandidate.normalWorld.clone().negate().dot(sourceToTargetDir) + 1) * 0.5;
+      const approachScore = (sourceApproach + targetApproach) * 0.5;
+      const centerDistance = sourceCandidate.centerWorld.distanceTo(targetCandidate.centerWorld);
+      const distanceScore = 1 / (1 + centerDistance);
+      const expectedFaceScore =
+        (sourceCandidate.face === expectedFaces.sourceFace ? 0.5 : 0) +
+        (targetCandidate.face === expectedFaces.targetFace ? 0.5 : 0);
+      const score =
+        facingScore * 0.42 +
+        approachScore * 0.24 +
+        distanceScore * 0.20 +
+        expectedFaceScore * 0.10 +
+        Math.min((sourceCandidate.areaHint + targetCandidate.areaHint) / 200, 0.04);
+
+      ranking.push({
+        sourceFace: sourceCandidate.face,
+        targetFace: targetCandidate.face,
+        sourceMethod: sourceCandidate.method,
+        targetMethod: targetCandidate.method,
+        score,
+        facingScore,
+        approachScore,
+        distanceScore,
+        expectedFaceScore,
+      });
+    }
+  }
+
+  ranking.sort((left, right) => right.score - left.score);
+  if (!ranking.length) return null;
+  const best = ranking[0];
+  return {
+    sourceFace: best.sourceFace,
+    targetFace: best.targetFace,
+    sourceMethod: best.sourceMethod,
+    targetMethod: best.targetMethod,
+    score: best.score,
+    ranking: ranking.slice(0, Math.max(1, limit ?? 8)),
+  };
+}
+
 function vec3(v: [number, number, number]) {
   return new THREE.Vector3(v[0], v[1], v[2]);
 }
@@ -227,6 +536,143 @@ function fail(error: ToolExecutionError): ToolFailure {
     },
     warnings: [],
   };
+}
+
+function unwrapToolData(result: ToolEnvelope, defaultCode: ToolErrorCode = 'INTERNAL_ERROR') {
+  if (result.ok) return result.data as any;
+  throw new ToolExecutionError({
+    code: (result.error?.code as ToolErrorCode | undefined) ?? defaultCode,
+    message: result.error?.message ?? 'Nested tool execution failed',
+    recoverable: result.error?.recoverable ?? true,
+    detail: result.error?.detail,
+    suggestedToolCalls: result.error?.suggestedToolCalls ?? [],
+  });
+}
+
+function getObjectByPartIdOrThrow(partId: string) {
+  const object = getV2ObjectByPartId(partId);
+  if (!object) {
+    throw new ToolExecutionError({
+      code: 'SCENE_OUT_OF_SYNC',
+      message: `Part object not found in active scene: ${partId}`,
+      recoverable: true,
+      suggestedToolCalls: [
+        { tool: 'query.scene_state', args: {}, reason: 'Confirm scene parts' },
+      ],
+    });
+  }
+  object.updateWorldMatrix(true, false);
+  return object;
+}
+
+function getRendererOrThrow() {
+  const renderer = getV2Renderer();
+  const scene = getV2Scene();
+  const camera = getV2Camera();
+  const viewportPx = getV2ViewportPx();
+  if (!renderer || !scene || !camera || !viewportPx) {
+    throw new ToolExecutionError({
+      code: 'SCENE_OUT_OF_SYNC',
+      message: 'Three.js context not ready for view capture',
+      recoverable: true,
+      detail: { renderer: Boolean(renderer), scene: Boolean(scene), camera: Boolean(camera), viewportPx: Boolean(viewportPx) },
+      suggestedToolCalls: [
+        { tool: 'query.scene_state', args: {}, reason: 'Confirm scene + retry after render' },
+      ],
+    });
+  }
+  return { renderer, scene, camera, viewportPx };
+}
+
+function worldBoundingBoxFromObject(object: THREE.Object3D) {
+  const box = new THREE.Box3().setFromObject(object);
+  if (box.isEmpty()) {
+    const zero = new THREE.Vector3();
+    return {
+      min: tuple3(zero),
+      max: tuple3(zero),
+      size: tuple3(zero),
+      center: tuple3(zero),
+      space: 'world' as const,
+    };
+  }
+  const min = box.min.clone();
+  const max = box.max.clone();
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  return {
+    min: tuple3(min),
+    max: tuple3(max),
+    size: tuple3(size),
+    center: tuple3(center),
+    space: 'world' as const,
+  };
+}
+
+function frameWorldFromAnchor(object: THREE.Object3D, anchor: { centerLocal: THREE.Vector3; normalLocal: THREE.Vector3; tangentLocal?: THREE.Vector3 }) {
+  const centerWorld = anchor.centerLocal.clone().applyMatrix4(object.matrixWorld);
+  const normalWorld = normalize(anchor.normalLocal.clone().transformDirection(object.matrixWorld), new THREE.Vector3(0, 1, 0));
+  const tangentLocal =
+    anchor.tangentLocal && anchor.tangentLocal.lengthSq() > 1e-10
+      ? anchor.tangentLocal.clone().normalize()
+      : new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), anchor.normalLocal).lengthSq() > 1e-10
+      ? new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), anchor.normalLocal).normalize()
+      : new THREE.Vector3(1, 0, 0);
+  const tangentWorld = normalize(tangentLocal.clone().transformDirection(object.matrixWorld), new THREE.Vector3(1, 0, 0));
+  const bitangentWorld = normalize(new THREE.Vector3().crossVectors(normalWorld, tangentWorld), new THREE.Vector3(0, 0, 1));
+  const fixedTangentWorld = normalize(new THREE.Vector3().crossVectors(bitangentWorld, normalWorld), tangentWorld);
+  return {
+    origin: tuple3(centerWorld),
+    normal: tuple3(normalWorld),
+    tangent: tuple3(fixedTangentWorld),
+    bitangent: tuple3(bitangentWorld),
+  };
+}
+
+function clampInt(value: number, min: number, max: number) {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, n));
+}
+
+function computeCaptureSize(params: {
+  viewportWidth: number;
+  viewportHeight: number;
+  maxWidthPx: number;
+  maxHeightPx: number;
+}) {
+  const { viewportWidth, viewportHeight, maxWidthPx, maxHeightPx } = params;
+  const safeW = Math.max(1, viewportWidth);
+  const safeH = Math.max(1, viewportHeight);
+  const scale = Math.min(maxWidthPx / safeW, maxHeightPx / safeH, 1);
+  return {
+    width: clampInt(safeW * scale, 64, 2048),
+    height: clampInt(safeH * scale, 64, 2048),
+  };
+}
+
+function dataUrlFromPixels(params: { pixels: Uint8Array; width: number; height: number; mimeType: string; jpegQuality?: number }) {
+  const { pixels, width, height, mimeType, jpegQuality } = params;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('2D canvas not available');
+
+  const imageData = ctx.createImageData(width, height);
+  const rowStride = width * 4;
+  // Flip Y: WebGL readPixels origin is bottom-left.
+  for (let y = 0; y < height; y++) {
+    const srcRow = (height - 1 - y) * rowStride;
+    const dstRow = y * rowStride;
+    imageData.data.set(pixels.subarray(srcRow, srcRow + rowStride), dstRow);
+  }
+  ctx.putImageData(imageData, 0, 0);
+
+  if (mimeType === 'image/jpeg') {
+    return canvas.toDataURL(mimeType, jpegQuality ?? 0.92);
+  }
+  return canvas.toDataURL(mimeType);
 }
 
 function resolvePart(part: PartRef): ResolvedPart {
@@ -400,7 +846,7 @@ function resolveFeature(feature: FeatureRef): ResolvedFeature {
   if (feature.kind === 'face') {
     const part = resolvePart(feature.part);
     const methodRequested = feature.method ?? 'auto';
-    const methodUsed = methodRequested === 'auto' ? 'obb_pca' : methodRequested;
+    const methodUsed = methodRequested === 'auto' ? 'geometry_aabb' : methodRequested;
     return {
       kind: 'face',
       part,
@@ -438,8 +884,44 @@ function resolveFeature(feature: FeatureRef): ResolvedFeature {
 
 function featureFrame(feature: ResolvedFeature): Frame {
   if (feature.kind === 'face') {
+    const face = feature.face;
+    if (face === 'picked' || face === 'center') {
+      const transform = getPartTransformOrThrow(feature.part.partId);
+      return {
+        origin: transform.position,
+        normal: [0, 1, 0],
+        tangent: [1, 0, 0],
+        bitangent: [0, 0, 1],
+      };
+    }
+
+    const obj = getV2ObjectByPartId(feature.part.partId);
+    if (obj) {
+      const anchor = resolveAnchor({
+        object: obj,
+        faceId: face,
+        method: feature.methodUsed as any,
+      });
+      if (anchor) {
+        const originWorld = anchor.centerLocal.clone().applyMatrix4(obj.matrixWorld);
+        const normalWorld = normalize(anchor.normalLocal.clone().transformDirection(obj.matrixWorld), new THREE.Vector3(0, 1, 0));
+        const tangentWorldRaw = anchor.tangentLocal.clone().transformDirection(obj.matrixWorld);
+        const tangentWorld = normalize(
+          tangentWorldRaw.clone().sub(normalWorld.clone().multiplyScalar(tangentWorldRaw.dot(normalWorld))),
+          new THREE.Vector3(1, 0, 0)
+        );
+        const bitangentWorld = normalize(normalWorld.clone().cross(tangentWorld), new THREE.Vector3(0, 0, 1));
+        return {
+          origin: tuple3(originWorld),
+          normal: tuple3(normalWorld),
+          tangent: tuple3(tangentWorld),
+          bitangent: tuple3(bitangentWorld),
+        };
+      }
+    }
+
     const transform = getPartTransformOrThrow(feature.part.partId);
-    return computeFaceFrame(transform, feature.face);
+    return computeFaceFrame(transform, face);
   }
 
   if (feature.kind === 'part') {
@@ -868,26 +1350,38 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
 
   if (tool === 'query.bounding_box') {
     const part = resolvePart((args as any).part);
-    const transform = getPartTransformOrThrow(part.partId);
-    return ok({ part, boundingBox: buildBoundingBox(transform) }, { mutating: false });
+    const object = getObjectByPartIdOrThrow(part.partId);
+    return ok({ part, boundingBox: worldBoundingBoxFromObject(object) }, { mutating: false });
   }
 
   if (tool === 'query.face_info') {
     const part = resolvePart((args as any).part);
     const face = (args as any).face;
-    const transform = getPartTransformOrThrow(part.partId);
-    const frame = computeFaceFrame(transform, face);
     const methodRequested = (args as any).method ?? 'auto';
-    const methodUsed = methodRequested === 'auto' ? 'obb_pca' : methodRequested;
+    const object = getObjectByPartIdOrThrow(part.partId);
+    const primary = resolveAnchor({ object, faceId: face, method: methodRequested });
+    const fallback =
+      primary ??
+      (methodRequested === 'geometry_aabb' ? null : resolveAnchor({ object, faceId: face, method: 'geometry_aabb' })) ??
+      (methodRequested === 'object_aabb' ? null : resolveAnchor({ object, faceId: face, method: 'object_aabb' }));
+    const anchor = primary ?? fallback;
+    const methodUsed =
+      anchor?.method ?? (methodRequested === 'auto' ? 'geometry_aabb' : methodRequested);
+    const frameWorld = anchor
+      ? frameWorldFromAnchor(object, anchor)
+      : frameWorldFromAnchor(object, {
+          centerLocal: new THREE.Vector3(),
+          normalLocal: new THREE.Vector3(0, 1, 0),
+        });
     return ok(
       {
         part,
         face,
-        frameWorld: frame,
+        frameWorld,
         normalOutward: true,
         methodRequested,
         methodUsed,
-        fallbackUsed: false,
+        fallbackUsed: Boolean(anchor?.fallbackUsed) || Boolean(primary === null && fallback !== null),
       },
       { mutating: false }
     );
@@ -900,6 +1394,157 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
 
   if (tool === 'query.list_mate_modes') {
     return ok({ modes: toolListMateModes() }, { mutating: false });
+  }
+
+  if (tool === 'query.model_info') {
+    const store = currentStore();
+    const verbosity = (args as any).verbosity ?? 'summary';
+    const partIds = store.parts.order;
+    const partNames = partIds.map((id) => store.parts.byId[id]?.name || id);
+
+    let sceneMin: THREE.Vector3 | null = null;
+    let sceneMax: THREE.Vector3 | null = null;
+
+    partIds.forEach((partId) => {
+      const transform = store.getPartTransform(partId);
+      if (!transform) return;
+      const bbox = buildBoundingBox(transform);
+      const min = vec3(bbox.min);
+      const max = vec3(bbox.max);
+      if (!sceneMin || !sceneMax) {
+        sceneMin = min;
+        sceneMax = max;
+        return;
+      }
+      sceneMin.min(min);
+      sceneMax.max(max);
+    });
+
+    let sceneBoundingBoxWorld: {
+      min: [number, number, number];
+      max: [number, number, number];
+      size: [number, number, number];
+      center: [number, number, number];
+      space: 'world';
+    } | null = null;
+    if (sceneMin !== null && sceneMax !== null) {
+      const minVec = sceneMin as THREE.Vector3;
+      const maxVec = sceneMax as THREE.Vector3;
+      sceneBoundingBoxWorld = {
+        min: tuple3(minVec),
+        max: tuple3(maxVec),
+        size: tuple3(maxVec.clone().sub(minVec)),
+        center: tuple3(minVec.clone().add(maxVec).multiplyScalar(0.5)),
+        space: 'world',
+      };
+    }
+
+    return ok(
+      {
+        model: {
+          cadFileName: store.cadFileName || null,
+          cadUrl: store.cadUrl || null,
+          partCount: partIds.length,
+          partNames: verbosity === 'detailed' ? partNames : partNames.slice(0, 20),
+          stepCount: store.steps.list.length,
+          currentStepId: store.steps.currentStepId,
+          selectionPartId: store.selection.partId,
+          interactionMode: store.interaction.mode,
+          sceneBoundingBoxWorld,
+        },
+      },
+      { mutating: false }
+    );
+  }
+
+  if (tool === 'query.mate_suggestions') {
+    const input = args as any;
+    const source = resolvePart(input.sourcePart);
+    const target = resolvePart(input.targetPart);
+    const instruction = normalizeInstructionText(input.instruction);
+    const instructionIntent = inferMateIntentKind(instruction);
+
+    const sourceObject = getObjectByPartIdOrThrow(source.partId);
+    const targetObject = getObjectByPartIdOrThrow(target.partId);
+
+    const sourceBoxWorld = worldBoundingBoxFromObject(sourceObject);
+    const targetBoxWorld = worldBoundingBoxFromObject(targetObject);
+
+    const sourceCenter = vec3(sourceBoxWorld.center);
+    const targetCenter = vec3(targetBoxWorld.center);
+    const expectedFromCenters = getExpectedFacePairFromCenters(sourceCenter, targetCenter);
+
+    const geometryIntent = inferIntentFromGeometry(sourceObject, targetObject);
+    const intentKind = instructionIntent === 'default' ? geometryIntent ?? 'default' : instructionIntent;
+    const suggestedMode =
+      inferModeFromInstruction(instruction) ?? defaultModeForIntent(intentKind);
+
+    const instructionMethod = methodFromInstruction(instruction);
+    const explicitSourceMethod =
+      typeof input.sourceMethod === 'string' && input.sourceMethod !== 'auto'
+        ? (input.sourceMethod as AnchorMethodId)
+        : null;
+    const explicitTargetMethod =
+      typeof input.targetMethod === 'string' && input.targetMethod !== 'auto'
+        ? (input.targetMethod as AnchorMethodId)
+        : null;
+
+    const sourceMethods = buildMethodPriority({
+      explicit: explicitSourceMethod,
+      instructionMethod,
+      intent: intentKind,
+      role: 'source',
+    });
+    const targetMethods = buildMethodPriority({
+      explicit: explicitTargetMethod,
+      instructionMethod,
+      intent: intentKind,
+      role: 'target',
+    });
+
+    const preferredSourceFace =
+      STORE_FACES.includes(input.preferredSourceFace as StoreFaceId)
+        ? (input.preferredSourceFace as StoreFaceId)
+        : null;
+    const preferredTargetFace =
+      STORE_FACES.includes(input.preferredTargetFace as StoreFaceId)
+        ? (input.preferredTargetFace as StoreFaceId)
+        : null;
+    const maxPairs = Number(input.maxPairs ?? 12);
+
+    const suggestion = inferBestFacePair({
+      sourceObject,
+      targetObject,
+      sourceMethods,
+      targetMethods,
+      preferredSourceFace,
+      preferredTargetFace,
+      limit: Number.isFinite(maxPairs) ? Math.max(1, Math.min(36, Math.floor(maxPairs))) : 12,
+    });
+
+    return ok(
+      {
+        source,
+        target,
+        intent: intentKind,
+        suggestedMode,
+        expectedFromCenters,
+        sourceBoxWorld,
+        targetBoxWorld,
+        ranking: suggestion?.ranking ?? [],
+      },
+      {
+        mutating: false,
+        debug: {
+          notes: [
+            'Mate suggestions computed from live scene geometry',
+            `intent=${intentKind}`,
+            `geometry_intent=${geometryIntent ?? 'none'}`,
+            `instruction_method=${instructionMethod ?? 'none'}`,
+          ],
+        },
+      }
+    );
   }
 
   if (tool === 'view.set_environment') {
@@ -933,6 +1578,87 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const changed = store.view.showAnchors !== visible;
     store.setAnchorsVisible(visible);
     return ok({ view: viewSnapshot() }, { mutating: changed });
+  }
+
+  if (tool === 'view.capture_image') {
+    const input = args as any;
+    const format = String(input.format || 'png').toLowerCase();
+    const mimeType = format === 'jpeg' ? 'image/jpeg' : 'image/png';
+    const jpegQuality = Number(input.jpegQuality ?? 0.92);
+
+    const { renderer, scene, camera, viewportPx } = getRendererOrThrow();
+    const maxWidthPx = clampInt(input.maxWidthPx ?? 1024, 64, 2048);
+    const maxHeightPx = clampInt(input.maxHeightPx ?? 768, 64, 2048);
+    const size = computeCaptureSize({
+      viewportWidth: viewportPx.width,
+      viewportHeight: viewportPx.height,
+      maxWidthPx,
+      maxHeightPx,
+    });
+
+    const prevTarget = renderer.getRenderTarget();
+    const prevAspect =
+      (camera as any).isPerspectiveCamera ? (camera as THREE.PerspectiveCamera).aspect : null;
+
+    const renderTarget = new THREE.WebGLRenderTarget(size.width, size.height, {
+      depthBuffer: true,
+      stencilBuffer: false,
+    });
+    const pixels = new Uint8Array(size.width * size.height * 4);
+
+    try {
+      if ((camera as any).isPerspectiveCamera) {
+        const pcam = camera as THREE.PerspectiveCamera;
+        pcam.aspect = size.width / Math.max(1, size.height);
+        pcam.updateProjectionMatrix();
+      }
+      renderer.setRenderTarget(renderTarget);
+      renderer.render(scene, camera);
+      renderer.readRenderTargetPixels(renderTarget, 0, 0, size.width, size.height, pixels);
+    } catch (error: any) {
+      throw new ToolExecutionError({
+        code: 'UNSUPPORTED_OPERATION',
+        message: `View capture failed: ${error?.message || 'unknown'}`,
+        recoverable: true,
+      });
+    } finally {
+      renderer.setRenderTarget(prevTarget);
+      if (prevAspect !== null && (camera as any).isPerspectiveCamera) {
+        const pcam = camera as THREE.PerspectiveCamera;
+        pcam.aspect = prevAspect;
+        pcam.updateProjectionMatrix();
+      }
+      renderTarget.dispose();
+    }
+
+    let dataUrl = '';
+    try {
+      dataUrl = dataUrlFromPixels({
+        pixels,
+        width: size.width,
+        height: size.height,
+        mimeType,
+        jpegQuality,
+      });
+    } catch (error: any) {
+      throw new ToolExecutionError({
+        code: 'UNSUPPORTED_OPERATION',
+        message: `View capture encode failed: ${error?.message || 'unknown'}`,
+        recoverable: true,
+      });
+    }
+
+    return ok(
+      {
+        image: {
+          dataUrl,
+          mimeType,
+          widthPx: size.width,
+          heightPx: size.height,
+        },
+      },
+      { mutating: false }
+    );
   }
 
   if (tool === 'parts.set_cad_url') {
@@ -1233,6 +1959,169 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       const sourceFrame = featureFrame(source);
       const targetFrame = featureFrame(target);
 
+      if (operation === 'mate') {
+        const sourceObj = getV2ObjectByPartId(sourcePartId);
+        const targetObj = getV2ObjectByPartId(target.part.partId);
+        const sourceFaceId = source.kind === 'face' && STORE_FACES.includes(source.face as any) ? (source.face as StoreFaceId) : null;
+        const targetFaceId = target.kind === 'face' && STORE_FACES.includes(target.face as any) ? (target.face as StoreFaceId) : null;
+        const sourceMethod = source.kind === 'face' ? source.methodRequested ?? source.methodUsed ?? 'auto' : 'auto';
+        const targetMethod = target.kind === 'face' ? target.methodRequested ?? target.methodUsed ?? 'auto' : 'auto';
+        const sourceOffset = parseOffsetTuple(input.sourceOffset);
+        const targetOffset = parseOffsetTuple(input.targetOffset);
+
+        if (sourceObj && targetObj && sourceFaceId && targetFaceId) {
+          sourceObj.updateWorldMatrix(true, false);
+          targetObj.updateWorldMatrix(true, false);
+
+          const solvedTranslate = solveMateTopBottom(
+            sourceObj,
+            targetObj,
+            sourceFaceId,
+            targetFaceId,
+            'translate',
+            undefined,
+            sourceMethod,
+            targetMethod,
+            undefined,
+            undefined,
+            sourceOffset,
+            targetOffset
+          );
+
+          if (solvedTranslate) {
+            const sourceWorldPos = new THREE.Vector3();
+            sourceObj.getWorldPosition(sourceWorldPos);
+            const nextWorldPos = sourceWorldPos.clone().add(solvedTranslate.translation);
+
+            const nextLocalPos = sourceObj.parent
+              ? nextWorldPos.clone().applyMatrix4(new THREE.Matrix4().copy(sourceObj.parent.matrixWorld).invert())
+              : nextWorldPos;
+
+            endTransform = {
+              position: tuple3(nextLocalPos),
+              quaternion: [...sourceTransform.quaternion],
+              scale: [...sourceTransform.scale],
+            };
+
+            pathType = input.pathPreference === 'arc' ? 'arc' : input.pathPreference === 'screw' ? 'screw' : 'line';
+            debugNotes.push('Mate translate solved by shared solver path');
+
+            const durationMs = Number(input.durationMs ?? 900);
+            const sampleCount = Number(input.sampleCount ?? 60);
+            const steps = samplePath({
+              start: sourceTransform,
+              end: endTransform,
+              durationMs,
+              sampleCount,
+              pathType: pathType === 'screw' ? 'line' : pathType,
+              arcHeight: Number(input.arc?.height ?? 0),
+              arcLiftAxis: targetFrame.bitangent,
+            });
+
+            const planId = crypto.randomUUID();
+            const plan = {
+              planId,
+              operation,
+              mode: input.mateMode,
+              source,
+              ...(target ? { target } : {}),
+              pathType,
+              durationMs,
+              steps,
+              constraints: {
+                offset: Number(input.offset ?? 0),
+                clearance: Number(input.clearance ?? 0),
+                flip: Boolean(input.flip),
+                twistAngleDeg: 0,
+                limitAxes: [],
+                enforceCollisionCheck: false,
+              },
+              autoFixes: [],
+              debug: {
+                sourceFrame,
+                targetFrame,
+                sourceFaceId,
+                targetFaceId,
+                sourceMethod,
+                targetMethod,
+                sourceOffset,
+                targetOffset,
+                sourceFaceCenterWorld: tuple3(solvedTranslate.sourceFaceCenter),
+                targetFaceCenterWorld: tuple3(solvedTranslate.targetFaceCenter),
+                translationWorld: tuple3(solvedTranslate.translation),
+                translationLocal: tuple3(vec3(endTransform.position).sub(vec3(sourceTransform.position))),
+                pathType,
+                notes: debugNotes,
+              },
+            };
+
+            runtimeState.plans.set(planId, plan);
+            return ok({ plan }, { mutating: true, debug: plan.debug });
+          }
+        }
+
+        debugNotes.push('Mate translate fallback: shared solver unavailable, using frame delta');
+        const targetNormal = normalize(vec3(targetFrame.normal), new THREE.Vector3(0, 1, 0));
+        const targetPoint = vec3(targetFrame.origin).clone().add(targetNormal.clone().multiplyScalar(Number(input.offset ?? 0) + Number(input.clearance ?? 0)));
+        const delta = targetPoint.clone().sub(vec3(sourceFrame.origin));
+        endTransform = {
+          position: tuple3(vec3(sourceTransform.position).add(delta)),
+          quaternion: [...sourceTransform.quaternion],
+          scale: [...sourceTransform.scale],
+        };
+        pathType = input.pathPreference === 'arc' ? 'arc' : input.pathPreference === 'screw' ? 'screw' : 'line';
+
+        const durationMs = Number(input.durationMs ?? 900);
+        const sampleCount = Number(input.sampleCount ?? 60);
+        const steps = samplePath({
+          start: sourceTransform,
+          end: endTransform,
+          durationMs,
+          sampleCount,
+          pathType: pathType === 'screw' ? 'line' : pathType,
+          arcHeight: Number(input.arc?.height ?? 0),
+          arcLiftAxis: targetFrame.bitangent,
+        });
+
+        const planId = crypto.randomUUID();
+        const plan = {
+          planId,
+          operation,
+          mode: input.mateMode,
+          source,
+          ...(target ? { target } : {}),
+          pathType,
+          durationMs,
+          steps,
+          constraints: {
+            offset: Number(input.offset ?? 0),
+            clearance: Number(input.clearance ?? 0),
+            flip: Boolean(input.flip),
+            twistAngleDeg: 0,
+            limitAxes: [],
+            enforceCollisionCheck: false,
+          },
+          autoFixes: [],
+          debug: {
+            sourceFrame,
+            targetFrame,
+            sourceFaceId,
+            targetFaceId,
+            sourceMethod,
+            targetMethod,
+            sourceOffset,
+            targetOffset,
+            translationWorld: tuple3(delta),
+            translationLocal: tuple3(vec3(endTransform.position).sub(vec3(sourceTransform.position))),
+            pathType,
+            notes: debugNotes,
+          },
+        };
+
+        runtimeState.plans.set(planId, plan);
+        return ok({ plan }, { mutating: true, debug: plan.debug });
+      }
+
       const twistInput = input.twist ?? { angleDeg: 0, axis: 'normal', axisSpace: 'target_face' };
       const applyTwist = operation === 'both' || operation === 'twist' || Math.abs(Number(twistInput.angleDeg || 0)) > 1e-6;
 
@@ -1353,6 +2242,269 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
 
     runtimeState.plans.set(planId, plan);
     return ok({ plan }, { mutating: true, debug: plan.debug });
+  }
+
+  if (tool === 'action.mate_execute') {
+    const input = args as any;
+    const source = resolvePart(input.sourcePart);
+    const target = resolvePart(input.targetPart);
+
+    const mode = (input.mode ?? 'translate') as 'translate' | 'twist' | 'both';
+    const operation = mode === 'both' ? 'both' : mode === 'twist' ? 'twist' : 'mate';
+    const mateMode = input.mateMode ?? (mode === 'both' ? 'face_insert_arc' : 'face_flush');
+    const pathPreference =
+      input.pathPreference ?? (mode === 'both' ? 'arc' : mode === 'twist' ? 'line' : 'line');
+
+    const twist =
+      input.twist ??
+      (mode === 'twist'
+        ? {
+            angleDeg: 45,
+            axis: 'normal',
+            axisSpace: 'target_face',
+            constraint: 'free',
+          }
+        : {
+            angleDeg: 0,
+            axis: 'normal',
+            axisSpace: 'target_face',
+            constraint: 'free',
+          });
+
+    const generated = await runTool('action.generate_transform_plan' as MCPToolName, {
+      operation,
+      source: {
+        kind: 'face',
+        part: { partId: source.partId },
+        face: input.sourceFace ?? 'bottom',
+        method: input.sourceMethod ?? 'auto',
+      },
+      target: {
+        kind: 'face',
+        part: { partId: target.partId },
+        face: input.targetFace ?? 'top',
+        method: input.targetMethod ?? 'auto',
+      },
+      sourceOffset: input.sourceOffset,
+      targetOffset: input.targetOffset,
+      mateMode,
+      pathPreference,
+      durationMs: input.durationMs ?? 900,
+      sampleCount: input.sampleCount ?? 60,
+      flip: Boolean(input.flip),
+      offset: Number(input.offset ?? 0),
+      clearance: Number(input.clearance ?? (mode === 'both' ? 0.01 : 0)),
+      twist,
+      arc: input.arc ?? { height: mode === 'both' ? 0.08 : 0, lateralBias: 0 },
+      autoCorrectSelection: input.autoCorrectSelection !== false,
+      autoSwapSourceTarget: input.autoSwapSourceTarget !== false,
+      enforceNormalPolicy: input.enforceNormalPolicy ?? 'source_out_target_in',
+    } as any);
+    const generatedData = unwrapToolData(generated, 'SOLVER_FAILED');
+    const plan = generatedData.plan;
+
+    const previewed = await runTool('preview.transform_plan' as MCPToolName, {
+      planId: plan.planId,
+      replaceCurrent: true,
+      scrubT: 1,
+    } as any);
+    const previewData = unwrapToolData(previewed, 'PREVIEW_NOT_FOUND');
+    const preview = previewData.preview;
+
+    if (input.commit === false) {
+      return ok(
+        {
+          source,
+          target,
+          plan,
+          preview,
+          committed: false,
+        },
+        { mutating: false, debug: plan.debug }
+      );
+    }
+
+    const committed = await runTool('action.commit_preview' as MCPToolName, {
+      previewId: preview.previewId,
+      pushHistory: input.pushHistory !== false,
+      stepLabel:
+        input.stepLabel ?? `Mate ${source.partName} to ${target.partName}`,
+    } as any);
+    const commitData = unwrapToolData(committed, 'PREVIEW_NOT_FOUND');
+
+    return ok(
+      {
+        source,
+        target,
+        plan,
+        preview,
+        committed: true,
+        historyId: commitData.historyId,
+        transform: commitData.transform,
+      },
+      { mutating: false, debug: plan.debug }
+    );
+  }
+
+  if (tool === 'action.smart_mate_execute') {
+    const input = args as any;
+    const source = resolvePart(input.sourcePart);
+    const target = resolvePart(input.targetPart);
+    const instruction = normalizeInstructionText(input.instruction);
+    const instructionIntent = inferMateIntentKind(instruction);
+
+    const explicitSourceFace =
+      STORE_FACES.includes(input.sourceFace as StoreFaceId) ? (input.sourceFace as StoreFaceId) : null;
+    const explicitTargetFace =
+      STORE_FACES.includes(input.targetFace as StoreFaceId) ? (input.targetFace as StoreFaceId) : null;
+
+    const explicitSourceMethod = (input.sourceMethod as AnchorMethodId | undefined) ?? null;
+    const explicitTargetMethod = (input.targetMethod as AnchorMethodId | undefined) ?? null;
+    const instructionMethod = methodFromInstruction(instruction);
+
+    const sourceObject = getV2ObjectByPartId(source.partId);
+    const targetObject = getV2ObjectByPartId(target.partId);
+    const geometryIntent =
+      sourceObject && targetObject ? inferIntentFromGeometry(sourceObject, targetObject) : null;
+    const intentKind = instructionIntent === 'default' ? geometryIntent ?? 'default' : instructionIntent;
+
+    const inferredMode = inferModeFromInstruction(instruction);
+    const mode =
+      (input.mode as MateExecMode | undefined) ??
+      inferredMode ??
+      defaultModeForIntent(intentKind);
+    const operation = mode === 'both' ? 'both' : mode === 'twist' ? 'twist' : 'mate';
+    const mateMode = input.mateMode ?? (mode === 'both' ? 'face_insert_arc' : 'face_flush');
+    const pathPreferenceRaw = (input.pathPreference as 'auto' | 'line' | 'arc' | 'screw' | undefined) ?? 'auto';
+    const pathPreference =
+      pathPreferenceRaw === 'auto' ? (mode === 'both' ? 'arc' : 'line') : pathPreferenceRaw;
+
+    const sourceMethodPriority = buildMethodPriority({
+      explicit: explicitSourceMethod,
+      instructionMethod,
+      intent: intentKind,
+      role: 'source',
+    });
+    const targetMethodPriority = buildMethodPriority({
+      explicit: explicitTargetMethod,
+      instructionMethod,
+      intent: intentKind,
+      role: 'target',
+    });
+
+    const suggestedFacePair =
+      sourceObject && targetObject
+        ? inferBestFacePair({
+            sourceObject,
+            targetObject,
+            sourceMethods: sourceMethodPriority,
+            targetMethods: targetMethodPriority,
+            preferredSourceFace: explicitSourceFace,
+            preferredTargetFace: explicitTargetFace,
+          })
+        : null;
+
+    const chosenSourceFace =
+      explicitSourceFace ?? suggestedFacePair?.sourceFace ?? getExpectedFacePairFromCenters(vec3(getPartTransformOrThrow(source.partId).position), vec3(getPartTransformOrThrow(target.partId).position)).sourceFace;
+    const chosenTargetFace =
+      explicitTargetFace ?? suggestedFacePair?.targetFace ?? getExpectedFacePairFromCenters(vec3(getPartTransformOrThrow(source.partId).position), vec3(getPartTransformOrThrow(target.partId).position)).targetFace;
+    const chosenSourceMethod = explicitSourceMethod ?? suggestedFacePair?.sourceMethod ?? sourceMethodPriority[0] ?? 'planar_cluster';
+    const chosenTargetMethod = explicitTargetMethod ?? suggestedFacePair?.targetMethod ?? targetMethodPriority[0] ?? 'planar_cluster';
+
+    const fallbackClearance = mode === 'both' ? 0.01 : 0;
+    const requestedClearance = Number(input.clearance ?? 0);
+    const clearance = requestedClearance > 0 ? requestedClearance : fallbackClearance;
+
+    const twist =
+      input.twist ??
+      (mode === 'twist'
+        ? {
+            angleDeg: 45,
+            axis: 'normal',
+            axisSpace: 'target_face',
+            constraint: 'free',
+          }
+        : {
+            angleDeg: 0,
+            axis: 'normal',
+            axisSpace: 'target_face',
+            constraint: 'free',
+          });
+
+    const executed = await runTool('action.mate_execute' as MCPToolName, {
+      sourcePart: { partId: source.partId },
+      targetPart: { partId: target.partId },
+      sourceFace: chosenSourceFace,
+      targetFace: chosenTargetFace,
+      sourceMethod: chosenSourceMethod,
+      targetMethod: chosenTargetMethod,
+      sourceOffset: input.sourceOffset,
+      targetOffset: input.targetOffset,
+      mode,
+      mateMode,
+      pathPreference,
+      durationMs: input.durationMs ?? 900,
+      sampleCount: input.sampleCount ?? 60,
+      flip: Boolean(input.flip),
+      offset: Number(input.offset ?? 0),
+      clearance,
+      twist,
+      arc: input.arc ?? { height: mode === 'both' ? 0.08 : 0, lateralBias: 0 },
+      autoCorrectSelection: true,
+      autoSwapSourceTarget: true,
+      enforceNormalPolicy: input.enforceNormalPolicy ?? 'source_out_target_in',
+      commit: input.commit !== false,
+      pushHistory: input.pushHistory !== false,
+      stepLabel: input.stepLabel ?? `Mate ${source.partName} to ${target.partName}`,
+    } as any);
+    const executedData = unwrapToolData(executed, 'SOLVER_FAILED');
+
+    return ok(
+      {
+        source,
+        target,
+        chosen: {
+          sourceFace: chosenSourceFace,
+          targetFace: chosenTargetFace,
+          sourceMethod: chosenSourceMethod,
+          targetMethod: chosenTargetMethod,
+          mode,
+          mateMode,
+          pathPreference,
+        },
+        plan: executedData.plan,
+        preview: executedData.preview,
+        committed: executedData.committed,
+        ...(executedData.historyId ? { historyId: executedData.historyId } : {}),
+        ...(executedData.transform ? { transform: executedData.transform } : {}),
+      },
+      {
+        mutating: false,
+        debug: {
+          notes: [
+            'Smart mate executed with geometry-aware face/method/mode inference',
+            `intent=${intentKind}`,
+            `geometry_intent=${geometryIntent ?? 'none'}`,
+            `instruction_method=${instructionMethod ?? 'none'}`,
+          ],
+          sourceFaceId: chosenSourceFace,
+          targetFaceId: chosenTargetFace,
+          sourceMethod: chosenSourceMethod,
+          targetMethod: chosenTargetMethod,
+          mode,
+          pathType: pathPreference,
+          inferenceScore: suggestedFacePair?.score,
+          inferenceRanking: suggestedFacePair?.ranking ?? [],
+          explicit: {
+            sourceFace: explicitSourceFace,
+            targetFace: explicitTargetFace,
+            sourceMethod: explicitSourceMethod,
+            targetMethod: explicitTargetMethod,
+            mode: input.mode ?? null,
+          },
+        } as any,
+      }
+    );
   }
 
   if (tool === 'preview.transform_plan') {

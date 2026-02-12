@@ -274,6 +274,104 @@ export function useCommandRunner() {
         return `Mate ${parts.byId[sourceId]?.name || sourceId} to ${parts.byId[targetId]?.name || targetId} (${mode})`;
       }
 
+      const mateLike =
+        head === 'mate' ||
+        /(?:對齊|对齐|align|attach|裝到|装到|貼到|贴到|組裝|组装)/i.test(text);
+
+      if (mateLike) {
+        const mentioned = parts.order
+          .map((id) => ({
+            id,
+            name: parts.byId[id]?.name || id,
+            index: text.toLowerCase().indexOf((parts.byId[id]?.name || id).toLowerCase()),
+          }))
+          .filter((item) => item.index >= 0)
+          .sort((left, right) => left.index - right.index);
+
+        if (mentioned.length < 2) {
+          return '請描述兩個零件名稱，例如：把 part1 對齊到 part2。';
+        }
+
+        const sourceId = mentioned[0].id;
+        const targetId = mentioned[1].id;
+        const mode = /(?:both|全部|一起|同時|arc)/i.test(text)
+          ? 'both'
+          : /(?:twist|rotate|旋轉|旋转)/i.test(text)
+          ? 'twist'
+          : 'translate';
+
+        const operation = mode === 'both' ? 'both' : mode === 'twist' ? 'twist' : 'mate';
+        const planResult = await callMcpTool('action.generate_transform_plan', {
+          operation,
+          source: {
+            kind: 'face',
+            part: { partId: sourceId },
+            face: 'bottom',
+            method: 'auto',
+          },
+          target: {
+            kind: 'face',
+            part: { partId: targetId },
+            face: 'top',
+            method: 'auto',
+          },
+          mateMode: mode === 'both' ? 'face_insert_arc' : 'face_flush',
+          pathPreference: mode === 'both' ? 'arc' : 'line',
+          durationMs: 900,
+          sampleCount: 60,
+          flip: false,
+          offset: 0,
+          clearance: mode === 'both' ? 0.01 : 0,
+          twist: {
+            angleDeg: mode === 'twist' ? 45 : 0,
+            axis: 'normal' as const,
+            axisSpace: 'target_face' as const,
+            constraint: 'free' as const,
+          },
+          arc: {
+            height: mode === 'both' ? 0.08 : 0,
+            lateralBias: 0,
+          },
+          autoCorrectSelection: true,
+          autoSwapSourceTarget: true,
+          enforceNormalPolicy: 'source_out_target_in',
+        });
+
+        if (!planResult.ok) {
+          return `Plan failed: ${extractToolErrorMessage(planResult)}`;
+        }
+
+        const planId = (planResult.data as any)?.plan?.planId;
+        if (!planId) return 'Plan failed: missing planId';
+
+        const previewResult = await callMcpTool('preview.transform_plan', {
+          planId,
+          replaceCurrent: true,
+          scrubT: 1,
+        });
+
+        if (!previewResult.ok) {
+          return `Preview failed: ${extractToolErrorMessage(previewResult)}`;
+        }
+
+        const previewId = (previewResult.data as any)?.preview?.previewId;
+        if (!previewId) {
+          return 'Preview failed: missing previewId';
+        }
+
+        const commitResult = await callMcpTool('action.commit_preview', {
+          previewId,
+          pushHistory: true,
+          stepLabel: `Mate ${parts.byId[sourceId]?.name || sourceId} to ${parts.byId[targetId]?.name || targetId}`,
+        });
+
+        if (!commitResult.ok) {
+          return `Commit failed: ${extractToolErrorMessage(commitResult)}`;
+        }
+
+        return `Mate ${parts.byId[sourceId]?.name || sourceId} to ${parts.byId[targetId]?.name || targetId} (${mode})`;
+      }
+
       if (head === 'undo') {
         const result = await callMcpTool('history.undo', {});
         return result.ok ? 'Undo applied' : `Undo failed: ${extractToolErrorMessage(result)}`;

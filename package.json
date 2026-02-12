@@ -3,13 +3,21 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "bin": {
+    "devflow": "./bin/devflow.js"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "playwright test --reporter=line",
+    "test:e2e": "playwright test --reporter=line",
+    "devflow": "node ./bin/devflow.js",
+    "devflow:server": "node ./bin/devflow.js server --port 4170"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@openai/codex-sdk": "^0.98.0",
     "@react-three/drei": "^9.96.1",
     "@react-three/fiber": "^8.15.12",
     "@types/fast-levenshtein": "^0.0.4",
@@ -23,6 +31,7 @@
     "three": "^0.160.0",
     "three-stdlib": "^2.36.1",
     "uuid": "^9.0.1",
+    "zod": "^4.3.6",
     "zustand": "^4.4.7"
   },
   "devDependencies": {
@@ -36,6 +45,6 @@
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.2.2",
-    "vite": "^5.0.8"
+    "vite": "^6.4.1"
   }
 }

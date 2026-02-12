@@ -16,6 +16,7 @@ test.describe('v2 mate preview markers', () => {
       const sourceId = state.parts.order.find((id: string) => state.parts.byId[id]?.name === 'part1');
       const targetId = state.parts.order.find((id: string) => state.parts.byId[id]?.name === 'part4');
       if (!sourceId || !targetId) return null;
+      store.getState().setWorkspaceSection('mate');
       store.getState().setMateDraft({
         sourceId,
         targetId,

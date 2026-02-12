@@ -191,7 +191,7 @@ export type V2State = {
   clearMarkers: () => void;
   requestMate: (req: V2State['mateRequest']) => void;
   clearMateRequest: () => void;
-  setMateDraft: (draft: Partial<V2State['mateDraft']>) => void;
+  setMateDraft: (draft: Partial<V2State['mateDraft']>, clearPickFor?: 'source' | 'target') => void;
   setMatePick: (type: 'source' | 'target', anchor?: Anchor) => void;
   clearMatePick: () => void;
   clearMatePickFor: (type: 'source' | 'target') => void;
@@ -239,6 +239,49 @@ const cloneTransform = (t: PartTransform): PartTransform => ({
 
 const cloneOverrides = (overrides: Record<string, PartTransform>) =>
   Object.fromEntries(Object.entries(overrides).map(([id, t]) => [id, cloneTransform(t)]));
+
+const eqTuple3 = (left?: [number, number, number], right?: [number, number, number]) =>
+  !!left &&
+  !!right &&
+  Math.abs(left[0] - right[0]) < 1e-6 &&
+  Math.abs(left[1] - right[1]) < 1e-6 &&
+  Math.abs(left[2] - right[2]) < 1e-6;
+
+const eqPreviewEntry = (
+  left?: {
+    partId: string;
+    faceId: string;
+    positionWorld: [number, number, number];
+    normalWorld: [number, number, number];
+    methodUsed?: AnchorMethodId;
+    methodRequested?: AnchorMethodId;
+    fallbackUsed?: boolean;
+  },
+  right?: {
+    partId: string;
+    faceId: string;
+    positionWorld: [number, number, number];
+    normalWorld: [number, number, number];
+    methodUsed?: AnchorMethodId;
+    methodRequested?: AnchorMethodId;
+    fallbackUsed?: boolean;
+  }
+) => {
+  if (!left && !right) return true;
+  if (!left || !right) return false;
+  return (
+    left.partId === right.partId &&
+    left.faceId === right.faceId &&
+    eqTuple3(left.positionWorld, right.positionWorld) &&
+    eqTuple3(left.normalWorld, right.normalWorld) &&
+    left.methodUsed === right.methodUsed &&
+    left.methodRequested === right.methodRequested &&
+    Boolean(left.fallbackUsed) === Boolean(right.fallbackUsed)
+  );
+};
+
+const eqMatePreview = (left: V2State['matePreview'], right: V2State['matePreview']) =>
+  eqPreviewEntry(left.source, right.source) && eqPreviewEntry(left.target, right.target);
 
 export const useV2Store = create<V2State>((set, get) => ({
   cadUrl: '',
@@ -338,8 +381,10 @@ export const useV2Store = create<V2State>((set, get) => ({
     set((state) => {
       const nextSource =
         source === 'dropdown' && !partId ? 'system' : source;
+      if (state.selection.partId === partId && state.selection.source === nextSource) {
+        return state;
+      }
       return {
-        ...state,
         selection: { partId, source: nextSource },
       };
     }),
@@ -424,27 +469,31 @@ export const useV2Store = create<V2State>((set, get) => ({
     })),
 
   setInteractionMode: (mode) =>
-    set((state) => ({
-      ...state,
-      interaction: { ...state.interaction, mode },
-    })),
+    set((state) => {
+      if (state.interaction.mode === mode) return state;
+      return {
+        interaction: { ...state.interaction, mode },
+      };
+    }),
 
   setTransformDragging: (dragging) =>
     set((state) => {
       if (import.meta.env.DEV) {
         (window as any).__V2_ORBIT_ENABLED__ = !dragging;
       }
+      if (state.interaction.isTransformDragging === dragging) return state;
       return {
-        ...state,
         interaction: { ...state.interaction, isTransformDragging: dragging },
       };
     }),
 
   setPickFaceMode: (mode) =>
-    set((state) => ({
-      ...state,
-      interaction: { ...state.interaction, pickFaceMode: mode },
-    })),
+    set((state) => {
+      if (state.interaction.pickFaceMode === mode) return state;
+      return {
+        interaction: { ...state.interaction, pickFaceMode: mode },
+      };
+    }),
 
   setEnvironment: (env) =>
     set((state) => ({
@@ -491,33 +540,58 @@ export const useV2Store = create<V2State>((set, get) => ({
       mateRequest: undefined,
     })),
 
-  setMateDraft: (draft) =>
-    set((state) => ({
-      ...state,
-      mateDraft: { ...state.mateDraft, ...draft },
-    })),
+  setMateDraft: (draft, clearPickFor) =>
+    set((state) => {
+      let draftChanged = false;
+      for (const [key, value] of Object.entries(draft)) {
+        if (!Object.is((state.mateDraft as any)[key], value)) {
+          draftChanged = true;
+          break;
+        }
+      }
+
+      const pickChanged = Boolean(clearPickFor && state.matePick[clearPickFor]);
+      if (!draftChanged && !pickChanged) return state;
+
+      const next: Partial<V2State> = {};
+      if (draftChanged) {
+        next.mateDraft = { ...state.mateDraft, ...draft };
+      }
+      if (clearPickFor) {
+        next.matePick = { ...state.matePick, [clearPickFor]: undefined };
+      }
+      return next;
+    }),
 
   setMatePick: (type, anchor) =>
-    set((state) => ({
-      ...state,
-      matePick: { ...state.matePick, [type]: anchor },
-    })),
+    set((state) => {
+      if (state.matePick[type] === anchor) return state;
+      return {
+        matePick: { ...state.matePick, [type]: anchor },
+      };
+    }),
 
   clearMatePick: () =>
-    set((state) => ({
-      ...state,
-      matePick: {},
-    })),
+    set((state) => {
+      if (!state.matePick.source && !state.matePick.target) return state;
+      return {
+        matePick: {},
+      };
+    }),
   clearMatePickFor: (type) =>
-    set((state) => ({
-      ...state,
-      matePick: { ...state.matePick, [type]: undefined },
-    })),
+    set((state) => {
+      if (!state.matePick[type]) return state;
+      return {
+        matePick: { ...state.matePick, [type]: undefined },
+      };
+    }),
   setMatePreview: (preview) =>
-    set((state) => ({
-      ...state,
-      matePreview: preview,
-    })),
+    set((state) => {
+      if (eqMatePreview(state.matePreview, preview)) return state;
+      return {
+        matePreview: preview,
+      };
+    }),
   setMateTrace: (trace) =>
     set((state) => ({
       ...state,

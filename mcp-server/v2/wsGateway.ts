@@ -2,9 +2,10 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
 import { ClientRequestSchema, PROTOCOL_VERSION } from '../../shared/schema/index.js';
-import type { ServerEvent, ServerResponse } from '../../shared/schema/index.js';
+import type { ServerEvent, ServerResponse, TraceEntry, ToolResult } from '../../shared/schema/index.js';
 import { MCPToolRequestSchema } from '../../shared/schema/mcpToolsV3.js';
 import { routeAndExecute } from './router/router.js';
+import type { RouterContext, RouterToolResult } from './router/types.js';
 import { analyzeVlm } from './vlm/analyze.js';
 
 const ToolProxyResultSchema = z.object({
@@ -28,6 +29,12 @@ type PendingProxyRequest = {
 };
 
 const TOOL_PROXY_TIMEOUT_MS = 20_000;
+const ROUTER_MAX_ITERATIONS = Number(process.env.ROUTER_MAX_ITERATIONS || 3);
+const ROUTER_MAX_TOOL_RESULTS_FOR_CONTEXT = Number(process.env.ROUTER_MAX_TOOL_RESULTS_FOR_CONTEXT || 8);
+const ROUTER_RESULT_MAX_DEPTH = 4;
+const ROUTER_RESULT_MAX_ARRAY = 12;
+const ROUTER_RESULT_MAX_OBJECT_KEYS = 16;
+const ROUTER_RESULT_MAX_STRING = 320;
 
 export class WsGatewayV2 {
   private wss: WebSocketServer;
@@ -100,6 +107,53 @@ export class WsGatewayV2 {
     });
   }
 
+  private normalizeRouterIterations() {
+    if (!Number.isFinite(ROUTER_MAX_ITERATIONS)) return 3;
+    return Math.max(1, Math.min(8, Math.floor(ROUTER_MAX_ITERATIONS)));
+  }
+
+  private summarizeValueForRouter(value: unknown, depth = 0): unknown {
+    if (value == null) return value;
+    if (typeof value === 'string') {
+      return value.length > ROUTER_RESULT_MAX_STRING
+        ? `${value.slice(0, ROUTER_RESULT_MAX_STRING)}…`
+        : value;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') return value;
+    if (depth >= ROUTER_RESULT_MAX_DEPTH) return '[truncated]';
+    if (Array.isArray(value)) {
+      return value
+        .slice(0, ROUTER_RESULT_MAX_ARRAY)
+        .map((item) => this.summarizeValueForRouter(item, depth + 1));
+    }
+    if (typeof value === 'object') {
+      const source = value as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      let count = 0;
+      for (const [key, val] of Object.entries(source)) {
+        if (count >= ROUTER_RESULT_MAX_OBJECT_KEYS) break;
+        if (key === 'dataUrl' && typeof val === 'string') {
+          out[key] = val.length > 96 ? `${val.slice(0, 96)}…` : val;
+        } else {
+          out[key] = this.summarizeValueForRouter(val, depth + 1);
+        }
+        count += 1;
+      }
+      return out;
+    }
+    return String(value);
+  }
+
+  private summarizeToolResultForRouter(result: ToolResult, iteration: number): RouterToolResult {
+    return {
+      tool: result.tool,
+      ok: result.ok,
+      ...(result.error ? { error: result.error } : {}),
+      ...(result.result !== undefined ? { result: this.summarizeValueForRouter(result.result) } : {}),
+      iteration,
+    };
+  }
+
   start() {
     this.wss.on('connection', (ws) => {
       ws.on('close', () => {
@@ -120,11 +174,118 @@ export class WsGatewayV2 {
           }
 
           if (parsed.data.command === 'router_execute') {
-            const args = (parsed.data.args ?? {}) as { text?: string; context?: any };
+            const args = (parsed.data.args ?? {}) as { text?: string; context?: RouterContext };
             const text = args.text || '';
-            const ctx = args.context || { parts: [] };
-            const { trace, results } = await routeAndExecute(text, ctx);
-            this.sendResponse(ws, parsed.data.id, true, { trace, results }, undefined, trace.id);
+            const baseCtx: RouterContext = {
+              parts: [],
+              ...(args.context || {}),
+            };
+            const allToolCalls: TraceEntry['toolCalls'] = [];
+            const allToolResults: ToolResult[] = [];
+            const routerContextResults: RouterToolResult[] = Array.isArray(baseCtx.toolResults)
+              ? [...baseCtx.toolResults]
+              : [];
+            const maxIterations = this.normalizeRouterIterations();
+            let lastReplyText: string | undefined;
+            let iterationsUsed = 0;
+
+            for (let iteration = 0; iteration < maxIterations; iteration++) {
+              iterationsUsed = iteration + 1;
+              const routed = await routeAndExecute(text, {
+                ...baseCtx,
+                iteration,
+                toolResults: routerContextResults.slice(-ROUTER_MAX_TOOL_RESULTS_FOR_CONTEXT),
+              });
+              lastReplyText = routed.replyText ?? lastReplyText;
+
+              if (routed.toolCalls.length === 0) break;
+
+              allToolCalls.push(...routed.toolCalls);
+
+              const iterationResults: ToolResult[] = [];
+              for (const call of routed.toolCalls) {
+                const toolRequestParsed = MCPToolRequestSchema.safeParse({
+                  tool: call.tool,
+                  args: call.args ?? {},
+                });
+
+                if (!toolRequestParsed.success) {
+                  iterationResults.push({
+                    tool: call.tool,
+                    ok: false,
+                    error: 'Invalid MCP tool request generated by router',
+                  });
+                  continue;
+                }
+
+                try {
+                  const result = await this.requestToolExecutionViaProxy(
+                    ws,
+                    `${parsed.data.id}:iter${iteration}:${call.tool}`,
+                    toolRequestParsed.data
+                  );
+                  iterationResults.push({
+                    tool: call.tool,
+                    ok: true,
+                    result,
+                  });
+                } catch (error: any) {
+                  iterationResults.push({
+                    tool: call.tool,
+                    ok: false,
+                    error: error?.message || 'Tool execution failed',
+                  });
+                }
+              }
+
+              allToolResults.push(...iterationResults);
+              routerContextResults.push(
+                ...iterationResults.map((result) => this.summarizeToolResultForRouter(result, iteration))
+              );
+
+              const isPlanningRound = routed.toolCalls.every((call) => {
+                if (call.tool === 'view.capture_image') return true;
+                return call.tool.startsWith('query.');
+              });
+              if (!isPlanningRound) break;
+            }
+
+            const trace: TraceEntry = {
+              id: randomUUID(),
+              ts: Date.now(),
+              source: 'llm',
+              input: text,
+              toolCalls: allToolCalls,
+              toolResults: allToolResults,
+              ok: allToolResults.every((result) => result.ok),
+            };
+
+            const successCount = allToolResults.filter((result) => result.ok).length;
+            const failCount = allToolResults.length - successCount;
+            const replyText =
+              lastReplyText ??
+              (allToolResults.length === 0
+                ? '我還不確定要執行哪個功能。'
+                : failCount === 0
+                ? `已完成 ${successCount} 個動作。`
+                : `已完成 ${successCount} 個動作，${failCount} 個動作失敗。`);
+
+            this.sendResponse(
+              ws,
+              parsed.data.id,
+              true,
+              {
+                trace,
+                results: allToolResults,
+                replyText,
+                meta: {
+                  iterations: iterationsUsed,
+                  maxIterations,
+                },
+              },
+              undefined,
+              trace.id
+            );
             return;
           }
 

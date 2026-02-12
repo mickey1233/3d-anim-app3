@@ -16,7 +16,7 @@ export type AnchorResult = {
 };
 
 export const ANCHOR_METHOD_OPTIONS: { id: AnchorMethodId; label: string }[] = [
-  { id: 'auto', label: 'Auto (pick > planar)' },
+  { id: 'auto', label: 'Auto (pick > geometry AABB)' },
   { id: 'planar_cluster', label: 'Planar Cluster' },
   { id: 'geometry_aabb', label: 'Geometry AABB' },
   { id: 'object_aabb', label: 'Object AABB' },
@@ -35,6 +35,7 @@ const FACE_DIR: Record<FaceId, THREE.Vector3> = {
 };
 
 const vertexCache = new WeakMap<THREE.BufferGeometry, THREE.Vector3[]>();
+const anchorByGeometryCache = new WeakMap<THREE.BufferGeometry, Map<string, AnchorResult>>();
 
 function getVertices(geometry: THREE.BufferGeometry) {
   const cached = vertexCache.get(geometry);
@@ -54,6 +55,43 @@ function stableTangentFromNormal(normal: THREE.Vector3) {
   const n = normal.clone().normalize();
   const up = Math.abs(n.dot(new THREE.Vector3(0, 1, 0))) > 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
   return new THREE.Vector3().crossVectors(up, n).normalize();
+}
+
+function cloneAnchorResult(result: AnchorResult): AnchorResult {
+  return {
+    ...result,
+    centerLocal: result.centerLocal.clone(),
+    normalLocal: result.normalLocal.clone(),
+    tangentLocal: result.tangentLocal.clone(),
+    debug: result.debug ? { ...result.debug } : undefined,
+  };
+}
+
+function getCachedGeometryAnchor(
+  geometry: THREE.BufferGeometry,
+  cacheKey: string,
+  compute: () => AnchorResult | null
+): AnchorResult | null {
+  let geometryCache = anchorByGeometryCache.get(geometry);
+  if (!geometryCache) {
+    geometryCache = new Map();
+    anchorByGeometryCache.set(geometry, geometryCache);
+  }
+
+  const cached = geometryCache.get(cacheKey);
+  if (cached) return cloneAnchorResult(cached);
+
+  const resolved = compute();
+  if (!resolved) return null;
+
+  geometryCache.set(cacheKey, cloneAnchorResult(resolved));
+  return resolved;
+}
+
+function geometryCacheKey(method: AnchorMethodId, faceId: FaceId, geometry: THREE.BufferGeometry) {
+  const posVersion = (geometry.attributes.position as any)?.version ?? 0;
+  const indexVersion = geometry.index?.version ?? -1;
+  return `${method}:${faceId}:${posVersion}:${indexVersion}`;
 }
 
 function getFaceClusterByDirection(geometry: THREE.BufferGeometry, direction: THREE.Vector3): FaceCluster | null {
@@ -310,7 +348,9 @@ function resolvePicked(pick: FaceAnchor): AnchorResult {
   return {
     centerLocal: new THREE.Vector3(...pick.position),
     normalLocal: new THREE.Vector3(...(pick.normal || [0, 1, 0])).normalize(),
-    tangentLocal: pick.tangent ? new THREE.Vector3(...pick.tangent).normalize() : stableTangentFromNormal(new THREE.Vector3(...(pick.normal || [0, 1, 0]))),
+    tangentLocal: pick.tangent
+      ? new THREE.Vector3(...pick.tangent).normalize()
+      : stableTangentFromNormal(new THREE.Vector3(...(pick.normal || [0, 1, 0]))),
     method: 'picked',
   };
 }
@@ -331,21 +371,55 @@ export function resolveAnchor({
   const mesh = object as THREE.Mesh;
   const requestedMethod = method;
   const call = (m: AnchorMethodId): AnchorResult | null => {
+    const geometry = (mesh.geometry as THREE.BufferGeometry | undefined) ?? undefined;
     switch (m) {
       case 'picked':
         return pick ? resolvePicked(pick) : null;
       case 'planar_cluster':
-        return mesh.geometry ? resolvePlanarCluster(mesh, faceId) : null;
+        if (!geometry) return null;
+        return getCachedGeometryAnchor(
+          geometry,
+          geometryCacheKey('planar_cluster', faceId, geometry),
+          () => resolvePlanarCluster(mesh, faceId)
+        );
       case 'geometry_aabb':
-        return mesh.geometry ? resolveGeometryAabb(mesh, faceId) : null;
+        if (!geometry) return null;
+        return getCachedGeometryAnchor(
+          geometry,
+          geometryCacheKey('geometry_aabb', faceId, geometry),
+          () => resolveGeometryAabb(mesh, faceId)
+        );
       case 'object_aabb':
         return resolveObjectAabb(object, faceId);
       case 'extreme_vertices':
-        return mesh.geometry ? resolveExtremeVertices(mesh, faceId) : null;
+        if (!geometry) return null;
+        return getCachedGeometryAnchor(
+          geometry,
+          geometryCacheKey('extreme_vertices', faceId, geometry),
+          () => resolveExtremeVertices(mesh, faceId)
+        );
       case 'obb_pca':
-        return mesh.geometry ? resolveObbPca(mesh, faceId) : null;
+        if (!geometry) return null;
+        return getCachedGeometryAnchor(
+          geometry,
+          geometryCacheKey('obb_pca', faceId, geometry),
+          () => resolveObbPca(mesh, faceId)
+        );
       case 'auto':
-        return pick ? resolvePicked(pick) : resolvePlanarCluster(mesh, faceId);
+        if (pick) return resolvePicked(pick);
+        if (!geometry) return resolveObjectAabb(object, faceId);
+        return (
+          getCachedGeometryAnchor(
+            geometry,
+            geometryCacheKey('geometry_aabb', faceId, geometry),
+            () => resolveGeometryAabb(mesh, faceId)
+          ) ||
+          getCachedGeometryAnchor(
+            geometry,
+            geometryCacheKey('planar_cluster', faceId, geometry),
+            () => resolvePlanarCluster(mesh, faceId)
+          )
+        );
       default:
         return null;
     }
