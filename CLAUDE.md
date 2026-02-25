@@ -28,7 +28,7 @@ npm run devflow -- "requirement"     # CLI
 npm run devflow:server               # Web UI on :4170
 ```
 
-**URLs:** Default is v2 at `http://localhost:5173`. Legacy v1 via `?legacy=1`. Fixtures via `?fixture=boxes`.
+**URLs:** Default is v2 at `http://localhost:5173`. Legacy v1 via `?legacy=1`. Fixtures via `?fixture=<id>` — available IDs: `boxes` (default), `side`, `lid`, `shelf`, `slot`, `nested`.
 
 ## Architecture
 
@@ -51,7 +51,7 @@ Most tools execute **in the browser** via the tool proxy pattern. The backend ro
 
 ### Key Directories
 
-- `src/v2/store/store.ts` — Single Zustand store (`V2State`). Scoped selectors pattern to avoid rerenders. Exposed as `window.__V2_STORE__` in dev for test access.
+- `src/v2/store/store.ts` — Single Zustand store (`V2State`). Top-level slices: `cadUrl`, `cadFileName`, `parts`, `selection`, `steps`, `playback`, `ui`, `interaction`, `markers`, `vlm`, `chat`, `view`, `connection`, `mateRequest`, `mateDraft`, `matePreview`. Scoped selectors pattern to avoid rerenders. Exposed as `window.__V2_STORE__` in dev for test access.
 - `src/v2/three/` — R3F scene: `CanvasRoot.tsx` (root), `ModelLoader.tsx` (GLTF loading), `SceneRegistry.ts` (global scene/camera/renderer refs accessed via `getV2Scene()` etc.), `mating/` (face clustering, anchor resolution, mate solver).
 - `src/v2/ui/` — React panels: Chat, CommandBar, MatePanel, PartsPanel, Steps, VLM.
 - `src/v2/network/` — `client.ts` (singleton WS client with auto-reconnect, 20s request timeout), `mcpToolExecutor.ts` (tool dispatch returning `ToolEnvelope<T>`).
@@ -65,7 +65,9 @@ Tools follow `namespace.action` naming: `selection.set`, `query.scene_state`, `a
 
 ### Mate System
 
-Anchor resolution methods: `auto`, `planar_cluster`, `geometry_aabb`, `object_aabb`, `extreme_vertices`, `obb_pca`, `picked`. Mate modes: `face_flush`, `face_insert_arc`, `edge_to_edge`, `axis_to_axis`. Supports twist (`{ axisSpace, axis, angleDeg }`) and arc paths (`{ height, lateralBias }`).
+Anchor resolution methods: `auto`, `planar_cluster`, `geometry_aabb`, `object_aabb`, `extreme_vertices`, `obb_pca`, `picked`. Mate modes (MCP schema): `face_flush`, `face_insert_arc`, `edge_to_edge`, `axis_to_axis`, `point_to_point`, `planar_slide`, `hinge_revolute`. Supports twist (`{ axisSpace, axis, angleDeg }`) and arc paths (`{ height, lateralBias }`).
+
+Parts are referenced in tool args as `PartRef`: `{ partId?: string } | { partName?: string }` — at least one field required. The executor fuzzy-matches by name when `partId` is absent.
 
 ### Router Providers
 
@@ -77,7 +79,7 @@ Default is `mockProvider` (keyword matching + Levenshtein fuzzy part name matchi
 - **Zod for runtime validation** — all WS protocol messages and tool schemas validated with Zod.
 - **Test file naming** — `v2_<feature>.spec.ts` in snake_case.
 - **UI styling** — Tailwind utilities with glassmorphism pattern (`bg-black/60 backdrop-blur-md`).
-- **Tool results** — Always wrapped in `ToolEnvelope<T>` (`{ ok, data, warnings }` or `{ ok: false, error }`).
+- **Tool results** — Always wrapped in `ToolEnvelope<T>`. Success: `{ ok: true, sceneRevision: number, data: T, warnings, debug? }`. Failure: `{ ok: false, sceneRevision?, error: { code, message, recoverable, suggestedToolCalls }, warnings }`.
 - **Error codes** — `INVALID_ARGUMENT`, `NOT_FOUND`, `AMBIGUOUS_SELECTION`, `SCENE_OUT_OF_SYNC`, `SOLVER_FAILED`, etc.
 - **No path aliases** — imports use relative paths.
 - **strict TypeScript** — but `noUnusedLocals` and `noUnusedParameters` are disabled.
