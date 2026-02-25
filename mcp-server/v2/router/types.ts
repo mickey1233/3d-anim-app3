@@ -8,6 +8,21 @@ export type RouterToolResult = {
   iteration?: number;
 };
 
+export type VlmMateCapture = {
+  vlmInference: {
+    mode: string;
+    intent: string;
+    method?: string;
+    sourceFace?: string;
+    targetFace?: string;
+    sourcePart: string;
+    targetPart: string;
+    confidence: number;
+    reasoning?: string;
+  } | null;
+  meetsThreshold: boolean;
+};
+
 export type RouterContext = {
   parts: {
     id: string;
@@ -22,6 +37,8 @@ export type RouterContext = {
   interactionMode?: 'select' | 'move' | 'rotate' | 'mate';
   toolResults?: RouterToolResult[];
   iteration?: number;
+  /** Injected by wsGateway when MATE_VLM_ENABLE=1: result of vlm.capture_for_mate. */
+  vlmMateCapture?: VlmMateCapture | null;
 };
 
 export type RouterRoute = {

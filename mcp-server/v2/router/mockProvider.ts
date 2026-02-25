@@ -653,7 +653,29 @@ export const MockRouterProvider: RouterProvider = {
       const explicitDirection = Boolean(inferred.explicitDirection);
       const hasMateSuggestionContext = Boolean(extractMateSuggestionContext(ctx));
 
-      if ((!explicitFace || !explicitMethod || !explicitMode) && !hasMateSuggestionContext) {
+      // Apply VLM-inferred parameters (pre-fetched by wsGateway, injected via ctx).
+      // Priority: explicit user input > VLM > LLM > geometry suggestions.
+      const vlmCapture = ctx.vlmMateCapture;
+      const vlmInf = vlmCapture?.meetsThreshold ? vlmCapture.vlmInference : null;
+      if (vlmInf) {
+        const vlmMode = asMateMode(vlmInf.mode);
+        // Same guard as the LLM path: never escalate to 'both' unless user explicitly asked.
+        if (!explicitMode && vlmMode && vlmMode !== 'both') mode = vlmMode;
+        if (!explicitSourceFace) sourceFace = asMateFace(vlmInf.sourceFace) ?? sourceFace;
+        if (!explicitTargetFace) targetFace = asMateFace(vlmInf.targetFace) ?? targetFace;
+        if (!explicitMethod) {
+          const vlmMethod = asMateMethod(vlmInf.method);
+          if (vlmMethod) { sourceMethod = vlmMethod; targetMethod = vlmMethod; }
+        }
+      }
+
+      // Skip LLM inference when VLM already filled the needed params.
+      const needsLlmInference =
+        (!explicitFace || !explicitMethod || !explicitMode) &&
+        !hasMateSuggestionContext &&
+        !vlmInf;
+
+      if (needsLlmInference) {
         const llmInference = await inferMateWithLlm(text, ctx);
         if (llmInference) {
           if (
@@ -686,7 +708,9 @@ export const MockRouterProvider: RouterProvider = {
       }
 
       const suggestionContext = extractMateSuggestionContext(ctx, source.id, target.id);
-      const needsSuggestionRound = (!explicitFace || !explicitMethod || !explicitMode) && !suggestionContext;
+      // Skip suggestion round when VLM already provided face/method/mode params.
+      const needsSuggestionRound =
+        (!explicitFace || !explicitMethod || !explicitMode) && !suggestionContext && !vlmInf;
       if (needsSuggestionRound) {
         calls.push({
           tool: 'query.mate_suggestions',

@@ -5,7 +5,7 @@ import { ClientRequestSchema, PROTOCOL_VERSION } from '../../shared/schema/index
 import type { ServerEvent, ServerResponse, TraceEntry, ToolResult } from '../../shared/schema/index.js';
 import { MCPToolRequestSchema } from '../../shared/schema/mcpToolsV3.js';
 import { routeAndExecute } from './router/router.js';
-import type { RouterContext, RouterToolResult } from './router/types.js';
+import type { RouterContext, RouterToolResult, VlmMateCapture } from './router/types.js';
 import { analyzeVlm } from './vlm/analyze.js';
 import { inferMateFromImages } from './vlm/mateInfer.js';
 
@@ -190,12 +190,52 @@ export class WsGatewayV2 {
             let lastReplyText: string | undefined;
             let iterationsUsed = 0;
 
+            // Pre-fetch VLM capture for mate commands on first iteration.
+            // Runs before routeAndExecute so the router can use VLM-inferred params.
+            let vlmMateCapture: VlmMateCapture | null = null;
+            const mateVlmEnabled =
+              process.env.MATE_VLM_ENABLE === '1' ||
+              Boolean(process.env.MATE_VLM_MOCK_RESPONSE);
+            if (mateVlmEnabled) {
+              const MATE_KW = ['mate', '對齊', '对齐', '組裝', '组装', '裝配', '装配', 'align', 'attach', 'fit'];
+              const lowerText = text.toLowerCase();
+              const hasMateKeyword = MATE_KW.some((k) => lowerText.includes(k));
+              const mentionedParts = baseCtx.parts.filter((p) =>
+                lowerText.includes(p.name.toLowerCase())
+              );
+              if (hasMateKeyword && mentionedParts.length >= 2) {
+                try {
+                  const captureResult = await this.requestToolExecutionViaProxy(
+                    ws,
+                    `${parsed.data.id}:vlm_capture`,
+                    {
+                      tool: 'vlm.capture_for_mate',
+                      args: {
+                        sourcePart: { partId: mentionedParts[0]!.id },
+                        targetPart: { partId: mentionedParts[1]!.id },
+                        userText: text,
+                        maxWidthPx: 512,
+                        maxHeightPx: 384,
+                        confidenceThreshold: Number(process.env.MATE_VLM_CONFIDENCE || '0.75'),
+                      },
+                    }
+                  ) as any;
+                  if (captureResult?.ok && captureResult.data) {
+                    vlmMateCapture = captureResult.data as VlmMateCapture;
+                  }
+                } catch {
+                  // Silent failure — fall through to NLP inference
+                }
+              }
+            }
+
             for (let iteration = 0; iteration < maxIterations; iteration++) {
               iterationsUsed = iteration + 1;
               const routed = await routeAndExecute(text, {
                 ...baseCtx,
                 iteration,
                 toolResults: routerContextResults.slice(-ROUTER_MAX_TOOL_RESULTS_FOR_CONTEXT),
+                ...(vlmMateCapture !== null ? { vlmMateCapture } : {}),
               });
               lastReplyText = routed.replyText ?? lastReplyText;
 

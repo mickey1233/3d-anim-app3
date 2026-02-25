@@ -12,6 +12,10 @@ import { test, expect } from '@playwright/test';
 
 test.describe('v2 vlm.capture_for_mate', () => {
   test('default capture returns 6 angles, meetsThreshold=false without VLM key', async ({ page }) => {
+    test.skip(
+      Boolean(process.env.MATE_VLM_MOCK_RESPONSE),
+      'Skipped when mock VLM server is active — meetsThreshold will be true'
+    );
     test.setTimeout(120_000);
     await page.goto('http://127.0.0.1:5274/?v=2&fixture=boxes', { waitUntil: 'domcontentloaded' });
 
@@ -118,5 +122,51 @@ test.describe('v2 vlm.capture_for_mate', () => {
       (before as number[]).reduce((sum, v, i) => sum + (v - (after as number[])[i]) ** 2, 0)
     );
     expect(dist).toBeLessThan(1e-4);
+  });
+});
+
+/**
+ * Part E integration test: VLM mock response flows through wsGateway →
+ * mockProvider → action.mate_execute with VLM-inferred face params.
+ *
+ * Requires the MCP server to be started with MATE_VLM_MOCK_RESPONSE set.
+ * In CI this is handled by restarting the server with the env var.
+ * In local dev, run: MATE_VLM_MOCK_RESPONSE='...' npx tsx mcp-server/v2/index.ts
+ */
+test.describe('v2 VLM mate E2E (mock server)', () => {
+  test.skip(
+    !process.env.MATE_VLM_MOCK_RESPONSE,
+    'Skipped unless MATE_VLM_MOCK_RESPONSE is set on the test runner'
+  );
+
+  test('VLM mock inference flows into mate_execute face params', async ({ page }) => {
+    test.setTimeout(120_000);
+    await page.goto('http://127.0.0.1:5274/?v=2&fixture=boxes', { waitUntil: 'domcontentloaded' });
+
+    await page.waitForFunction(() => !!(window as any).__V2_STORE__?.getState);
+    await page.waitForFunction(() => {
+      const s = (window as any).__V2_STORE__.getState();
+      return s.connection.wsConnected && s.parts.order.length >= 2;
+    });
+
+    // Grab part names for the chat command.
+    const partNames = await page.evaluate(() => {
+      const s = (window as any).__V2_STORE__.getState();
+      return s.parts.order.map((id: string) => s.parts.byId[id].name) as string[];
+    });
+
+    // Send a generic mate command via chat.
+    await page.getByTestId('workspace-tab-chat').click();
+    const chatInput = page.getByTestId('chat-input');
+    await chatInput.fill(`mate ${partNames[0]} and ${partNames[1]}`);
+    await page.keyboard.press('Enter');
+
+    // The VLM mock should inject right→left faces (from MATE_VLM_MOCK_RESPONSE).
+    // We verify the chat reply contains the VLM-inferred face labels.
+    const mockFaces = JSON.parse(process.env.MATE_VLM_MOCK_RESPONSE!);
+    await expect(page.getByTestId('chat-messages')).toContainText(
+      mockFaces.sourceFace,
+      { timeout: 20_000 }
+    );
   });
 });
