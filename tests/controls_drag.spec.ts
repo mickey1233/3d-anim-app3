@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Controls: Orbit disabled while TransformControls dragging', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('http://127.0.0.1:5173/?v=2', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5274/?v=2', { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => !!(window as any).__V2_STORE__?.getState);
   });
 

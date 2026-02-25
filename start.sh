@@ -7,16 +7,16 @@ echo "=========================================="
 echo "   Starting 3D Animation App"
 echo "=========================================="
 
-# 1. Kill any existing processes (Frontend 5173, Backend 3001)
-echo "[1/3] Clearing ports 5173 and 3001..."
-fuser -k 5173/tcp > /dev/null 2>&1 || true
-fuser -k 3001/tcp > /dev/null 2>&1 || true
+# 1. Kill any existing processes (Frontend 5274, MCP 3112)
+echo "[1/3] Clearing ports 5274 and 3112..."
+fuser -k 5274/tcp > /dev/null 2>&1 || true
+fuser -k 3112/tcp > /dev/null 2>&1 || true
 
 # 2. Start Frontend (Vite) in Background
 echo "[2/3] Starting Frontend (Vite)..."
-npm run dev -- --port 5173 > /dev/null 2>&1 &
+npm run dev -- --port 5274 > /dev/null 2>&1 &
 VITE_PID=$!
-echo "      Frontend running (PID: $VITE_PID). Access at http://localhost:5173"
+echo "      Frontend running (PID: $VITE_PID). Access at http://localhost:5274"
 
 # 3. Setup cleanup trap
 trap "kill $VITE_PID" EXIT

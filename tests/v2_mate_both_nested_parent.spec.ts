@@ -9,7 +9,7 @@ test.describe('v2 mate both: nested parent transform', () => {
    */
   test('generic assembly command uses translate not both', async ({ page }) => {
     test.setTimeout(120_000);
-    await page.goto('http://127.0.0.1:5173/?v=2&fixture=nested', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5274/?v=2&fixture=nested', { waitUntil: 'domcontentloaded' });
 
     await page.waitForFunction(() => !!(window as any).__V2_STORE__?.getState);
     await page.waitForFunction(() => {
@@ -30,7 +30,7 @@ test.describe('v2 mate both: nested parent transform', () => {
 
   test('cover/both moves the source (not rotate-in-place)', async ({ page }) => {
     test.setTimeout(120_000);
-    await page.goto('http://127.0.0.1:5173/?v=2&fixture=nested', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5274/?v=2&fixture=nested', { waitUntil: 'domcontentloaded' });
 
     await page.waitForFunction(() => !!(window as any).__V2_STORE__?.getState);
     await page.waitForFunction(() => {

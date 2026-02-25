@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('3D Animation App Smoke Test', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('http://localhost:5173');
+    await page.goto('http://localhost:5274');
   });
 
   test('should load app and demo model', async ({ page }) => {

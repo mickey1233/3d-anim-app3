@@ -2,7 +2,7 @@ import { WsClient } from './wsClient';
 
 export const v2Client = new WsClient();
 
-export function connectV2Client(url = 'ws://localhost:3011') {
+export function connectV2Client(url = 'ws://localhost:3112') {
   try {
     v2Client.connect(url);
   } catch {

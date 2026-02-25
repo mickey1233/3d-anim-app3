@@ -12,8 +12,8 @@ A 3D CAD assembly & animation studio with an MCP (Model Context Protocol) backen
 
 ```bash
 # Dev servers (both required for full functionality)
-npm run dev                          # Frontend on :5173
-npx tsx mcp-server/v2/index.ts       # MCP WebSocket server on :3011
+npm run dev                          # Frontend on :5274
+npx tsx mcp-server/v2/index.ts       # MCP WebSocket server on :3112
 ./start.sh                           # Both together (frontend bg, backend fg)
 
 # Build
@@ -25,10 +25,10 @@ npx playwright test tests/v2_smoke.spec.ts --reporter=line   # Single test file
 
 # Devflow (tri-agent automation)
 npm run devflow -- "requirement"     # CLI
-npm run devflow:server               # Web UI on :4170
+npm run devflow:server               # Web UI on :4271
 ```
 
-**URLs:** Default is v2 at `http://localhost:5173`. Legacy v1 via `?legacy=1`. Fixtures via `?fixture=<id>` — available IDs: `boxes` (default), `side`, `lid`, `shelf`, `slot`, `nested`.
+**URLs:** Default is v2 at `http://localhost:5274`. Legacy v1 via `?legacy=1`. Fixtures via `?fixture=<id>` — available IDs: `boxes` (default), `side`, `lid`, `shelf`, `slot`, `nested`.
 
 ## Architecture
 

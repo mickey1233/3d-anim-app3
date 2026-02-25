@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 test.describe('v2 chat router', () => {
   test('supports conversational reply and natural language tool control', async ({ page }) => {
     test.setTimeout(90_000);
-    await page.goto('http://127.0.0.1:5173/?v=2&fixture=boxes', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5274/?v=2&fixture=boxes', { waitUntil: 'domcontentloaded' });
 
     await page.waitForFunction(() => !!(window as any).__V2_STORE__?.getState);
     await page.waitForFunction(() => {
@@ -32,7 +32,7 @@ test.describe('v2 chat router', () => {
 
   test('supports step Q&A, model Q&A, and natural mate parsing', async ({ page }) => {
     test.setTimeout(120_000);
-    await page.goto('http://127.0.0.1:5173/?v=2&fixture=boxes', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5274/?v=2&fixture=boxes', { waitUntil: 'domcontentloaded' });
 
     await page.waitForFunction(() => !!(window as any).__V2_STORE__?.getState);
     await page.waitForFunction(() => {

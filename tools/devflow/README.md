@@ -8,5 +8,5 @@
 
 - 文件：`devflow-kit/docs/DEVFLOW.md`
 - CLI：`node devflow-kit/bin/devflow.js ...`
-- Server/UI：`node devflow-kit/bin/devflow.js server --port 4170`
+- Server/UI：`node devflow-kit/bin/devflow.js server --port 4271`
 

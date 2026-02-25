@@ -12,7 +12,7 @@ async function getPartIds(page: any) {
 test.describe('v2 query.mate_suggestions fixtures', () => {
   test('side fixture prefers right->left', async ({ page }) => {
     test.setTimeout(120_000);
-    await page.goto('http://127.0.0.1:5173/?v=2&fixture=side', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5274/?v=2&fixture=side', { waitUntil: 'domcontentloaded' });
 
     await page.waitForFunction(() => !!(window as any).__V2_STORE__?.getState);
     await page.waitForFunction(() => {
@@ -43,7 +43,7 @@ test.describe('v2 query.mate_suggestions fixtures', () => {
 
   test('lid fixture infers cover intent and suggests both mode', async ({ page }) => {
     test.setTimeout(120_000);
-    await page.goto('http://127.0.0.1:5173/?v=2&fixture=lid', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5274/?v=2&fixture=lid', { waitUntil: 'domcontentloaded' });
 
     await page.waitForFunction(() => !!(window as any).__V2_STORE__?.getState);
     await page.waitForFunction(() => {
@@ -72,7 +72,7 @@ test.describe('v2 query.mate_suggestions fixtures', () => {
 
   test('slot fixture avoids object_aabb-only anchor for insert intent', async ({ page }) => {
     test.setTimeout(120_000);
-    await page.goto('http://127.0.0.1:5173/?v=2&fixture=slot', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5274/?v=2&fixture=slot', { waitUntil: 'domcontentloaded' });
 
     await page.waitForFunction(() => !!(window as any).__V2_STORE__?.getState);
     await page.waitForFunction(() => {

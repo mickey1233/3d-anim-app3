@@ -7,9 +7,9 @@
 - DONE_SUBTASKS: [S1, S2, S3, S4, S5a, S5b, S5c, S5d, S5e, S5f, S5g, S5h, S5i, S6, S7a, S7b, S7c, S7d, S7e, S8a, S9a, S10]
 - NEXT_SUBTASK: S12 — port consolidation + full VLM mate flow integration
 - HOW_TO_RESUME:
-  1) Frontend: `npm run dev -- --host 127.0.0.1 --port 5173`
-  2) MCP v2 WS gateway: `npx tsx mcp-server/v2/index.ts` (default `ws://127.0.0.1:3011`)
-  3) Open: `http://127.0.0.1:5173/?v=2&fixture=boxes`
+  1) Frontend: `npm run dev -- --host 127.0.0.1 --port 5274`
+  2) MCP v2 WS gateway: `npx tsx mcp-server/v2/index.ts` (default `ws://127.0.0.1:3112`)
+  3) Open: `http://127.0.0.1:5274/?v=2&fixture=boxes`
   4) Chat + mate regression: `npx playwright test tests/v2_chat_router.spec.ts tests/v2_mate_translate_parity.spec.ts tests/v2_mate_smart_ui_mismatch.spec.ts --reporter=line`
   5) Mate panel via MCP + offsets: `npx playwright test tests/v2_mate_panel_apply_mcp.spec.ts tests/v2_mate_offsets_mcp.spec.ts --reporter=line`
   6) Suggestions + fixtures (side/lid/slot): `npx playwright test tests/v2_query_mate_suggestions.spec.ts tests/v2_mate_suggestions_fixtures.spec.ts --reporter=line`
@@ -457,7 +457,7 @@ To improve actual VLM accuracy (image analysis tab):
   - `tests/v2_chat_router.spec.ts`
   - `tests/v2_mate_ui_latency.spec.ts`
 - ✅ How to test in browser:
-  1) Open `http://127.0.0.1:5173/?v=2&fixture=boxes`
+  1) Open `http://127.0.0.1:5274/?v=2&fixture=boxes`
   2) Enter Mate tab and quickly toggle source/target/face/method/mode; ensure no long freeze/unresponsive.
   3) In Chat tab test `這個 usd 的 3d model`, `mate part1 and part2`, `請幫我把 part1 跟 part2 對齊`.
   4) Switch to rotate and drag gizmo around overlapping view; verify background click no longer steals interaction.
@@ -609,7 +609,7 @@ To improve actual VLM accuracy (image analysis tab):
   - `tests/v2_mate_preview.spec.ts`
   - `tests/v2_mate_methods.spec.ts`
 - ✅ How to test in browser:
-  1) Open `http://127.0.0.1:5173/?v=2&fixture=boxes`
+  1) Open `http://127.0.0.1:5274/?v=2&fixture=boxes`
   2) In chat tab: ask `我要如何新增step`, then `這個 usd model 是什麼`
   3) Send `mate part1 and part2` and `mate part1 bottom and part2 top use object aabb method`
   4) Enter mate workspace and verify no large `Source/Target` text overlays block view
@@ -716,8 +716,8 @@ To improve actual VLM accuracy (image analysis tab):
 
 ### S1 — Test evidence (2026-02-11)
 - Servers:
-  - Frontend: `npm run dev -- --host 127.0.0.1 --port 5173`
-  - MCP v2 gateway: `npx tsx mcp-server/v2/index.ts` (listening on `3011`)
+  - Frontend: `npm run dev -- --host 127.0.0.1 --port 5274`
+  - MCP v2 gateway: `npx tsx mcp-server/v2/index.ts` (listening on `3112`)
 - Playwright baseline:
   - `npx playwright test tests/v2_smoke.spec.ts tests/v2_command_bar.spec.ts --reporter=line`
   - Result: ✅ `2 passed` (38.7s)
@@ -804,7 +804,7 @@ S4 test evidence (2026-02-11):
 - 需要打字控制功能（微調/對齊/重置/視覺設定）；完整 AI chat 可等功能穩定後再加。
 
 ### Repro steps (current)
-1) 開 `http://localhost:5173`（v2 default）
+1) 開 `http://localhost:5274`（v2 default）
 2) 於右側 Mate panel 嘗試選 face：只看到 top/bottom
 3) Apply mate 後：物件移動但缺少「回到原位」按鈕/流程
 4) 嘗試拖曳/微調：缺少 nudge UI；gizmo 操作後狀態無法可靠回放
@@ -937,9 +937,9 @@ S4 test evidence (2026-02-11):
 
 ## HOW_TO_RESUME
 1) 啟動前後端（兩個 terminal）：
-   - `npm run dev -- --port 5173`
+   - `npm run dev -- --port 5274`
    - `npx tsx mcp-server/v2/index.ts`
-2) 開瀏覽器到 `http://localhost:5173`（v2 default；`?legacy=1` 進 v1）
+2) 開瀏覽器到 `http://localhost:5274`（v2 default；`?legacy=1` 進 v1）
 3) v2 E2E：
    - `npx playwright test tests/v2_smoke.spec.ts`
    - `npx playwright test tests/v2_responsive_panel.spec.ts`

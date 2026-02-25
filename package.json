@@ -13,7 +13,7 @@
     "test": "playwright test --reporter=line",
     "test:e2e": "playwright test --reporter=line",
     "devflow": "node ./bin/devflow.js",
-    "devflow:server": "node ./bin/devflow.js server --port 4170"
+    "devflow:server": "node ./bin/devflow.js server --port 4271"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
