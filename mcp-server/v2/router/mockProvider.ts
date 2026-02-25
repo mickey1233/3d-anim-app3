@@ -398,6 +398,41 @@ const inferSourceTarget = (text: string, mentioned: MentionedPart[], _ctx: Route
   return { source, target, explicitDirection };
 };
 
+const shouldAllowLlmSourceTargetOverride = (text: string) => {
+  const lower = normalizeText(text);
+  return containsAny(lower, [
+    'install',
+    'mount',
+    'attach',
+    'insert',
+    'cover',
+    'lid',
+    'cap',
+    'close',
+    'put',
+    'place',
+    'fit into',
+    'fit on',
+    'plug',
+    'socket',
+    'screw',
+    'bolt',
+    '安裝',
+    '裝上',
+    '插入',
+    '放上',
+    '放進',
+    '放入',
+    '蓋上',
+    '蓋起來',
+    '套上',
+    '鎖上',
+    '卡入',
+    '插槽',
+    '蓋子',
+  ]);
+};
+
 const formatModelSummary = (ctx: RouterContext) => {
   const fileLabel = ctx.cadFileName ? `\`${ctx.cadFileName}\`` : '目前模型';
   const names = ctx.parts.slice(0, 6).map((part) => part.name);
@@ -621,7 +656,11 @@ export const MockRouterProvider: RouterProvider = {
       if ((!explicitFace || !explicitMethod || !explicitMode) && !hasMateSuggestionContext) {
         const llmInference = await inferMateWithLlm(text, ctx);
         if (llmInference) {
-          if (!explicitDirection && Number(llmInference.confidence ?? 0) >= 0.82) {
+          if (
+            !explicitDirection &&
+            shouldAllowLlmSourceTargetOverride(text) &&
+            Number(llmInference.confidence ?? 0) >= 0.82
+          ) {
             const sourceCandidate = mentioned.find((part) => part.id === llmInference.sourcePartId);
             const targetCandidate = mentioned.find((part) => part.id === llmInference.targetPartId);
             if (sourceCandidate && targetCandidate && sourceCandidate.id !== targetCandidate.id) {
@@ -629,7 +668,16 @@ export const MockRouterProvider: RouterProvider = {
               target = targetCandidate;
             }
           }
-          if (!explicitMode && llmInference.mode) mode = llmInference.mode;
+          // Only accept LLM's 'both' mode if the user's text also contains explicit
+          // insert/cover/arc keywords (detectExplicitMateMode returns 'both').
+          // Silently returning 'both' for generic "assemble / 組裝" commands causes
+          // unexpected face-alignment rotation — 'translate' is the safer default.
+          if (!explicitMode && llmInference.mode) {
+            if (llmInference.mode !== 'both') {
+              mode = llmInference.mode;
+            }
+            // 'both' from LLM is intentionally dropped; resolvedMode will fall through to 'translate'.
+          }
           if (!explicitSourceFace && llmInference.sourceFace) sourceFace = llmInference.sourceFace;
           if (!explicitTargetFace && llmInference.targetFace) targetFace = llmInference.targetFace;
           if (!explicitMethod && llmInference.sourceMethod) sourceMethod = llmInference.sourceMethod;
@@ -663,15 +711,23 @@ export const MockRouterProvider: RouterProvider = {
       const rankingTop = suggestionContext?.rankingTop;
       const expectedFromCenters = suggestionContext?.expectedFromCenters;
       const useSuggestedMethod = suggestionContext?.intent === 'insert';
-      const resolvedSourceFace =
-        sourceFace ?? rankingTop?.sourceFace ?? expectedFromCenters?.sourceFace ?? 'bottom';
-      const resolvedTargetFace =
-        targetFace ?? rankingTop?.targetFace ?? expectedFromCenters?.targetFace ?? 'top';
+      // Skip expectedFromCenters (positional heuristic) — it changes whenever the user
+      // moves a part and overrides geometry-based suggestions.  Fall straight through to
+      // the static 'bottom'/'top' safe default when no geometry ranking is available.
+      const resolvedSourceFace = sourceFace ?? rankingTop?.sourceFace ?? 'bottom';
+      const resolvedTargetFace = targetFace ?? rankingTop?.targetFace ?? 'top';
       const resolvedSourceMethod =
         sourceMethod ?? (useSuggestedMethod ? rankingTop?.sourceMethod : undefined) ?? 'auto';
       const resolvedTargetMethod =
         targetMethod ?? (useSuggestedMethod ? rankingTop?.targetMethod : undefined) ?? 'auto';
-      const resolvedMode = mode ?? suggestionContext?.suggestedMode ?? 'translate';
+      // Only accept suggestedMode='both' from the suggestion engine when the user
+      // explicitly requested an insert/cover/arc operation.  Otherwise stick to
+      // 'translate' so generic "組裝/assemble" commands never cause unexpected rotation.
+      const suggestedModeAccepted =
+        suggestionContext?.suggestedMode === 'both' && !explicitMode
+          ? 'translate'
+          : suggestionContext?.suggestedMode;
+      const resolvedMode = mode ?? suggestedModeAccepted ?? 'translate';
 
       calls.push({
         tool: 'action.mate_execute',

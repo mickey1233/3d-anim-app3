@@ -318,6 +318,9 @@ function inferIntentFromGeometry(sourceObject: THREE.Object3D, targetObject: THR
 }
 
 function defaultModeForIntent(intent: MateIntentKind): MateExecMode {
+  // 'cover' geometry (lid-on-body) → 'both' for direct tool calls / query.mate_suggestions.
+  // When routed through chat, mockProvider filters this down to 'translate' for generic
+  // "assemble" commands that don't include explicit insert/cover/arc keywords.
   if (intent === 'cover') return 'both';
   return 'translate';
 }
@@ -433,14 +436,17 @@ function inferBestFacePair(params: {
       const approachScore = (sourceApproach + targetApproach) * 0.5;
       const centerDistance = sourceCandidate.centerWorld.distanceTo(targetCandidate.centerWorld);
       const distanceScore = 1 / (1 + centerDistance);
+      // Positional expectedFaceScore is intentionally tiny (0.02) so that geometry-based
+      // normal/approach scores dominate.  Moving a part laterally should not flip which
+      // faces are selected — geometry normals decide that, not relative position.
       const expectedFaceScore =
         (sourceCandidate.face === expectedFaces.sourceFace ? 0.5 : 0) +
         (targetCandidate.face === expectedFaces.targetFace ? 0.5 : 0);
       const score =
-        facingScore * 0.42 +
-        approachScore * 0.24 +
-        distanceScore * 0.20 +
-        expectedFaceScore * 0.10 +
+        facingScore * 0.46 +
+        approachScore * 0.26 +
+        distanceScore * 0.22 +
+        expectedFaceScore * 0.02 +
         Math.min((sourceCandidate.areaHint + targetCandidate.areaHint) / 200, 0.04);
 
       ranking.push({
@@ -1160,6 +1166,27 @@ function computeMateAlignedEndTransform(params: {
       translationWorld: tuple3(outPos.clone().sub(sourcePos)),
     },
   };
+}
+
+function worldPoseToLocalPose(
+  object: THREE.Object3D,
+  worldPos: THREE.Vector3,
+  worldQuat: THREE.Quaternion
+) {
+  const parent = object.parent;
+  if (!parent) {
+    return { position: tuple3(worldPos), quaternion: tuple4(worldQuat) };
+  }
+
+  parent.updateWorldMatrix(true, false);
+  const invParent = new THREE.Matrix4().copy(parent.matrixWorld).invert();
+  const localPos = worldPos.clone().applyMatrix4(invParent);
+
+  const parentWorldQuat = new THREE.Quaternion();
+  parent.getWorldQuaternion(parentWorldQuat);
+  const localQuat = parentWorldQuat.invert().multiply(worldQuat).normalize();
+
+  return { position: tuple3(localPos), quaternion: tuple4(localQuat) };
 }
 
 function ensurePreviewBeforeTransform(partId: string) {
@@ -2125,8 +2152,26 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       const twistInput = input.twist ?? { angleDeg: 0, axis: 'normal', axisSpace: 'target_face' };
       const applyTwist = operation === 'both' || operation === 'twist' || Math.abs(Number(twistInput.angleDeg || 0)) > 1e-6;
 
+      const sourceObj = getV2ObjectByPartId(sourcePartId);
+      const sourceWorldPos = sourceObj ? new THREE.Vector3() : null;
+      const sourceWorldQuat = sourceObj ? new THREE.Quaternion() : null;
+      if (sourceObj && sourceWorldPos && sourceWorldQuat) {
+        sourceObj.updateWorldMatrix(true, false);
+        sourceObj.getWorldPosition(sourceWorldPos);
+        sourceObj.getWorldQuaternion(sourceWorldQuat);
+      }
+
+      const sourceWorldTransform: PartTransform =
+        sourceObj && sourceWorldPos && sourceWorldQuat
+          ? {
+              position: tuple3(sourceWorldPos),
+              quaternion: tuple4(sourceWorldQuat),
+              scale: [...sourceTransform.scale],
+            }
+          : sourceTransform;
+
       const solved = computeMateAlignedEndTransform({
-        sourceTransform,
+        sourceTransform: sourceWorldTransform,
         sourceFrame,
         targetFrame,
         offset: Number(input.offset ?? 0),
@@ -2137,10 +2182,14 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         twistAxis: twistInput.axis,
         twistAxisSpace: twistInput.axisSpace,
       });
-      endTransform = solved.endTransform;
+      const endWorldTransform: PartTransform = {
+        position: [...solved.endTransform.position],
+        quaternion: [...solved.endTransform.quaternion],
+        scale: [...sourceTransform.scale],
+      };
 
       if (operation === 'twist') {
-        endTransform.position = sourceTransform.position;
+        endWorldTransform.position = [...sourceWorldTransform.position];
       }
 
       pathType =
@@ -2158,15 +2207,39 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       const durationMs = Number(input.durationMs ?? 900);
       const sampleCount = Number(input.sampleCount ?? 60);
       const arcHeight = Number(input.arc?.height ?? 0);
-      const steps = samplePath({
-        start: sourceTransform,
-        end: endTransform,
+      const stepsWorld = samplePath({
+        start: sourceWorldTransform,
+        end: endWorldTransform,
         durationMs,
         sampleCount,
         pathType: pathType === 'screw' ? 'line' : pathType,
         arcHeight,
         arcLiftAxis: targetFrame.bitangent,
       });
+      const steps =
+        sourceObj && sourceWorldPos && sourceWorldQuat
+          ? stepsWorld.map((step) => {
+              const local = worldPoseToLocalPose(
+                sourceObj,
+                vec3(step.positionWorld),
+                quat4(step.quaternionWorld).normalize()
+              );
+              return {
+                ...step,
+                positionWorld: local.position,
+                quaternionWorld: local.quaternion,
+              };
+            })
+          : stepsWorld;
+
+      // Keep endTransform consistent with store-local space for downstream tooling/debug.
+      endTransform =
+        sourceObj && sourceWorldPos && sourceWorldQuat
+          ? {
+              ...sourceTransform,
+              ...worldPoseToLocalPose(sourceObj, vec3(endWorldTransform.position), quat4(endWorldTransform.quaternion).normalize()),
+            }
+          : endWorldTransform;
 
       const planId = crypto.randomUUID();
       const plan = {
@@ -2404,10 +2477,11 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           })
         : null;
 
-    const chosenSourceFace =
-      explicitSourceFace ?? suggestedFacePair?.sourceFace ?? getExpectedFacePairFromCenters(vec3(getPartTransformOrThrow(source.partId).position), vec3(getPartTransformOrThrow(target.partId).position)).sourceFace;
-    const chosenTargetFace =
-      explicitTargetFace ?? suggestedFacePair?.targetFace ?? getExpectedFacePairFromCenters(vec3(getPartTransformOrThrow(source.partId).position), vec3(getPartTransformOrThrow(target.partId).position)).targetFace;
+    // Prefer geometry-based face pair over positional heuristic.
+    // Fallback to 'bottom'/'top' rather than getExpectedFacePairFromCenters so that
+    // moving a part laterally in the scene never silently flips the chosen faces.
+    const chosenSourceFace = explicitSourceFace ?? suggestedFacePair?.sourceFace ?? 'bottom';
+    const chosenTargetFace = explicitTargetFace ?? suggestedFacePair?.targetFace ?? 'top';
     const chosenSourceMethod = explicitSourceMethod ?? suggestedFacePair?.sourceMethod ?? sourceMethodPriority[0] ?? 'planar_cluster';
     const chosenTargetMethod = explicitTargetMethod ?? suggestedFacePair?.targetMethod ?? targetMethodPriority[0] ?? 'planar_cluster';
 
