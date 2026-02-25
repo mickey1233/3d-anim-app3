@@ -7,6 +7,7 @@ import { MCPToolRequestSchema } from '../../shared/schema/mcpToolsV3.js';
 import { routeAndExecute } from './router/router.js';
 import type { RouterContext, RouterToolResult } from './router/types.js';
 import { analyzeVlm } from './vlm/analyze.js';
+import { inferMateFromImages } from './vlm/mateInfer.js';
 
 const ToolProxyResultSchema = z.object({
   proxyId: z.string().min(1),
@@ -295,6 +296,29 @@ export class WsGatewayV2 {
             const parts = args.parts || [];
             const result = await analyzeVlm(images, parts);
             this.sendResponse(ws, parsed.data.id, true, result);
+            return;
+          }
+
+          if (parsed.data.command === 'vlm_mate_analyze') {
+            const args = (parsed.data.args ?? {}) as {
+              images?: { angle: string; dataUrl: string }[];
+              sceneState?: {
+                parts: { id: string; name: string; position: [number, number, number] }[];
+                sourcePart: { id: string; name: string };
+                targetPart: { id: string; name: string };
+                userText: string;
+              };
+            };
+            const inference = await inferMateFromImages(
+              args.images ?? [],
+              args.sceneState ?? {
+                parts: [],
+                sourcePart: { id: '', name: '' },
+                targetPart: { id: '', name: '' },
+                userText: '',
+              }
+            );
+            this.sendResponse(ws, parsed.data.id, true, { inference });
             return;
           }
 
