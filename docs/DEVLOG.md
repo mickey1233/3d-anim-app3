@@ -3,14 +3,14 @@
 > 時間基準：本次執行時間為 2026-02-11（local）。本檔用來記錄可中斷/可續跑的進度、決策與測試證據。
 
 ## Progress (Quality-First MCP-only migration)
-- CURRENT_SUBTASK: S7e — Mate panel latency + marker UI compacting (completed)
-- DONE_SUBTASKS: [S1, S2, S3, S4, S5a, S5b, S5c, S5d, S5e, S5f, S5g, S5h, S5i, S6, S7a, S7b, S7c, S7d, S7e]
-- NEXT_SUBTASK: S8 — rotate hit-path conflict (gizmo interaction precedence)
+- CURRENT_SUBTASK: S11 — VLM-guided mate inference (multi-angle capture → mode/intent/face/source/target)
+- DONE_SUBTASKS: [S1, S2, S3, S4, S5a, S5b, S5c, S5d, S5e, S5f, S5g, S5h, S5i, S6, S7a, S7b, S7c, S7d, S7e, S8a, S9a, S10]
+- NEXT_SUBTASK: S12 — port consolidation + full VLM mate flow integration
 - HOW_TO_RESUME:
   1) Frontend: `npm run dev -- --host 127.0.0.1 --port 5173`
   2) MCP v2 WS gateway: `npx tsx mcp-server/v2/index.ts` (default `ws://127.0.0.1:3011`)
   3) Open: `http://127.0.0.1:5173/?v=2&fixture=boxes`
-  4) Chat + mate regression: `npx playwright test tests/v2_chat_router.spec.ts tests/v2_mate_translate_parity.spec.ts --reporter=line`
+  4) Chat + mate regression: `npx playwright test tests/v2_chat_router.spec.ts tests/v2_mate_translate_parity.spec.ts tests/v2_mate_smart_ui_mismatch.spec.ts --reporter=line`
   5) Mate panel via MCP + offsets: `npx playwright test tests/v2_mate_panel_apply_mcp.spec.ts tests/v2_mate_offsets_mcp.spec.ts --reporter=line`
   6) Suggestions + fixtures (side/lid/slot): `npx playwright test tests/v2_query_mate_suggestions.spec.ts tests/v2_mate_suggestions_fixtures.spec.ts --reporter=line`
   7) View capture: `npx playwright test tests/v2_view_capture.spec.ts --reporter=line`
@@ -19,6 +19,97 @@
   10) Validation E2E (mate regression): `npx playwright test tests/v2_mate_preview.spec.ts tests/v2_mate_methods.spec.ts tests/v2_mate_rotation.spec.ts --reporter=line`
   11) Smoke: `npx playwright test tests/v2_smoke.spec.ts --reporter=line`
   12) Real CAD import check: `npx playwright test tests/v2_real_model_mate_perf.spec.ts --reporter=line`
+  13) Rotate gizmo regression (current gap): add/run `tests/v2_gizmo_hit_priority.spec.ts`
+
+## S10 — Fix Mate Mode & Face Inference Bugs (2026-02-25)
+
+### Scope
+- Bug A: "幫我把part2和part1組裝起來" → `mode=both` → unexpected rotation instead of translate
+- Bug B: When part2 is moved right, face inference changes from bottom/top to left/right — purely positional, wrong
+
+### Root causes
+1. `inferIntentFromGeometry` detects vertical stacking → `intent='cover'` → `defaultModeForIntent('cover')='both'`
+2. `inferMateWithLlm` (hybrid path) infers `mode='both'` for generic "組裝" commands
+3. `getExpectedFacePairFromCenters` is purely positional and contaminates face scoring + fallback chain
+
+### What changed
+- `src/v2/network/mcpToolExecutor.ts`
+  - `inferBestFacePair` scoring: `expectedFaceScore` weight `0.10 → 0.02` (positional bias greatly reduced)
+  - `action.mate_execute` face fallback: replaced `getExpectedFacePairFromCenters(...)` with static `'bottom'/'top'`
+- `mcp-server/v2/router/mockProvider.ts`
+  - Face resolution chain: removed `expectedFromCenters` from fallback
+  - `suggestedMode` guard: when suggestion context yields `mode='both'` and no explicit user mode → use `'translate'`
+  - LLM mode guard: when LLM infers `mode='both'` without explicit command → drop it, fall through to `'translate'`
+- `src/v2/three/fixtures/NestedFixture.tsx` — new nested fixture for regression testing
+- `tests/v2_mate_both_nested_parent.spec.ts` — new tests:
+  - "generic assembly command uses translate not both" — verifies 組裝 → `mode=translate`
+  - "cover/both moves the source" — verifies explicit "cover" keyword still triggers `mode=both`
+
+### Test results
+- `v2_mate_both_nested_parent.spec.ts`: ✅ 2 passed
+- Broader regression (9 tests): ✅ 9 passed
+
+### VLM accuracy note
+Bugs shown were NOT VLM — they were mockProvider NLP + geometry inference bugs.
+To improve actual VLM accuracy (image analysis tab):
+1. Inject scene part names + positions into VLM system prompt
+2. Ask VLM to reason step-by-step (CoT) about which part moves where
+3. Gate VLM face pairs behind confidence threshold ≥ 0.85
+4. Cross-validate VLM face inference against geometry-based `mate_suggestions`
+5. Fall back to interactive selection when VLM confidence < threshold
+
+## S9a — Rotate gizmo raycast priority core fix (2026-02-24)
+
+### Scope
+- Fix rotate/move mode interaction where a mesh behind the gizmo can win raycast hits and prevent dragging the transform gizmo.
+- Keep mate face picking behavior unchanged (only apply priority in `move` / `rotate` mode).
+
+### Root cause
+- R3F dispatches pointer events by nearest raycast intersection.
+- When a model mesh overlaps the gizmo handle in screen space, the mesh can be hit first, so gizmo drag never starts.
+- `TransformGizmo` already calls `stopPropagation()`, but that only works after the gizmo receives the event; it does not help when the gizmo loses the initial hit test.
+
+### What changed
+- `src/v2/three/interaction/TransformGizmo.tsx`
+  - Marked TransformControls helper/handle objects with a raycast-priority flag (`__v2TransformGizmoHandle`) while mounted.
+- `src/v2/three/CanvasRoot.tsx`
+  - Added a Canvas `events.filter` wrapper to reorder intersections so flagged gizmo hits are prioritized.
+  - Priority is active only when a part is selected and interaction mode is `move` or `rotate`.
+  - Leaves other modes (including mate face picking) unchanged.
+
+### Browser verification evidence
+- Regression/smoke batch:
+  - `npx playwright test tests/v2_chat_router.spec.ts tests/v2_mate_translate_parity.spec.ts tests/v2_mate_smart_ui_mismatch.spec.ts tests/controls_drag.spec.ts --reporter=line`
+  - Result: ✅ `5 passed`
+
+### Known limitations / next step
+- （pending）專用 E2E 尚未直接拖曳 gizmo handle 驗證「背後物件重疊時仍可拖動」；這是 `S9b` 的目標。
+- 已先完成核心 raycast-priority 修正，並用現有互動回歸確認未破壞其他流程。
+
+## S8a — Bare `mate part1 and part2` source/target stability (2026-02-24)
+
+### Scope
+- Reduce surprising source/target swaps for under-specified mate commands like `mate part1 and part2`.
+- Preserve LLM help for face/method/mode inference, but make bare command direction deterministic.
+
+### Root cause
+- Router allowed LLM inference to override source/target order whenever confidence was high enough, even when the user did not provide directional or placement semantics.
+- In real models, this can flip which part is moved (source) vs fixed (target), producing a visibly different result from manual Mate UI usage.
+
+### What changed
+- `mcp-server/v2/router/mockProvider.ts`
+  - Added `shouldAllowLlmSourceTargetOverride(text)` gate.
+  - LLM can still infer face/method/mode for bare mate commands.
+  - Source/target override is now limited to commands with stronger placement/assembly semantics (e.g. install/insert/cover/lid/cap/socket/plug and Chinese equivalents).
+  - Bare `mate part1 and part2` now keeps mention order unless the user gives explicit direction.
+
+### Browser verification evidence
+- `npx playwright test tests/v2_chat_router.spec.ts tests/v2_mate_translate_parity.spec.ts tests/v2_mate_smart_ui_mismatch.spec.ts --reporter=line`
+- Result: ✅ `4 passed`
+
+### Assumptions / decisions
+- For ambiguous bare mate commands, deterministic mention order is preferred over aggressive LLM source/target swapping.
+- Richer semantic source/target inference remains a planned follow-up in `S10` once scene-context + intent classification is further upgraded.
 
 ## S7e — Mate panel latency + marker compaction (2026-02-11)
 
