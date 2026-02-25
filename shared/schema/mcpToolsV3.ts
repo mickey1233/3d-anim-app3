@@ -849,6 +849,37 @@ const VlmAnalyzeDataSchema = z.object({
   result: VlmResultSchema.optional(),
 });
 
+const VlmMateInferenceSchema = z.object({
+  mode: z.enum(['translate', 'twist', 'both']),
+  intent: z.string(),
+  method: z.enum(['auto', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'extreme_vertices', 'obb_pca', 'picked']).optional(),
+  sourceFace: z.enum(['top', 'bottom', 'left', 'right', 'front', 'back']).optional(),
+  targetFace: z.enum(['top', 'bottom', 'left', 'right', 'front', 'back']).optional(),
+  sourcePart: z.string(),
+  targetPart: z.string(),
+  confidence: z.number().min(0).max(1),
+  reasoning: z.string().optional(),
+});
+
+const VlmCaptureForMateArgsSchema = z.object({
+  sourcePart: PartRefSchema,
+  targetPart: PartRefSchema,
+  userText: z.string().optional(),
+  maxWidthPx: z.number().int().min(64).max(1024).default(512),
+  maxHeightPx: z.number().int().min(64).max(768).default(384),
+  angleLabels: z.array(z.string()).optional(),
+  confidenceThreshold: z.number().min(0).max(1).default(0.75),
+});
+
+const VlmCaptureForMateDataSchema = z.object({
+  capturedAngles: z.array(z.string()),
+  imageCount: z.number().int().nonnegative(),
+  vlmInference: VlmMateInferenceSchema.nullable(),
+  confidenceThreshold: z.number(),
+  meetsThreshold: z.boolean(),
+  fallbackReason: z.string().optional(),
+});
+
 const CameraStateSchema = z.object({
   positionWorld: Vec3Schema,
   targetWorld: Vec3Schema,
@@ -1077,6 +1108,10 @@ export const MCPToolSchemas = {
     args: VlmAnalyzeArgsSchema,
     result: makeToolResultSchema(VlmAnalyzeDataSchema),
   },
+  'vlm.capture_for_mate': {
+    args: VlmCaptureForMateArgsSchema,
+    result: makeToolResultSchema(VlmCaptureForMateDataSchema),
+  },
   'history.undo': {
     args: HistoryUndoArgsSchema,
     result: makeToolResultSchema(HistoryResultDataSchema),
@@ -1162,6 +1197,7 @@ export const MCPToolNameSchema = z.enum([
   'vlm.move_image',
   'vlm.remove_image',
   'vlm.analyze',
+  'vlm.capture_for_mate',
   'history.undo',
   'history.redo',
   'mode.set_interaction_mode',
@@ -1214,6 +1250,7 @@ const typedRequestSchemas = [
   z.object({ tool: z.literal('vlm.move_image'), args: VlmMoveImageArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('vlm.remove_image'), args: VlmRemoveImageArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('vlm.analyze'), args: VlmAnalyzeArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('vlm.capture_for_mate'), args: VlmCaptureForMateArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('history.undo'), args: HistoryUndoArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('history.redo'), args: HistoryRedoArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('mode.set_interaction_mode'), args: ModeSetArgsSchema, meta: ToolMetaSchema.optional() }),

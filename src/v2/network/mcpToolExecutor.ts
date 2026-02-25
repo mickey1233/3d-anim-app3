@@ -10,6 +10,8 @@ import { useV2Store, type FaceId as StoreFaceId, type InteractionMode, type Part
 import { ENVIRONMENT_PRESETS } from '../three/backgrounds/backgrounds';
 import { v2Client } from './client';
 import { getV2Camera, getV2ObjectByPartId, getV2Renderer, getV2Scene, getV2ViewportPx } from '../three/SceneRegistry';
+import { computeCaptureSize, dataUrlFromPixels } from '../three/captureUtils';
+import { captureMultiAngles, DEFAULT_ANGLES } from '../three/captureMultiAngle';
 import { resolveAnchor } from '../three/mating/anchorMethods';
 import { solveMateTopBottom } from '../three/mating/solver';
 
@@ -641,45 +643,6 @@ function clampInt(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
-function computeCaptureSize(params: {
-  viewportWidth: number;
-  viewportHeight: number;
-  maxWidthPx: number;
-  maxHeightPx: number;
-}) {
-  const { viewportWidth, viewportHeight, maxWidthPx, maxHeightPx } = params;
-  const safeW = Math.max(1, viewportWidth);
-  const safeH = Math.max(1, viewportHeight);
-  const scale = Math.min(maxWidthPx / safeW, maxHeightPx / safeH, 1);
-  return {
-    width: clampInt(safeW * scale, 64, 2048),
-    height: clampInt(safeH * scale, 64, 2048),
-  };
-}
-
-function dataUrlFromPixels(params: { pixels: Uint8Array; width: number; height: number; mimeType: string; jpegQuality?: number }) {
-  const { pixels, width, height, mimeType, jpegQuality } = params;
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('2D canvas not available');
-
-  const imageData = ctx.createImageData(width, height);
-  const rowStride = width * 4;
-  // Flip Y: WebGL readPixels origin is bottom-left.
-  for (let y = 0; y < height; y++) {
-    const srcRow = (height - 1 - y) * rowStride;
-    const dstRow = y * rowStride;
-    imageData.data.set(pixels.subarray(srcRow, srcRow + rowStride), dstRow);
-  }
-  ctx.putImageData(imageData, 0, 0);
-
-  if (mimeType === 'image/jpeg') {
-    return canvas.toDataURL(mimeType, jpegQuality ?? 0.92);
-  }
-  return canvas.toDataURL(mimeType);
-}
 
 function resolvePart(part: PartRef): ResolvedPart {
   const store = currentStore();
@@ -2923,6 +2886,84 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         suggestedToolCalls: [{ tool: 'ui.get_sync_state', args: {} }],
       });
     }
+  }
+
+  if (tool === 'vlm.capture_for_mate') {
+    const input = args as any;
+
+    // Resolve source and target parts.
+    const srcPart = resolvePart(input.sourcePart as PartRef);
+    const tgtPart = resolvePart(input.targetPart as PartRef);
+
+    // Filter angles if caller specified a subset.
+    const angleLabels: string[] | undefined = input.angleLabels;
+    const selectedAngles = angleLabels?.length
+      ? DEFAULT_ANGLES.filter((a) => angleLabels.includes(a.label))
+      : DEFAULT_ANGLES;
+
+    // Capture multi-angle screenshots.
+    let captureResults;
+    try {
+      captureResults = await captureMultiAngles({
+        maxWidthPx: Number(input.maxWidthPx ?? 512),
+        maxHeightPx: Number(input.maxHeightPx ?? 384),
+        angles: selectedAngles,
+      });
+    } catch (captureErr: any) {
+      throw new ToolExecutionError({
+        code: 'UNSUPPORTED_OPERATION',
+        message: `Multi-angle capture failed: ${captureErr?.message || 'unknown'}`,
+        recoverable: true,
+      });
+    }
+
+    // Send images to server-side VLM for mate parameter inference.
+    const store = currentStore();
+    const sceneState = {
+      parts: store.parts.order.map((id) => ({
+        id,
+        name: store.parts.byId[id]?.name ?? id,
+        position: store.getPartTransform(id)?.position ?? [0, 0, 0],
+      })),
+      sourcePart: { id: srcPart.partId, name: srcPart.partName },
+      targetPart: { id: tgtPart.partId, name: tgtPart.partName },
+      userText: String(input.userText ?? ''),
+    };
+
+    const confidenceThreshold = Number(input.confidenceThreshold ?? 0.75);
+    let vlmInference: Record<string, unknown> | null = null;
+
+    try {
+      const raw: any = await v2Client.request('vlm_mate_analyze', {
+        images: captureResults.map((r) => ({ angle: r.angle, dataUrl: r.dataUrl })),
+        sceneState,
+      });
+      if (raw?.inference && typeof raw.inference === 'object') {
+        vlmInference = raw.inference as Record<string, unknown>;
+      }
+    } catch {
+      // VLM call failed — return meetsThreshold=false so caller falls back to NLP.
+      vlmInference = null;
+    }
+
+    const confidence = typeof vlmInference?.confidence === 'number' ? vlmInference.confidence : 0;
+    const meetsThreshold = vlmInference !== null && confidence >= confidenceThreshold;
+
+    return ok(
+      {
+        capturedAngles: captureResults.map((r) => r.angle),
+        imageCount: captureResults.length,
+        vlmInference: meetsThreshold ? vlmInference : null,
+        confidenceThreshold,
+        meetsThreshold,
+        fallbackReason: !meetsThreshold
+          ? vlmInference === null
+            ? 'VLM call failed or returned no result'
+            : `VLM confidence ${confidence.toFixed(2)} < threshold ${confidenceThreshold}`
+          : undefined,
+      },
+      { mutating: false }
+    );
   }
 
   if (tool === 'history.undo') {
