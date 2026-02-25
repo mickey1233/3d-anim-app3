@@ -3,9 +3,9 @@
 > 時間基準：本次執行時間為 2026-02-11（local）。本檔用來記錄可中斷/可續跑的進度、決策與測試證據。
 
 ## Progress (Quality-First MCP-only migration)
-- CURRENT_SUBTASK: S11 — VLM-guided mate inference (multi-angle capture → mode/intent/face/source/target)
-- DONE_SUBTASKS: [S1, S2, S3, S4, S5a, S5b, S5c, S5d, S5e, S5f, S5g, S5h, S5i, S6, S7a, S7b, S7c, S7d, S7e, S8a, S9a, S10]
-- NEXT_SUBTASK: S12 — port consolidation + full VLM mate flow integration
+- CURRENT_SUBTASK: S12 — (next)
+- DONE_SUBTASKS: [S1, S2, S3, S4, S5a, S5b, S5c, S5d, S5e, S5f, S5g, S5h, S5i, S6, S7a, S7b, S7c, S7d, S7e, S8a, S9a, S10, S11]
+- NEXT_SUBTASK: S12 — (TBD)
 - HOW_TO_RESUME:
   1) Frontend: `npm run dev -- --host 127.0.0.1 --port 5274`
   2) MCP v2 WS gateway: `npx tsx mcp-server/v2/index.ts` (default `ws://127.0.0.1:3112`)
@@ -20,6 +20,44 @@
   11) Smoke: `npx playwright test tests/v2_smoke.spec.ts --reporter=line`
   12) Real CAD import check: `npx playwright test tests/v2_real_model_mate_perf.spec.ts --reporter=line`
   13) Rotate gizmo regression (current gap): add/run `tests/v2_gizmo_hit_priority.spec.ts`
+
+## S11 — VLM-guided mate inference (2026-02-25)
+
+### Scope
+User requests:
+1. Migrate all hardcoded ports to new values
+2. When chat detects a mate intent: auto-capture multi-angle screenshots → VLM infers mode/intent/method/face/source/target → inject into MCP tool call
+
+### Port migration (Part A)
+- 5173 → 5274 (Vite frontend)
+- 3011 → 3112 (MCP WebSocket)
+- 4170 → 4271 (devflow web UI)
+- Updated 43 files (configs, docs, 30 test spec URLs)
+
+### Multi-angle capture utility (Part B)
+- `src/v2/three/captureUtils.ts` — `computeCaptureSize` + `dataUrlFromPixels` (with Y-flip)
+- `src/v2/three/captureMultiAngle.ts` — `captureMultiAngles()` with 6 angle presets (front/back/left/right/top/iso); auto-frames from scene bounding box; camera fully restored in `try/finally`
+- `shared/schema/mcpToolsV3.ts` — `vlm.capture_for_mate` tool schema added
+- `src/v2/network/mcpToolExecutor.ts` — handler for `vlm.capture_for_mate`; calls `captureMultiAngles`, sends to `vlm_mate_analyze` WS command, returns `ToolEnvelope` with `meetsThreshold` flag
+
+### VLM prompt engineering + server handler (Parts C+D)
+- `mcp-server/v2/vlm/mateInfer.ts` — `inferMateFromImages()` with Gemini multimodal API; CoT prompting in Traditional Chinese; `MATE_VLM_MOCK_RESPONSE` bypass for testing; sanitizer for schema compliance
+- `mcp-server/v2/wsGateway.ts` — `vlm_mate_analyze` command handler added
+
+### mockProvider integration (Part E)
+- `mcp-server/v2/router/types.ts` — `VlmMateCapture` type; `vlmMateCapture` field on `RouterContext`
+- `mcp-server/v2/wsGateway.ts` — pre-fetch `vlm.capture_for_mate` before `routeAndExecute` loop when `MATE_VLM_ENABLE=1` or `MATE_VLM_MOCK_RESPONSE` is set
+- `mcp-server/v2/router/mockProvider.ts` — apply VLM-inferred mode/face/method (mode≠both guard); skip `inferMateWithLlm` and `query.mate_suggestions` rounds when VLM confident
+
+### Priority chain established
+explicit user > VLM (meetsThreshold) > LLM (inferMateWithLlm) > geometry suggestions
+
+### Test results
+- `v2_mate_vlm_inference.spec.ts`: ✅ 3 passed, 1 skipped (E2E requires `MATE_VLM_MOCK_RESPONSE`)
+- Full mate regression (11 tests): ✅ 11 passed
+- To run E2E test: `MATE_VLM_MOCK_RESPONSE='{"sourceFace":"right","targetFace":"left","mode":"face_flush","intent":"flush","confidence":0.92,"sourcePart":"part1","targetPart":"part2"}' npx playwright test tests/v2_mate_vlm_inference.spec.ts --reporter=line`
+
+---
 
 ## S10 — Fix Mate Mode & Face Inference Bugs (2026-02-25)
 
