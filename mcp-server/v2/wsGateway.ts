@@ -8,6 +8,7 @@ import { routeAndExecute } from './router/router.js';
 import type { RouterContext, RouterToolResult, VlmMateCapture } from './router/types.js';
 import { analyzeVlm } from './vlm/analyze.js';
 import { inferMateFromImages } from './vlm/mateInfer.js';
+import { inferMateParams } from './router/mateParamsInfer.js';
 
 const ToolProxyResultSchema = z.object({
   proxyId: z.string().min(1),
@@ -358,6 +359,23 @@ export class WsGatewayV2 {
                 userText: '',
               }
             );
+            this.sendResponse(ws, parsed.data.id, true, { inference });
+            return;
+          }
+
+          if (parsed.data.command === 'agent.infer_mate_params') {
+            const mateArgs = (parsed.data.args ?? {}) as {
+              userText?: string;
+              sourcePart?: { id: string; name: string };
+              targetPart?: { id: string; name: string };
+              geometryHint?: Record<string, unknown>;
+            };
+            const inference = await inferMateParams({
+              userText: mateArgs.userText ?? '',
+              sourcePart: mateArgs.sourcePart ?? { id: '', name: '' },
+              targetPart: mateArgs.targetPart ?? { id: '', name: '' },
+              geometryHint: mateArgs.geometryHint as any,
+            });
             this.sendResponse(ws, parsed.data.id, true, { inference });
             return;
           }

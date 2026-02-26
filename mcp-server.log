@@ -1,18 +1,31 @@
-nohup: ignoring input
-[MCP-Server] WebSocket server listening on port 3001
-MCP Server running on StdIO
-[MCP-Server] Received Chat: "move Part2 bottom to Part1 top"
-[MCP-NLP] Parsed: Src='Part2'(bottom), Tgt='Part1'(top)
-[MCP-NLP] Distances for 'Part1 top':
- - 'Part1': 0
- - 'Part3': 1
- - 'Part4': 1
- - 'Part2': 1
-[MCP-Server] Received Chat: "load demo"
-[MCP-Server] Received Chat: "move Part2 bottom to Part1 top"
-[MCP-NLP] Parsed: Src='Part2'(bottom), Tgt='Part1'(top)
-[MCP-NLP] Distances for 'Part1 top':
- - 'Part1': 0
- - 'Part3': 1
- - 'Part4': 1
- - 'Part2': 1
+[MCP v2] WS gateway listening on 3112
+node:events:495
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: listen EADDRINUSE: address already in use :::3112
+    at __node_internal_captureLargerStackTrace (node:internal/errors:496:5)
+    at __node_internal_uvExceptionWithHostPort (node:internal/errors:593:12)
+    at Server.setupListenHandle [as _listen2] (node:net:1817:16)
+    at listenInCluster (node:net:1865:12)
+    at Server.listen (node:net:1953:7)
+    at new WebSocketServer (/home/ubuntu/git/bullshit_artist/3d-anim-app3-claudcode/mcp-server/node_modules/ws/lib/websocket-server.js:102:20)
+    at WsGatewayV2 (/home/ubuntu/git/bullshit_artist/3d-anim-app3-claudcode/mcp-server/v2/wsGateway.ts:45:16)
+    at <anonymous> (/home/ubuntu/git/bullshit_artist/3d-anim-app3-claudcode/mcp-server/v2/index.ts:4:17)
+    at ModuleJob.run (node:internal/modules/esm/module_job:195:25)
+    at async ModuleLoader.import (node:internal/modules/esm/loader:337:24)
+    at async loadESM (node:internal/process/esm_loader:34:7)
+    at async handleMainPromise (node:internal/modules/run_main:106:12)
+Emitted 'error' event on WebSocketServer instance at:
+    at Server.emit (node:events:517:28)
+    at emitErrorNT (node:net:1844:8)
+    at process.processTicksAndRejections (node:internal/process/task_queues:82:21) {
+  code: 'EADDRINUSE',
+  errno: -98,
+  syscall: 'listen',
+  address: '::',
+  port: 3112
+}
+
+Node.js v18.20.6
+[MCP v2] WS gateway listening on 3112

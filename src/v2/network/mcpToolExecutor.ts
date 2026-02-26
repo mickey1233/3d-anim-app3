@@ -168,7 +168,7 @@ const STORE_FACES: StoreFaceId[] = ['top', 'bottom', 'left', 'right', 'front', '
 
 type MateExecMode = 'translate' | 'twist' | 'both';
 type AnchorMethodId = 'auto' | 'planar_cluster' | 'geometry_aabb' | 'object_aabb' | 'extreme_vertices' | 'obb_pca' | 'picked';
-type MateIntentKind = 'default' | 'cover' | 'insert';
+type MateIntentKind = 'default' | 'cover' | 'insert' | 'twist_insert' | 'arc_cover';
 
 type FaceAnchorCandidate = {
   face: StoreFaceId;
@@ -217,50 +217,10 @@ function instructionIncludesAny(instruction: string, tokens: string[]) {
   return tokens.some((token) => instruction.includes(token));
 }
 
-function inferMateIntentKind(instruction: string): MateIntentKind {
-  if (
-    instructionIncludesAny(instruction, [
-      'slot',
-      'insert',
-      'plug',
-      'socket',
-      'into',
-      '插槽',
-      '插入',
-      '塞進',
-      '塞进',
-      '卡入',
-    ])
-  ) {
-    return 'insert';
-  }
-  if (
-    instructionIncludesAny(instruction, [
-      'cover',
-      'lid',
-      'cap',
-      'close',
-      '蓋',
-      '盖',
-      '合上',
-      '蓋上',
-      '盖上',
-    ])
-  ) {
-    return 'cover';
-  }
-  return 'default';
-}
-
-function inferModeFromInstruction(instruction: string): MateExecMode | null {
-  const hasTwist = instructionIncludesAny(instruction, ['twist', 'rotate', 'spin', '旋轉', '旋转', '轉動', '转动']);
-  const hasArc = instructionIncludesAny(instruction, ['arc', 'cover', 'lid', 'cap', 'insert', 'slot', '蓋', '盖', '插入', '插槽']);
-  if (hasTwist && hasArc) return 'both';
-  if (hasArc) return 'both';
-  if (hasTwist) return 'twist';
-  return null;
-}
-
+/**
+ * Parses explicit anchor method override from user instruction text.
+ * Kept as a fast-path shortcut (no LLM call needed for explicit method names).
+ */
 function methodFromInstruction(instruction: string): AnchorMethodId | null {
   const table: Array<{ method: AnchorMethodId; tokens: string[] }> = [
     { method: 'object_aabb', tokens: ['object aabb', 'object_aabb', 'obj aabb', '对象aabb', '物件aabb'] },
@@ -277,55 +237,61 @@ function methodFromInstruction(instruction: string): AnchorMethodId | null {
   return null;
 }
 
-function overlapRatio1D(
-  firstMin: number,
-  firstMax: number,
-  secondMin: number,
-  secondMax: number
-) {
-  const overlap = Math.max(0, Math.min(firstMax, secondMax) - Math.max(firstMin, secondMin));
-  const base = Math.max(1e-6, Math.min(firstMax - firstMin, secondMax - secondMin));
-  return overlap / base;
-}
+type AgentMateParams = {
+  intent: MateIntentKind;
+  mode: MateExecMode;
+  sourceFace: StoreFaceId;
+  targetFace: StoreFaceId;
+  sourceMethod: AnchorMethodId;
+  targetMethod: AnchorMethodId;
+  confidence: number;
+  reasoning?: string;
+};
 
-function inferIntentFromGeometry(sourceObject: THREE.Object3D, targetObject: THREE.Object3D): MateIntentKind | null {
-  const sourceBox = new THREE.Box3().setFromObject(sourceObject);
-  const targetBox = new THREE.Box3().setFromObject(targetObject);
-  if (sourceBox.isEmpty() || targetBox.isEmpty()) return null;
+/**
+ * Calls the backend agent.infer_mate_params WS command with geometry context.
+ * Returns LLM-inferred assembly parameters, or null on failure.
+ */
+async function callAgentForMateParams(params: {
+  userText: string;
+  sourcePart: { id: string; name: string };
+  targetPart: { id: string; name: string };
+  geometryHint?: Record<string, unknown>;
+}): Promise<AgentMateParams | null> {
+  try {
+    const raw: any = await v2Client.request('agent.infer_mate_params', {
+      userText: params.userText,
+      sourcePart: params.sourcePart,
+      targetPart: params.targetPart,
+      geometryHint: params.geometryHint,
+    });
+    const inference = raw?.inference;
+    if (!inference || typeof inference !== 'object') return null;
 
-  const sourceCenter = sourceBox.getCenter(new THREE.Vector3());
-  const targetCenter = targetBox.getCenter(new THREE.Vector3());
-  const sourceSize = sourceBox.getSize(new THREE.Vector3());
-  const targetSize = targetBox.getSize(new THREE.Vector3());
-  const delta = targetCenter.clone().sub(sourceCenter);
+    const VALID_FACES: StoreFaceId[] = ['top', 'bottom', 'left', 'right', 'front', 'back'];
+    const VALID_MODES: MateExecMode[] = ['translate', 'twist', 'both'];
+    const VALID_METHODS: AnchorMethodId[] = [
+      'auto', 'planar_cluster', 'geometry_aabb', 'object_aabb',
+      'extreme_vertices', 'obb_pca', 'picked',
+    ];
+    const VALID_INTENTS: MateIntentKind[] = ['default', 'cover', 'insert'];
 
-  const overlapX = overlapRatio1D(sourceBox.min.x, sourceBox.max.x, targetBox.min.x, targetBox.max.x);
-  const overlapY = overlapRatio1D(sourceBox.min.y, sourceBox.max.y, targetBox.min.y, targetBox.max.y);
-  const overlapZ = overlapRatio1D(sourceBox.min.z, sourceBox.max.z, targetBox.min.z, targetBox.max.z);
-
-  const sourceFitsWithinTargetXY = sourceSize.x <= targetSize.x * 0.94 && sourceSize.z <= targetSize.z * 0.94;
-  const sourceFitsWithinTargetXZ = sourceSize.x <= targetSize.x * 0.94 && sourceSize.y <= targetSize.y * 0.94;
-  const sourceFitsWithinTargetYZ = sourceSize.y <= targetSize.y * 0.94 && sourceSize.z <= targetSize.z * 0.94;
-
-  if ((sourceFitsWithinTargetXY && overlapX > 0.45 && overlapZ > 0.45) ||
-      (sourceFitsWithinTargetXZ && overlapX > 0.45 && overlapY > 0.45) ||
-      (sourceFitsWithinTargetYZ && overlapY > 0.45 && overlapZ > 0.45)) {
-    return 'insert';
+    return {
+      intent: VALID_INTENTS.includes(inference.intent) ? inference.intent : 'default',
+      mode: VALID_MODES.includes(inference.mode) ? inference.mode : 'translate',
+      sourceFace: VALID_FACES.includes(inference.sourceFace) ? inference.sourceFace : 'bottom',
+      targetFace: VALID_FACES.includes(inference.targetFace) ? inference.targetFace : 'top',
+      sourceMethod: VALID_METHODS.includes(inference.sourceMethod) ? inference.sourceMethod : 'auto',
+      targetMethod: VALID_METHODS.includes(inference.targetMethod) ? inference.targetMethod : 'auto',
+      confidence: typeof inference.confidence === 'number'
+        ? Math.min(1, Math.max(0, inference.confidence)) : 0.5,
+      ...(typeof inference.reasoning === 'string' ? { reasoning: inference.reasoning } : {}),
+    };
+  } catch {
+    return null;
   }
-
-  const stackedAlongY = Math.abs(delta.y) > (sourceSize.y + targetSize.y) * 0.22 && overlapX > 0.5 && overlapZ > 0.5;
-  if (stackedAlongY) return 'cover';
-
-  return null;
 }
 
-function defaultModeForIntent(intent: MateIntentKind): MateExecMode {
-  // 'cover' geometry (lid-on-body) → 'both' for direct tool calls / query.mate_suggestions.
-  // When routed through chat, mockProvider filters this down to 'translate' for generic
-  // "assemble" commands that don't include explicit insert/cover/arc keywords.
-  if (intent === 'cover') return 'both';
-  return 'translate';
-}
 
 function getExpectedFacePairFromCenters(sourceCenter: THREE.Vector3, targetCenter: THREE.Vector3) {
   const delta = targetCenter.clone().sub(sourceCenter);
@@ -345,6 +311,11 @@ function getExpectedFacePairFromCenters(sourceCenter: THREE.Vector3, targetCente
     : { sourceFace: 'back' as StoreFaceId, targetFace: 'front' as StoreFaceId };
 }
 
+/**
+ * Build anchor method priority list based on intent and explicit override.
+ * Intent-based defaults are now driven by LLM inference (see callAgentForMateParams),
+ * but this remains as a fallback when LLM is unavailable.
+ */
 function buildMethodPriority(params: {
   explicit?: AnchorMethodId | null;
   instructionMethod?: AnchorMethodId | null;
@@ -356,17 +327,11 @@ function buildMethodPriority(params: {
   if (instructionMethod && instructionMethod !== 'auto') {
     return [instructionMethod, 'planar_cluster', 'geometry_aabb', 'object_aabb'];
   }
-
   if (intent === 'insert') {
     return role === 'source'
       ? ['extreme_vertices', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'auto']
       : ['planar_cluster', 'extreme_vertices', 'geometry_aabb', 'object_aabb', 'auto'];
   }
-
-  if (intent === 'cover') {
-    return ['auto', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'extreme_vertices'];
-  }
-
   return ['auto', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'extreme_vertices'];
 }
 
@@ -1452,7 +1417,6 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const source = resolvePart(input.sourcePart);
     const target = resolvePart(input.targetPart);
     const instruction = normalizeInstructionText(input.instruction);
-    const instructionIntent = inferMateIntentKind(instruction);
 
     const sourceObject = getObjectByPartIdOrThrow(source.partId);
     const targetObject = getObjectByPartIdOrThrow(target.partId);
@@ -1464,11 +1428,30 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const targetCenter = vec3(targetBoxWorld.center);
     const expectedFromCenters = getExpectedFacePairFromCenters(sourceCenter, targetCenter);
 
-    const geometryIntent = inferIntentFromGeometry(sourceObject, targetObject);
-    const intentKind = instructionIntent === 'default' ? geometryIntent ?? 'default' : instructionIntent;
-    const suggestedMode =
-      inferModeFromInstruction(instruction) ?? defaultModeForIntent(intentKind);
+    // Build geometry hint for LLM context.
+    const geometryHint = {
+      expectedFacePair: expectedFromCenters,
+      sourceBboxSize: sourceBoxWorld.size as [number, number, number],
+      targetBboxSize: targetBoxWorld.size as [number, number, number],
+      relativePosition: {
+        dx: targetCenter.x - sourceCenter.x,
+        dy: targetCenter.y - sourceCenter.y,
+        dz: targetCenter.z - sourceCenter.z,
+      },
+    };
 
+    // Ask LLM for semantic intent/mode/method decisions.
+    const agentParams = await callAgentForMateParams({
+      userText: instruction,
+      sourcePart: { id: source.partId, name: source.partName },
+      targetPart: { id: target.partId, name: target.partName },
+      geometryHint,
+    });
+
+    const intentKind: MateIntentKind = agentParams?.intent ?? 'default';
+    const suggestedMode: MateExecMode = agentParams?.mode ?? 'translate';
+
+    // Explicit method override from instruction text takes priority over LLM.
     const instructionMethod = methodFromInstruction(instruction);
     const explicitSourceMethod =
       typeof input.sourceMethod === 'string' && input.sourceMethod !== 'auto'
@@ -1479,15 +1462,19 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         ? (input.targetMethod as AnchorMethodId)
         : null;
 
+    // LLM-provided methods are used as first priority if no explicit override.
+    const llmSourceMethod = agentParams?.sourceMethod ?? null;
+    const llmTargetMethod = agentParams?.targetMethod ?? null;
+
     const sourceMethods = buildMethodPriority({
-      explicit: explicitSourceMethod,
-      instructionMethod,
+      explicit: explicitSourceMethod ?? (instructionMethod ?? llmSourceMethod),
+      instructionMethod: null,
       intent: intentKind,
       role: 'source',
     });
     const targetMethods = buildMethodPriority({
-      explicit: explicitTargetMethod,
-      instructionMethod,
+      explicit: explicitTargetMethod ?? (instructionMethod ?? llmTargetMethod),
+      instructionMethod: null,
       intent: intentKind,
       role: 'target',
     });
@@ -1495,11 +1482,11 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const preferredSourceFace =
       STORE_FACES.includes(input.preferredSourceFace as StoreFaceId)
         ? (input.preferredSourceFace as StoreFaceId)
-        : null;
+        : (agentParams?.sourceFace ?? null);
     const preferredTargetFace =
       STORE_FACES.includes(input.preferredTargetFace as StoreFaceId)
         ? (input.preferredTargetFace as StoreFaceId)
-        : null;
+        : (agentParams?.targetFace ?? null);
     const maxPairs = Number(input.maxPairs ?? 12);
 
     const suggestion = inferBestFacePair({
@@ -1527,11 +1514,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         mutating: false,
         debug: {
           notes: [
-            'Mate suggestions computed from live scene geometry',
+            'Mate suggestions computed from live scene geometry + LLM inference',
             `intent=${intentKind}`,
-            `geometry_intent=${geometryIntent ?? 'none'}`,
+            `llm_confidence=${agentParams?.confidence ?? 'n/a'}`,
             `instruction_method=${instructionMethod ?? 'none'}`,
           ],
+          llmReasoning: agentParams?.reasoning,
         },
       }
     );
@@ -2387,7 +2375,6 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const source = resolvePart(input.sourcePart);
     const target = resolvePart(input.targetPart);
     const instruction = normalizeInstructionText(input.instruction);
-    const instructionIntent = inferMateIntentKind(instruction);
 
     const explicitSourceFace =
       STORE_FACES.includes(input.sourceFace as StoreFaceId) ? (input.sourceFace as StoreFaceId) : null;
@@ -2400,33 +2387,60 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
 
     const sourceObject = getV2ObjectByPartId(source.partId);
     const targetObject = getV2ObjectByPartId(target.partId);
-    const geometryIntent =
-      sourceObject && targetObject ? inferIntentFromGeometry(sourceObject, targetObject) : null;
-    const intentKind = instructionIntent === 'default' ? geometryIntent ?? 'default' : instructionIntent;
 
-    const inferredMode = inferModeFromInstruction(instruction);
-    const mode =
+    // Build geometry hint for LLM.
+    let geometryHint: Record<string, unknown> | undefined;
+    if (sourceObject && targetObject) {
+      const srcBox = worldBoundingBoxFromObject(sourceObject);
+      const tgtBox = worldBoundingBoxFromObject(targetObject);
+      const srcCtr = vec3(srcBox.center);
+      const tgtCtr = vec3(tgtBox.center);
+      geometryHint = {
+        expectedFacePair: getExpectedFacePairFromCenters(srcCtr, tgtCtr),
+        sourceBboxSize: srcBox.size,
+        targetBboxSize: tgtBox.size,
+        relativePosition: { dx: tgtCtr.x - srcCtr.x, dy: tgtCtr.y - srcCtr.y, dz: tgtCtr.z - srcCtr.z },
+      };
+    }
+
+    // Ask LLM for semantic decisions (intent, mode, face, method).
+    const agentParams = await callAgentForMateParams({
+      userText: instruction,
+      sourcePart: { id: source.partId, name: source.partName },
+      targetPart: { id: target.partId, name: target.partName },
+      geometryHint,
+    });
+
+    const intentKind: MateIntentKind = agentParams?.intent ?? 'default';
+    const mode: MateExecMode =
       (input.mode as MateExecMode | undefined) ??
-      inferredMode ??
-      defaultModeForIntent(intentKind);
+      agentParams?.mode ??
+      'translate';
     const operation = mode === 'both' ? 'both' : mode === 'twist' ? 'twist' : 'mate';
     const mateMode = input.mateMode ?? (mode === 'both' ? 'face_insert_arc' : 'face_flush');
     const pathPreferenceRaw = (input.pathPreference as 'auto' | 'line' | 'arc' | 'screw' | undefined) ?? 'auto';
     const pathPreference =
       pathPreferenceRaw === 'auto' ? (mode === 'both' ? 'arc' : 'line') : pathPreferenceRaw;
 
+    // LLM-recommended methods (fall back to intent-based priority if unavailable).
+    const llmSourceMethod = agentParams?.sourceMethod ?? null;
+    const llmTargetMethod = agentParams?.targetMethod ?? null;
     const sourceMethodPriority = buildMethodPriority({
-      explicit: explicitSourceMethod,
-      instructionMethod,
+      explicit: explicitSourceMethod ?? (instructionMethod ?? llmSourceMethod),
+      instructionMethod: null,
       intent: intentKind,
       role: 'source',
     });
     const targetMethodPriority = buildMethodPriority({
-      explicit: explicitTargetMethod,
-      instructionMethod,
+      explicit: explicitTargetMethod ?? (instructionMethod ?? llmTargetMethod),
+      instructionMethod: null,
       intent: intentKind,
       role: 'target',
     });
+
+    // LLM-recommended faces seed the geometry-based face pair search.
+    const llmSourceFace = agentParams?.sourceFace ?? null;
+    const llmTargetFace = agentParams?.targetFace ?? null;
 
     const suggestedFacePair =
       sourceObject && targetObject
@@ -2435,16 +2449,13 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             targetObject,
             sourceMethods: sourceMethodPriority,
             targetMethods: targetMethodPriority,
-            preferredSourceFace: explicitSourceFace,
-            preferredTargetFace: explicitTargetFace,
+            preferredSourceFace: explicitSourceFace ?? llmSourceFace,
+            preferredTargetFace: explicitTargetFace ?? llmTargetFace,
           })
         : null;
 
-    // Prefer geometry-based face pair over positional heuristic.
-    // Fallback to 'bottom'/'top' rather than getExpectedFacePairFromCenters so that
-    // moving a part laterally in the scene never silently flips the chosen faces.
-    const chosenSourceFace = explicitSourceFace ?? suggestedFacePair?.sourceFace ?? 'bottom';
-    const chosenTargetFace = explicitTargetFace ?? suggestedFacePair?.targetFace ?? 'top';
+    const chosenSourceFace = explicitSourceFace ?? suggestedFacePair?.sourceFace ?? llmSourceFace ?? 'bottom';
+    const chosenTargetFace = explicitTargetFace ?? suggestedFacePair?.targetFace ?? llmTargetFace ?? 'top';
     const chosenSourceMethod = explicitSourceMethod ?? suggestedFacePair?.sourceMethod ?? sourceMethodPriority[0] ?? 'planar_cluster';
     const chosenTargetMethod = explicitTargetMethod ?? suggestedFacePair?.targetMethod ?? targetMethodPriority[0] ?? 'planar_cluster';
 
@@ -2519,11 +2530,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         mutating: false,
         debug: {
           notes: [
-            'Smart mate executed with geometry-aware face/method/mode inference',
+            'Smart mate executed with LLM + geometry-aware inference',
             `intent=${intentKind}`,
-            `geometry_intent=${geometryIntent ?? 'none'}`,
+            `llm_confidence=${agentParams?.confidence ?? 'n/a'}`,
             `instruction_method=${instructionMethod ?? 'none'}`,
           ],
+          llmReasoning: agentParams?.reasoning,
           sourceFaceId: chosenSourceFace,
           targetFaceId: chosenTargetFace,
           sourceMethod: chosenSourceMethod,

@@ -5,6 +5,9 @@
  * multimodal VLM (Gemini) with a structured prompt to infer:
  *   mode / intent / method / sourceFace / targetFace / sourcePart / targetPart
  *
+ * The system prompt is loaded from agent-prompts/skills/vlm-visual-reasoning.md
+ * so it can be updated without touching this code.
+ *
  * Environment variables:
  *   MATE_VLM_ENABLE=1          — enable (default: disabled)
  *   GEMINI_API_KEY             — required for real VLM calls
@@ -12,6 +15,10 @@
  *   MATE_VLM_TIMEOUT_MS        — API timeout in ms (default: 5000)
  *   MATE_VLM_MOCK_RESPONSE     — JSON string, skips API call (for testing)
  */
+
+import { readFile } from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 type FaceId = 'top' | 'bottom' | 'left' | 'right' | 'front' | 'back';
 type MateMode = 'translate' | 'twist' | 'both';
@@ -53,6 +60,11 @@ const VALID_METHODS: AnchorMethodId[] = [
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || process.env.ROUTER_LLM_MODEL || 'gemini-1.5-flash';
 const TIMEOUT_MS = Number(process.env.MATE_VLM_TIMEOUT_MS || 5000);
+
+const __dirname_vlm = path.dirname(fileURLToPath(import.meta.url));
+const VLM_SKILL_PATH = path.resolve(__dirname_vlm, '../../../agent-prompts/skills/vlm-visual-reasoning.md');
+
+let cachedVlmSystemPrompt: string | null = null;
 
 function sanitizeMateInference(raw: unknown, sceneState: SceneStateForMate): VlmMateInference | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -98,24 +110,22 @@ function sanitizeMateInference(raw: unknown, sceneState: SceneStateForMate): Vlm
   };
 }
 
-function buildSystemPrompt(): string {
-  return [
-    '你是一個 3D CAD 場景分析專家。你將收到從多個角度拍攝的零件場景截圖，',
-    '以及場景零件資訊和使用者的組裝指令。',
-    '',
-    '你的任務是判斷如何將 source part 組裝到 target part。',
-    '需要輸出：接觸面（face）、組裝方式（mode）、錨定方法（method）。',
-    '',
-    '規則：',
-    '1. 優先依照影像中的視覺幾何推理，而非固定預設值。',
-    '2. 面的定義：top=+Y, bottom=-Y, front=+Z, back=-Z, right=+X, left=-X。',
-    '3. mode 只有三種：translate（純平移）、twist（平移+旋轉）、both（弧線插入）。',
-    '4. 泛用的「組裝」「align」「attach」「mate」請一律用 mode=translate。',
-    '5. 只有明確指令含「cover/insert/arc/蓋上/插入/套入」才考慮 mode=both。',
-    '6. confidence 請誠實評估，不確定時填低分（<0.75），不要強行猜測。',
-    '',
-    '請先用繁體中文逐步推理（reasoning 欄位），然後輸出 JSON（只輸出 JSON，不要其他文字）。',
-  ].join('\n');
+async function buildSystemPrompt(): Promise<string> {
+  if (cachedVlmSystemPrompt !== null) return cachedVlmSystemPrompt;
+  try {
+    cachedVlmSystemPrompt = await readFile(VLM_SKILL_PATH, 'utf-8');
+  } catch {
+    // Fallback to minimal inline prompt if file is missing.
+    console.warn('[mateInfer] Could not load vlm-visual-reasoning.md, using fallback prompt');
+    cachedVlmSystemPrompt = [
+      'You are a 3D CAD assembly expert analyzing multi-angle screenshots.',
+      'Determine how to assemble source into/onto target.',
+      'Output ONLY valid JSON: { "reasoning", "mode", "intent", "method", "sourceFace", "targetFace", "sourcePart", "targetPart", "confidence" }',
+      'mode: "translate" (default), "both" (only if user explicitly says cover/蓋上/insert arc), "twist".',
+      'Face axes: top=+Y, bottom=-Y, front=+Z, back=-Z, right=+X, left=-X.',
+    ].join('\n');
+  }
+  return cachedVlmSystemPrompt;
 }
 
 function buildUserPrompt(
@@ -174,7 +184,7 @@ export async function inferMateFromImages(
   const client = new GoogleGenerativeAI(GEMINI_API_KEY);
   const model = client.getGenerativeModel({
     model: GEMINI_MODEL,
-    systemInstruction: buildSystemPrompt(),
+    systemInstruction: await buildSystemPrompt(),
   });
 
   // Convert data URLs to inline image parts for Gemini multimodal.

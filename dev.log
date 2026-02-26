@@ -7,3 +7,330 @@ Port 5173 is in use, trying another one...
 Port 5174 is in use, trying another one...
 
   VITE v5.4.21  ready in 87 ms11:19:21 AM [vite] hmr update /src/components/UI/ChatInterface.tsx, /src/styles/global.css
+11:57:39 AM [vite] hmr update /src/App.tsx, /src/styles/global.css, /src/components/UI/ChatInterface.tsx, /src/components/Network/RemoteClient.tsx
+11:57:59 AM [vite] hmr update /src/components/UI/ChatInterface.tsx, /src/styles/global.css
+11:58:11 AM [vite] hmr update /src/components/UI/ChatInterface.tsx, /src/styles/global.css
+12:19:02 PM [vite] hmr update /src/App.tsx, /src/styles/global.css
+12:19:04 PM [vite] hmr update /src/App.tsx, /src/styles/global.css
+12:19:04 PM [vite] ✨ new dependencies optimized: framer-motion
+12:19:04 PM [vite] ✨ optimized dependencies changed. reloading
+12:21:20 PM [vite] hmr update /src/App.tsx, /src/styles/global.css, /src/components/UI/PropertyEditor.tsx, /src/components/UI/AnimationStudio.tsx, /src/components/Three/Scene.tsx, /src/components/Three/Model.tsx, /src/components/UI/SequenceList.tsx, /src/components/Network/RemoteClient.tsx, /src/components/UI/ChatInterface.tsx, /src/components/UI/ImageUploader.tsx
+12:21:20 PM [vite] Pre-transform error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+12:21:20 PM [vite] Pre-transform error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+12:21:20 PM [vite] Pre-transform error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+12:21:20 PM [vite] Pre-transform error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+12:21:20 PM [vite] Pre-transform error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+12:21:20 PM [vite] Pre-transform error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+12:21:20 PM [vite] Pre-transform error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+12:21:20 PM [vite] Pre-transform error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+12:21:20 PM [vite] Pre-transform error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+12:21:20 PM [vite] Internal server error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27
+  
+  Unexpected "{"
+  28 |    easing: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
+  29 |    description: string;
+  30 |  export interface ImageItem {
+     |                             ^
+  31 |      id: string;
+  32 |      url: string;
+  
+      at failureErrorWithLog (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:1472:15)
+      at /home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:755:50
+      at responseCallbacks.<computed> (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:622:9)
+      at handleIncomingPacket (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:677:12)
+      at Socket.readFromStdout (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:600:7)
+      at Socket.emit (node:events:517:28)
+      at addChunk (node:internal/streams/readable:368:12)
+      at readableAddChunk (node:internal/streams/readable:341:9)
+      at Readable.push (node:internal/streams/readable:278:10)
+      at Pipe.onStreamRead (node:internal/stream_base_commons:190:23)
+12:21:20 PM [vite] Internal server error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27
+  
+  Unexpected "{"
+  28 |    easing: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
+  29 |    description: string;
+  30 |  export interface ImageItem {
+     |                             ^
+  31 |      id: string;
+  32 |      url: string;
+  
+      at failureErrorWithLog (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:1472:15)
+      at /home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:755:50
+      at responseCallbacks.<computed> (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:622:9)
+      at handleIncomingPacket (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:677:12)
+      at Socket.readFromStdout (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:600:7)
+      at Socket.emit (node:events:517:28)
+      at addChunk (node:internal/streams/readable:368:12)
+      at readableAddChunk (node:internal/streams/readable:341:9)
+      at Readable.push (node:internal/streams/readable:278:10)
+      at Pipe.onStreamRead (node:internal/stream_base_commons:190:23)
+12:21:20 PM [vite] Internal server error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27
+  
+  Unexpected "{"
+  28 |    easing: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
+  29 |    description: string;
+  30 |  export interface ImageItem {
+     |                             ^
+  31 |      id: string;
+  32 |      url: string;
+  
+      at failureErrorWithLog (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:1472:15)
+      at /home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:755:50
+      at responseCallbacks.<computed> (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:622:9)
+      at handleIncomingPacket (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:677:12)
+      at Socket.readFromStdout (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:600:7)
+      at Socket.emit (node:events:517:28)
+      at addChunk (node:internal/streams/readable:368:12)
+      at readableAddChunk (node:internal/streams/readable:341:9)
+      at Readable.push (node:internal/streams/readable:278:10)
+      at Pipe.onStreamRead (node:internal/stream_base_commons:190:23)
+12:21:20 PM [vite] Internal server error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27
+  
+  Unexpected "{"
+  28 |    easing: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
+  29 |    description: string;
+  30 |  export interface ImageItem {
+     |                             ^
+  31 |      id: string;
+  32 |      url: string;
+  
+      at failureErrorWithLog (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:1472:15)
+      at /home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:755:50
+      at responseCallbacks.<computed> (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:622:9)
+      at handleIncomingPacket (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:677:12)
+      at Socket.readFromStdout (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:600:7)
+      at Socket.emit (node:events:517:28)
+      at addChunk (node:internal/streams/readable:368:12)
+      at readableAddChunk (node:internal/streams/readable:341:9)
+      at Readable.push (node:internal/streams/readable:278:10)
+      at Pipe.onStreamRead (node:internal/stream_base_commons:190:23)
+12:21:20 PM [vite] Internal server error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27
+  
+  Unexpected "{"
+  28 |    easing: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
+  29 |    description: string;
+  30 |  export interface ImageItem {
+     |                             ^
+  31 |      id: string;
+  32 |      url: string;
+  
+      at failureErrorWithLog (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:1472:15)
+      at /home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:755:50
+      at responseCallbacks.<computed> (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:622:9)
+      at handleIncomingPacket (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:677:12)
+      at Socket.readFromStdout (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:600:7)
+      at Socket.emit (node:events:517:28)
+      at addChunk (node:internal/streams/readable:368:12)
+      at readableAddChunk (node:internal/streams/readable:341:9)
+      at Readable.push (node:internal/streams/readable:278:10)
+      at Pipe.onStreamRead (node:internal/stream_base_commons:190:23)
+12:21:20 PM [vite] Internal server error: Transform failed with 1 error:
+/home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27: ERROR: Unexpected "{"
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts:30:27
+  
+  Unexpected "{"
+  28 |    easing: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut';
+  29 |    description: string;
+  30 |  export interface ImageItem {
+     |                             ^
+  31 |      id: string;
+  32 |      url: string;
+  
+      at failureErrorWithLog (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:1472:15)
+      at /home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:755:50
+      at responseCallbacks.<computed> (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:622:9)
+      at handleIncomingPacket (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:677:12)
+      at Socket.readFromStdout (/home/ubuntu/git/bullshit_artist/3d-anim-app3/node_modules/esbuild/lib/main.js:600:7)
+      at Socket.emit (node:events:517:28)
+      at addChunk (node:internal/streams/readable:368:12)
+      at readableAddChunk (node:internal/streams/readable:341:9)
+      at Readable.push (node:internal/streams/readable:278:10)
+      at Pipe.onStreamRead (node:internal/stream_base_commons:190:23)
+12:21:58 PM [vite] hmr update /src/App.tsx, /src/styles/global.css, /src/components/UI/PropertyEditor.tsx, /src/components/UI/AnimationStudio.tsx, /src/components/Three/Scene.tsx, /src/components/Three/Model.tsx, /src/components/UI/SequenceList.tsx, /src/components/Network/RemoteClient.tsx, /src/components/UI/ChatInterface.tsx, /src/components/UI/ImageUploader.tsx
+12:21:58 PM [vite] warning: Duplicate key "objectTransform" in object literal
+231|  
+232|  
+233|    objectTransform: { position: [0,0,0], rotation: [0,0,0] },
+   |    ^
+234|  
+235|    setCadUrl: (url, fileName) => set({ cadUrl: url, cadFileName: fileName }),
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "setCadUrl" in object literal
+233|    objectTransform: { position: [0,0,0], rotation: [0,0,0] },
+234|  
+235|    setCadUrl: (url, fileName) => set({ cadUrl: url, cadFileName: fileName }),
+   |    ^
+236|  
+237|    registerPart: (part) => set((state) => {
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "registerPart" in object literal
+235|    setCadUrl: (url, fileName) => set({ cadUrl: url, cadFileName: fileName }),
+236|  
+237|    registerPart: (part) => set((state) => {
+   |    ^
+238|        // Auto-set initial values if not present
+239|        const initialPart = {
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "updatePart" in object literal
+246|    }),
+247|  
+248|    updatePart: (uuid, data) => set((state) => ({
+   |    ^
+249|      parts: {
+250|        ...state.parts,
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "resetPart" in object literal
+253|    })),
+254|  
+255|    resetPart: (uuid) => set((state) => {
+   |    ^
+256|        const part = state.parts[uuid];
+257|        if (!part) return {}; // No change if part not found
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "resetAllParts" in object literal
+277|    }),
+278|  
+279|    resetAllParts: () => set((state) => {
+   |    ^
+280|        const newParts = { ...state.parts };
+281|        Object.keys(newParts).forEach(key => {
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "selectPart" in object literal
+299|    }),
+300|  
+301|    selectPart: (uuid) => set({ selectedPartId: uuid, movingPartId: uuid }),
+   |    ^
+302|    
+303|    setAnimationPlaying: (playing) => set({ isAnimationPlaying: playing }),
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "setAnimationPlaying" in object literal
+301|    selectPart: (uuid) => set({ selectedPartId: uuid, movingPartId: uuid }),
+302|    
+303|    setAnimationPlaying: (playing) => set({ isAnimationPlaying: playing }),
+   |    ^
+304|    setPickingMode: (mode) => set({ pickingMode: mode }),
+305|    
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "setPickingMode" in object literal
+302|    
+303|    setAnimationPlaying: (playing) => set({ isAnimationPlaying: playing }),
+304|    setPickingMode: (mode) => set({ pickingMode: mode }),
+   |    ^
+305|    
+306|    setStartMarker: (position) => set({ startMarker: position ? { position } : null }),
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "setStartMarker" in object literal
+304|    setPickingMode: (mode) => set({ pickingMode: mode }),
+305|    
+306|    setStartMarker: (position) => set({ startMarker: position ? { position } : null }),
+   |    ^
+307|    setEndMarker: (position) => set({ endMarker: position ? { position } : null }),
+308|    
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "setEndMarker" in object literal
+305|    
+306|    setStartMarker: (position) => set({ startMarker: position ? { position } : null }),
+307|    setEndMarker: (position) => set({ endMarker: position ? { position } : null }),
+   |    ^
+308|    
+309|    setMovingPartId: (uuid) => set({ movingPartId: uuid }),
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "setMovingPartId" in object literal
+307|    setEndMarker: (position) => set({ endMarker: position ? { position } : null }),
+308|    
+309|    setMovingPartId: (uuid) => set({ movingPartId: uuid }),
+   |    ^
+310|    setAnimationConfig: (duration, easing) => set({ animationDuration: duration, animationEasing: easing }),
+311|    triggerReset: () => set((state) => ({ resetTrigger: state.resetTrigger + 1, isAnimationPlaying: false, isSequencePlaying: false, currentStepIndex: -1 })),
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "setAnimationConfig" in object literal
+308|    
+309|    setMovingPartId: (uuid) => set({ movingPartId: uuid }),
+310|    setAnimationConfig: (duration, easing) => set({ animationDuration: duration, animationEasing: easing }),
+   |    ^
+311|    triggerReset: () => set((state) => ({ resetTrigger: state.resetTrigger + 1, isAnimationPlaying: false, isSequencePlaying: false, currentStepIndex: -1 })),
+312|  
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "triggerReset" in object literal
+309|    setMovingPartId: (uuid) => set({ movingPartId: uuid }),
+310|    setAnimationConfig: (duration, easing) => set({ animationDuration: duration, animationEasing: easing }),
+311|    triggerReset: () => set((state) => ({ resetTrigger: state.resetTrigger + 1, isAnimationPlaying: false, isSequencePlaying: false, currentStepIndex: -1 })),
+   |    ^
+312|  
+313|    setCameraTransform: (position, rotation) => set({ cameraTransform: { position, rotation } }),
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "setCameraTransform" in object literal
+311|    triggerReset: () => set((state) => ({ resetTrigger: state.resetTrigger + 1, isAnimationPlaying: false, isSequencePlaying: false, currentStepIndex: -1 })),
+312|  
+313|    setCameraTransform: (position, rotation) => set({ cameraTransform: { position, rotation } }),
+   |    ^
+314|    setObjectTransform: (position, rotation) => set({ objectTransform: { position, rotation } }),
+315|  
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:21:58 PM [vite] warning: Duplicate key "setObjectTransform" in object literal
+312|  
+313|    setCameraTransform: (position, rotation) => set({ cameraTransform: { position, rotation } }),
+314|    setObjectTransform: (position, rotation) => set({ objectTransform: { position, rotation } }),
+   |    ^
+315|  
+316|    // Sequence Implementation
+
+  Plugin: vite:esbuild
+  File: /home/ubuntu/git/bullshit_artist/3d-anim-app3/src/store/useAppStore.ts
+12:22:25 PM [vite] hmr update /src/App.tsx, /src/styles/global.css, /src/components/UI/PropertyEditor.tsx, /src/components/UI/AnimationStudio.tsx, /src/components/Three/Scene.tsx, /src/components/Three/Model.tsx, /src/components/UI/SequenceList.tsx, /src/components/Network/RemoteClient.tsx, /src/components/UI/ChatInterface.tsx, /src/components/UI/ImageUploader.tsx
+12:27:34 PM [vite] hmr update /src/components/UI/ImageUploader.tsx, /src/styles/global.css

@@ -1,51 +1,77 @@
 # Skill: Mate (Assembly)
 
+> For deep rules, see:
+> - `skills/mate-intent.md` — intent classification (insert/cover/default) with 15+ examples
+> - `skills/mate-geometry.md` — how to read geometryHint, face scoring weights, direction reasoning
+> - `skills/mate-anchor-methods.md` — method selection by intent and part type
+> - `skills/vlm-visual-reasoning.md` — VLM visual analysis guide
+
+---
+
 ## Triggers
 
-Any of these in any language: `mate`, `組裝`, `裝配`, `對齊`, `align`, `attach`, `fit`, `assemble`, `connect`, `join`, `組合`, `接合`
+Any of these in any language: `mate`, `組裝`, `裝配`, `對齊`, `align`, `attach`, `fit`,
+`assemble`, `connect`, `join`, `組合`, `接合`, `安裝`, `install`, `mount`
 
 **Requires**: ≥2 parts identifiable in user text or context.
 
-## Mode Selection (critical — never deviate)
+---
 
-| mode | When to use |
-|------|-------------|
-| `translate` | **Default for ALL generic assembly** — mate/組裝/align/attach/fit/assemble/connect/join |
-| `both` | **ONLY** when user explicitly says: cover/insert/arc/蓋上/插入/套入/蓋起來/卡入 |
-| `twist` | **ONLY** when user says: twist/旋轉後插入/twist and insert |
+## Quick Decision Flow
 
-**If in doubt, always use `translate`.** Never escalate to `both` for generic commands.
+### 1. Identify parts (source moves, target stays)
+- First-mentioned = source (default), second = target
+- Override: "install X onto Y" → X is source, Y is target
 
-When `mode=both`, set `mateMode: "face_insert_arc"` and `pathPreference: "arc"`.
-When `mode=translate`, set `mateMode: "face_flush"` and `pathPreference: "auto"`.
+### 2. Classify intent (see `mate-intent.md`)
+- User keywords → `insert` / `cover` / `default`
+- Geometry context as secondary signal
 
-## Source / Target Assignment
+### 3. Select mode
+| Intent | Generic command | Explicit "cover/蓋上/arc" | Explicit "screw/twist" |
+|--------|----------------|--------------------------|----------------------|
+| insert | `translate` | `translate` | `twist` |
+| cover | `translate` | `both` | — |
+| default | `translate` | — | — |
 
-- **Source** = the part that MOVES
-- **Target** = the fixed base part
-- When ambiguous: **first-mentioned part = source**, second-mentioned = target
-- Override with explicit verbs: install/mount/place/plug/insert/蓋/放到/裝到 → the thing being installed is source
+**`translate` is always the default. Never use `both` unless user explicitly says so.**
 
-## Face Selection
+### 4. Select faces
+- Explicit in user text → use those
+- Geometry topRankingPairs[0] if facingScore > 0.75 → follow geometry
+- Part name semantics (lid→bottom, bottle→top) → use semantic reasoning
+- Fallback: bottom→top
 
-- Infer from user wording and geometry (positions, bboxSize)
-- Face aliases: top/上/頂部, bottom/下/底部, left/左, right/右, front/前, back/後/背
-- If the user says "bottom to top" or "上面對下面", use those directly
-- If no face is specified and no suggestion context exists, fall through to `query.mate_suggestions` first
+### 5. Select method (see `mate-anchor-methods.md`)
+- Explicit in user text → use that
+- insert intent → source: `extreme_vertices`, target: `planar_cluster`
+- cover/default → both: `planar_cluster` (or `auto`)
 
-## Anchor Method
+### 6. Two-pass strategy
+- **No geometry hint AND no explicit faces**: emit `query.mate_suggestions` first (iteration 1)
+- **Has geometryHint OR explicit faces**: emit `action.mate_execute` directly
 
-- Explicitly mentioned → use it (`object_aabb`, `planar_cluster`, `geometry_aabb`, `extreme_vertices`, `obb_pca`, `picked`)
-- Default: `"auto"`
+---
+
+## mateMode ↔ mode Mapping
+
+| `mode` | `mateMode` | `pathPreference` |
+|--------|-----------|-----------------|
+| `translate` | `face_flush` | `auto` |
+| `both` | `face_insert_arc` | `arc` |
+| `twist` | `face_flush` | `auto` (+ twist config) |
+
+---
 
 ## VLM Override
 
-If context contains `vlmMateCapture.meetsThreshold === true`, prefer those faces/method/mode values unless the user explicitly specified different ones.
+If context contains `vlmMateCapture.meetsThreshold === true`, prefer those values
+for face/method/mode unless the user explicitly specified different ones.
 
-## Two-pass Strategy
+VLM confidence ≥ 0.75 → use VLM params
+VLM confidence < 0.75 → use geometry/LLM params
 
-1. **No explicit faces AND no suggestion context AND no VLM**: emit `query.mate_suggestions` first, wait for iteration 2
-2. **Has suggestion context OR explicit faces**: emit `action.mate_execute` directly
+---
 
 ## action.mate_execute Args Template
 
