@@ -18,7 +18,7 @@ import { fileURLToPath } from 'url';
 import { callAgentLlm } from './agentLlm.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROMPTS_DIR = path.resolve(__dirname, '../../../../agent-prompts');
+const PROMPTS_DIR = path.resolve(__dirname, '../../../agent-prompts');
 
 type FaceId = 'top' | 'bottom' | 'left' | 'right' | 'front' | 'back';
 type MateExecMode = 'translate' | 'twist' | 'both';

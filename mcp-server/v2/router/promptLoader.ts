@@ -2,7 +2,7 @@
  * promptLoader.ts — Loads and caches agent-prompts/ markdown files.
  *
  * Resolves the agent-prompts/ directory relative to this file:
- *   mcp-server/v2/router/ → ../../../../agent-prompts/
+ *   mcp-server/v2/router/ → ../../../agent-prompts/
  */
 
 import { readFile } from 'fs/promises';
@@ -10,7 +10,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROMPTS_DIR = path.resolve(__dirname, '../../../../agent-prompts');
+const PROMPTS_DIR = path.resolve(__dirname, '../../../agent-prompts');
 
 let cachedSystemPrompt: string | null = null;
 
