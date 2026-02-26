@@ -293,6 +293,45 @@ async function callAgentForMateParams(params: {
 }
 
 
+/**
+ * Geometry-based intent inference — used as a fallback when LLM inference is unavailable.
+ * LLM is the primary decision-maker; this only runs when callAgentForMateParams() returns null.
+ */
+function inferIntentFromGeometryFallback(
+  sourceObject: THREE.Object3D,
+  targetObject: THREE.Object3D
+): MateIntentKind | null {
+  const sourceBox = new THREE.Box3().setFromObject(sourceObject);
+  const targetBox = new THREE.Box3().setFromObject(targetObject);
+  if (sourceBox.isEmpty() || targetBox.isEmpty()) return null;
+
+  const sourceCenter = sourceBox.getCenter(new THREE.Vector3());
+  const targetCenter = targetBox.getCenter(new THREE.Vector3());
+  const sourceSize = sourceBox.getSize(new THREE.Vector3());
+  const targetSize = targetBox.getSize(new THREE.Vector3());
+  const delta = targetCenter.clone().sub(sourceCenter);
+
+  const overlapRatio = (aMin: number, aMax: number, bMin: number, bMax: number) => {
+    const overlap = Math.max(0, Math.min(aMax, bMax) - Math.max(aMin, bMin));
+    return overlap / Math.max(1e-6, Math.min(aMax - aMin, bMax - bMin));
+  };
+  const overlapX = overlapRatio(sourceBox.min.x, sourceBox.max.x, targetBox.min.x, targetBox.max.x);
+  const overlapY = overlapRatio(sourceBox.min.y, sourceBox.max.y, targetBox.min.y, targetBox.max.y);
+  const overlapZ = overlapRatio(sourceBox.min.z, sourceBox.max.z, targetBox.min.z, targetBox.max.z);
+
+  const fitsXZ = sourceSize.x <= targetSize.x * 0.94 && sourceSize.z <= targetSize.z * 0.94;
+  const fitsXY = sourceSize.x <= targetSize.x * 0.94 && sourceSize.y <= targetSize.y * 0.94;
+  const fitsYZ = sourceSize.y <= targetSize.y * 0.94 && sourceSize.z <= targetSize.z * 0.94;
+  if ((fitsXZ && overlapX > 0.45 && overlapZ > 0.45) ||
+      (fitsXY && overlapX > 0.45 && overlapY > 0.45) ||
+      (fitsYZ && overlapY > 0.45 && overlapZ > 0.45)) return 'insert';
+
+  const stackedY = Math.abs(delta.y) > (sourceSize.y + targetSize.y) * 0.22 && overlapX > 0.5 && overlapZ > 0.5;
+  if (stackedY) return 'cover';
+
+  return null;
+}
+
 function getExpectedFacePairFromCenters(sourceCenter: THREE.Vector3, targetCenter: THREE.Vector3) {
   const delta = targetCenter.clone().sub(sourceCenter);
   const absDelta = new THREE.Vector3(Math.abs(delta.x), Math.abs(delta.y), Math.abs(delta.z));
@@ -1448,8 +1487,14 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       geometryHint,
     });
 
-    const intentKind: MateIntentKind = agentParams?.intent ?? 'default';
-    const suggestedMode: MateExecMode = agentParams?.mode ?? 'translate';
+    // LLM primary; geometry fallback when LLM unavailable (e.g. mock/test mode).
+    const geometryFallbackIntent = agentParams === null
+      ? inferIntentFromGeometryFallback(sourceObject, targetObject)
+      : null;
+    const intentKind: MateIntentKind =
+      agentParams?.intent ?? geometryFallbackIntent ?? 'default';
+    const suggestedMode: MateExecMode =
+      agentParams?.mode ?? (intentKind === 'cover' ? 'both' : 'translate');
 
     // Explicit method override from instruction text takes priority over LLM.
     const instructionMethod = methodFromInstruction(instruction);
@@ -2411,11 +2456,16 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       geometryHint,
     });
 
-    const intentKind: MateIntentKind = agentParams?.intent ?? 'default';
+    // LLM primary; geometry fallback when LLM unavailable.
+    const geometryFallbackIntent = agentParams === null && sourceObject && targetObject
+      ? inferIntentFromGeometryFallback(sourceObject, targetObject)
+      : null;
+    const intentKind: MateIntentKind =
+      agentParams?.intent ?? geometryFallbackIntent ?? 'default';
     const mode: MateExecMode =
       (input.mode as MateExecMode | undefined) ??
       agentParams?.mode ??
-      'translate';
+      (intentKind === 'cover' ? 'both' : 'translate');
     const operation = mode === 'both' ? 'both' : mode === 'twist' ? 'twist' : 'mate';
     const mateMode = input.mateMode ?? (mode === 'both' ? 'face_insert_arc' : 'face_flush');
     const pathPreferenceRaw = (input.pathPreference as 'auto' | 'line' | 'arc' | 'screw' | undefined) ?? 'auto';
