@@ -1,5 +1,5 @@
 import type { ToolCall } from '../../../shared/schema/index.js';
-import { MockRouterProvider } from './mockProvider.js';
+import { AgentRouterProvider } from './agentProvider.js';
 import type { RouterContext, RouterProvider } from './types.js';
 
 export type RouterResult = {
@@ -8,10 +8,10 @@ export type RouterResult = {
 };
 
 const getProvider = (): RouterProvider => {
-  const provider = process.env.ROUTER_PROVIDER || 'mock';
-  if (provider === 'mock') return MockRouterProvider;
-  // Future: Gemini/Ollama providers
-  return MockRouterProvider;
+  const provider = process.env.ROUTER_PROVIDER || 'agent';
+  if (provider === 'agent') return AgentRouterProvider;
+  // Default to agent for all cases
+  return AgentRouterProvider;
 };
 
 export async function routeAndExecute(text: string, ctx: RouterContext): Promise<RouterResult> {

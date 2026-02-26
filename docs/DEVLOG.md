@@ -3,9 +3,9 @@
 > 時間基準：本次執行時間為 2026-02-11（local）。本檔用來記錄可中斷/可續跑的進度、決策與測試證據。
 
 ## Progress (Quality-First MCP-only migration)
-- CURRENT_SUBTASK: S12 — (next)
-- DONE_SUBTASKS: [S1, S2, S3, S4, S5a, S5b, S5c, S5d, S5e, S5f, S5g, S5h, S5i, S6, S7a, S7b, S7c, S7d, S7e, S8a, S9a, S10, S11]
-- NEXT_SUBTASK: S12 — (TBD)
+- CURRENT_SUBTASK: S12 — DONE
+- DONE_SUBTASKS: [S1, S2, S3, S4, S5a, S5b, S5c, S5d, S5e, S5f, S5g, S5h, S5i, S6, S7a, S7b, S7c, S7d, S7e, S8a, S9a, S10, S11, S12]
+- NEXT_SUBTASK: S13 — (TBD)
 - HOW_TO_RESUME:
   1) Frontend: `npm run dev -- --host 127.0.0.1 --port 5274`
   2) MCP v2 WS gateway: `npx tsx mcp-server/v2/index.ts` (default `ws://127.0.0.1:3112`)
@@ -20,6 +20,50 @@
   11) Smoke: `npx playwright test tests/v2_smoke.spec.ts --reporter=line`
   12) Real CAD import check: `npx playwright test tests/v2_real_model_mate_perf.spec.ts --reporter=line`
   13) Rotate gizmo regression (current gap): add/run `tests/v2_gizmo_hit_priority.spec.ts`
+
+## S12 — Full LLM Agent Router (2026-02-25)
+
+### Scope
+Replace `mockProvider.ts` (150+ hardcoded keyword arrays) with a real LLM agent router. All routing decisions delegated to LLM reading structured `agent-prompts/` markdown docs. No keyword fallback — LLM failure returns graceful error. Mock mode via `AGENT_LLM_MOCK_PATH` for tests.
+
+### New Files
+- `agent-prompts/system.md` — agent role, output format, decision flow
+- `agent-prompts/tools/reference.md` — human-readable summary of all MCP tools
+- `agent-prompts/skills/{mate,selection,grid,steps,mode,view,conversation}.md` — domain rules replacing hardcoded keyword logic
+- `agent-prompts/qa/examples.md` — 14 few-shot labeled examples (critical for accuracy)
+- `mcp-server/v2/router/agentLlm.ts` — multi-model client (Gemini/Ollama/Claude/OpenAI)
+- `mcp-server/v2/router/promptLoader.ts` — loads & caches agent-prompts/ files
+- `mcp-server/v2/router/agentProvider.ts` — RouterProvider via LLM + mock mode + partName→partId resolution
+- `tests/fixtures/agent-mock-responses.json` — test fixture with 14 mock entries (longest-key-match)
+- `playwright.config.ts` — Playwright config with test defaults
+
+### Modified Files
+- `mcp-server/v2/router/router.ts` — default provider → 'agent', removed MockRouterProvider
+- `mcp-server/v2/router/types.ts` — added AgentLlmConfig type
+- `mcp-server/v2/router/llmAssist.ts` — exported mapPartReferenceToId (reused by agentProvider)
+
+### Deleted
+- `mcp-server/v2/router/mockProvider.ts`
+
+### Key Design Decisions
+- `translate` is default mode for ALL generic assembly; `both` only for explicit cover/insert/蓋上
+- Longest-key-match in mock lookup to avoid short keys shadowing specific ones
+- partName→partId resolution applied BOTH in mock path and LLM path
+- Optional packages (@anthropic-ai/sdk, openai) loaded dynamically with @ts-ignore
+
+### Verification
+```bash
+# Start server with mock path
+AGENT_LLM_MOCK_PATH=tests/fixtures/agent-mock-responses.json npx tsx mcp-server/v2/index.ts
+
+# Run core tests
+npx playwright test tests/v2_chat_router.spec.ts tests/v2_mate_translate_parity.spec.ts tests/v2_mate_both_nested_parent.spec.ts tests/v2_smoke.spec.ts --reporter=line
+
+# Live with Gemini
+GEMINI_API_KEY=<key> AGENT_LLM_PROVIDER=gemini npx tsx mcp-server/v2/index.ts
+```
+
+---
 
 ## S11 — VLM-guided mate inference (2026-02-25)
 

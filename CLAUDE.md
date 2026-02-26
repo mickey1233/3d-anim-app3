@@ -55,7 +55,8 @@ Most tools execute **in the browser** via the tool proxy pattern. The backend ro
 - `src/v2/three/` — R3F scene: `CanvasRoot.tsx` (root), `ModelLoader.tsx` (GLTF loading), `SceneRegistry.ts` (global scene/camera/renderer refs accessed via `getV2Scene()` etc.), `mating/` (face clustering, anchor resolution, mate solver).
 - `src/v2/ui/` — React panels: Chat, CommandBar, MatePanel, PartsPanel, Steps, VLM.
 - `src/v2/network/` — `client.ts` (singleton WS client with auto-reconnect, 20s request timeout), `mcpToolExecutor.ts` (tool dispatch returning `ToolEnvelope<T>`).
-- `mcp-server/v2/` — `wsGateway.ts` (WS server + request routing), `router/router.ts` (intent router), `router/mockProvider.ts` (keyword-based NLP, default), `router/llmAssist.ts` (optional Gemini/Ollama).
+- `mcp-server/v2/` — `wsGateway.ts` (WS server + request routing), `router/router.ts` (intent router), `router/agentProvider.ts` (LLM agent, default), `router/agentLlm.ts` (multi-model client), `router/promptLoader.ts` (loads `agent-prompts/`), `router/llmAssist.ts` (mapPartReferenceToId + inferMateWithLlm).
+- `agent-prompts/` — system prompt, tool reference, skills (mate/selection/grid/steps/mode/view/conversation), QA examples. Defines all routing logic — no hardcoded keywords.
 - `shared/schema/` — Zod schemas shared between frontend and backend: `protocol.ts` (WS message types), `mcpToolsV3.ts` (all MCP tool schemas, ~1200 lines).
 - `tests/` — Playwright E2E tests, prefixed `v2_`. Tests access store via `window.__V2_STORE__` and use 120s timeouts.
 
@@ -71,7 +72,13 @@ Parts are referenced in tool args as `PartRef`: `{ partId?: string } | { partNam
 
 ### Router Providers
 
-Default is `mockProvider` (keyword matching + Levenshtein fuzzy part name matching). Set `ROUTER_LLM_ENABLE=1` with `ROUTER_LLM_PROVIDER=auto|ollama|gemini` for real LLM routing.
+Default is `agentProvider` — reads `agent-prompts/` markdown docs and delegates all routing to a real LLM. No hardcoded keywords. Provider selection:
+- `AGENT_LLM_PROVIDER=gemini` (default) — requires `GEMINI_API_KEY`
+- `AGENT_LLM_PROVIDER=ollama` — requires `OLLAMA_BASE_URL`
+- `AGENT_LLM_PROVIDER=claude` — requires `ANTHROPIC_API_KEY`
+- `AGENT_LLM_PROVIDER=openai` — requires `OPENAI_API_KEY`
+
+For tests: set `AGENT_LLM_MOCK_PATH=tests/fixtures/agent-mock-responses.json` on the MCP server to use mock JSON responses (longest-key substring match).
 
 ## Conventions
 

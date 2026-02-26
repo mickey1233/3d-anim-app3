@@ -1,0 +1,170 @@
+{
+  "幫我把part2和part1組裝起來": {
+    "replyText": "已組裝 part2 到 part1，mode=translate。",
+    "toolCalls": [{
+      "tool": "action.mate_execute",
+      "args": {
+        "sourcePart": { "partName": "part2" },
+        "targetPart": { "partName": "part1" },
+        "sourceFace": "bottom",
+        "targetFace": "top",
+        "sourceMethod": "auto",
+        "targetMethod": "auto",
+        "mode": "translate",
+        "mateMode": "face_flush",
+        "pathPreference": "auto",
+        "commit": true,
+        "pushHistory": true,
+        "stepLabel": "Mate part2 to part1"
+      }
+    }]
+  },
+  "mate part2 bottom to part1 top cover": {
+    "replyText": "已用蓋上模式將 part2(bottom) 對齊到 part1(top)，mode=both。",
+    "toolCalls": [{
+      "tool": "action.mate_execute",
+      "args": {
+        "sourcePart": { "partName": "part2" },
+        "targetPart": { "partName": "part1" },
+        "sourceFace": "bottom",
+        "targetFace": "top",
+        "sourceMethod": "auto",
+        "targetMethod": "auto",
+        "mode": "both",
+        "mateMode": "face_insert_arc",
+        "pathPreference": "arc",
+        "commit": true,
+        "pushHistory": true,
+        "stepLabel": "Mate part2 to part1"
+      }
+    }]
+  },
+  "你好": {
+    "replyText": "你好！我可以幫你組裝零件、建立步驟或切換模式。",
+    "toolCalls": []
+  },
+  "mate part1 and part2": {
+    "replyText": "已解析：part1(bottom) -> part2(top)，mode=translate。",
+    "toolCalls": [{
+      "tool": "action.mate_execute",
+      "args": {
+        "sourcePart": { "partName": "part1" },
+        "targetPart": { "partName": "part2" },
+        "sourceFace": "bottom",
+        "targetFace": "top",
+        "sourceMethod": "auto",
+        "targetMethod": "auto",
+        "mode": "translate",
+        "mateMode": "face_flush",
+        "pathPreference": "auto",
+        "commit": true,
+        "pushHistory": true,
+        "stepLabel": "Mate part1 to part2"
+      }
+    }]
+  },
+  "mate part1 bottom to part2 top": {
+    "replyText": "已解析：part1(bottom) -> part2(top)，mode=translate。",
+    "toolCalls": [{
+      "tool": "action.mate_execute",
+      "args": {
+        "sourcePart": { "partName": "part1" },
+        "targetPart": { "partName": "part2" },
+        "sourceFace": "bottom",
+        "targetFace": "top",
+        "sourceMethod": "auto",
+        "targetMethod": "auto",
+        "mode": "translate",
+        "mateMode": "face_flush",
+        "pathPreference": "auto",
+        "commit": true,
+        "pushHistory": true,
+        "stepLabel": "Mate part1 to part2"
+      }
+    }]
+  },
+  "mate part1 bottom and part2 top use object aabb method": {
+    "replyText": "已解析：part1(bottom) -> part2(top)，method=object_aabb/object_aabb，mode=translate。",
+    "toolCalls": [{
+      "tool": "action.mate_execute",
+      "args": {
+        "sourcePart": { "partName": "part1" },
+        "targetPart": { "partName": "part2" },
+        "sourceFace": "bottom",
+        "targetFace": "top",
+        "sourceMethod": "object_aabb",
+        "targetMethod": "object_aabb",
+        "mode": "translate",
+        "mateMode": "face_flush",
+        "pathPreference": "auto",
+        "commit": true,
+        "pushHistory": true,
+        "stepLabel": "Mate part1 to part2"
+      }
+    }]
+  },
+  "mate part1 and part2 like cover a lid": {
+    "replyText": "已用蓋上模式將 part1 對齊到 part2，mode=both。",
+    "toolCalls": [{
+      "tool": "action.mate_execute",
+      "args": {
+        "sourcePart": { "partName": "part1" },
+        "targetPart": { "partName": "part2" },
+        "sourceFace": "bottom",
+        "targetFace": "top",
+        "sourceMethod": "auto",
+        "targetMethod": "auto",
+        "mode": "both",
+        "mateMode": "face_insert_arc",
+        "pathPreference": "arc",
+        "commit": true,
+        "pushHistory": true,
+        "stepLabel": "Mate part1 to part2"
+      }
+    }]
+  },
+  "請幫我把 part1 跟 part2 對齊": {
+    "replyText": "已解析：part1(bottom) -> part2(top)，mode=translate。",
+    "toolCalls": [{
+      "tool": "action.mate_execute",
+      "args": {
+        "sourcePart": { "partName": "part1" },
+        "targetPart": { "partName": "part2" },
+        "sourceFace": "bottom",
+        "targetFace": "top",
+        "sourceMethod": "auto",
+        "targetMethod": "auto",
+        "mode": "translate",
+        "mateMode": "face_flush",
+        "pathPreference": "auto",
+        "commit": true,
+        "pushHistory": true,
+        "stepLabel": "Mate part1 to part2"
+      }
+    }]
+  },
+  "把格線關掉": {
+    "replyText": "格線已關閉。",
+    "toolCalls": [{ "tool": "view.set_grid_visible", "args": { "visible": false } }]
+  },
+  "我要如何新增step": {
+    "replyText": "你可以直接說「新增 step 安裝定位」或「add step align cap to body」。",
+    "toolCalls": []
+  },
+  "這個 usd 的 3d model": {
+    "replyText": "模型資訊：這是目前載入的模型，包含場景中的零件。",
+    "toolCalls": []
+  },
+  "add step": {
+    "replyText": "已新增 step：New Step。",
+    "toolCalls": [{ "tool": "steps.add", "args": { "label": "New Step", "select": true } }]
+  },
+  "grid on": {
+    "replyText": "格線已開啟。",
+    "toolCalls": [{ "tool": "view.set_grid_visible", "args": { "visible": true } }]
+  },
+  "grid off": {
+    "replyText": "格線已關閉。",
+    "toolCalls": [{ "tool": "view.set_grid_visible", "args": { "visible": false } }]
+  }
+}

@@ -49,3 +49,11 @@ export type RouterRoute = {
 export type RouterProvider = {
   route: (text: string, ctx: RouterContext) => Promise<RouterRoute>;
 };
+
+export type AgentLlmConfig = {
+  provider: 'gemini' | 'ollama' | 'claude' | 'openai';
+  model?: string;
+  timeoutMs?: number;
+  apiKey?: string;
+  baseUrl?: string;
+};
