@@ -23,6 +23,10 @@ npm run build                        # tsc + vite build
 npm test                             # All tests
 npx playwright test tests/v2_smoke.spec.ts --reporter=line   # Single test file
 
+# 確認 Ollama 是否運行
+curl http://127.0.0.1:11434/api/tags
+ollama ps
+
 # Devflow (tri-agent automation)
 npm run devflow -- "requirement"     # CLI
 npm run devflow:server               # Web UI on :4170
@@ -56,6 +60,10 @@ Most tools execute **in the browser** via the tool proxy pattern. The backend ro
 - `src/v2/ui/` — React panels: Chat, CommandBar, MatePanel, PartsPanel, Steps, VLM.
 - `src/v2/network/` — `client.ts` (singleton WS client with auto-reconnect, 20s request timeout), `mcpToolExecutor.ts` (tool dispatch returning `ToolEnvelope<T>`).
 - `mcp-server/v2/` — `wsGateway.ts` (WS server + request routing), `router/router.ts` (intent router), `router/mockProvider.ts` (keyword-based NLP, default), `router/llmAssist.ts` (optional Gemini/Ollama).
+- `mcp-server/v2/router/agent/` — agent 模式的 prompts/skills/QA 設定（`ROUTER_PROVIDER=agent` 時使用）。
+- `mcp-server/v2/router/policy/` — mock router 的 keyword 與 NLU policy JSON。
+- `mcp-server/v2/vlm/` — VLM 分析管線，`structuredMate.ts` 負責多視角影像 → 結構化 JSON。
+- `mcp-server/v2/status/` / `mcp-server/v2/web/` — server 狀態端點。
 - `shared/schema/` — Zod schemas shared between frontend and backend: `protocol.ts` (WS message types), `mcpToolsV3.ts` (all MCP tool schemas, ~1200 lines).
 - `tests/` — Playwright E2E tests, prefixed `v2_`. Tests access store via `window.__V2_STORE__` and use 120s timeouts.
 
@@ -69,7 +77,16 @@ Anchor resolution methods: `auto`, `planar_cluster`, `geometry_aabb`, `object_aa
 
 ### Router Providers
 
-Default is `mockProvider` (keyword matching + Levenshtein fuzzy part name matching). Set `ROUTER_LLM_ENABLE=1` with `ROUTER_LLM_PROVIDER=auto|ollama|gemini` for real LLM routing.
+Default is `mockProvider` (keyword matching + Levenshtein fuzzy part name matching). Set `ROUTER_LLM_ENABLE=1` with `ROUTER_LLM_PROVIDER=auto|ollama|gemini` for real LLM routing. For full agent routing (LLM decides tool calls), set `ROUTER_PROVIDER=agent`.
+
+Key env vars:
+- `ROUTER_LLM_ENABLE=1` / `ROUTER_LLM_PROVIDER=auto|ollama|gemini` / `ROUTER_LLM_MODEL`
+- `ROUTER_PROVIDER=agent` — switches to full agent loop (`mcp-server/v2/router/agent/`)
+- `ROUTER_WEB_ENABLE=1` — enables server-side web tools (weather + search)
+- `V2_VLM_PROVIDER=auto|ollama|gemini|mock|none` / `VLM_MATE_MODEL`
+- `OLLAMA_BASE_URL` / `OLLAMA_MODEL` — Ollama 連線 (預設 `http://127.0.0.1:11434`)
+- `GEMINI_API_KEY` / `GEMINI_MODEL`
+- `V2_ROUTER_KEYWORDS_PATH` / `V2_ROUTER_MOCK_POLICY_PATH` / `ROUTER_AGENT_DIR` — 覆寫 policy/prompt 檔案路徑
 
 ## Conventions
 
