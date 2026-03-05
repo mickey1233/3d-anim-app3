@@ -16,8 +16,36 @@ import { SideFixture } from './fixtures/SideFixture';
 import { LidFixture } from './fixtures/LidFixture';
 import { ShelfFixture } from './fixtures/ShelfFixture';
 import { SlotFixture } from './fixtures/SlotFixture';
+import { NestedFixture } from './fixtures/NestedFixture';
 import { StepRunner } from './animation/StepRunner';
 import { SceneRegistryBridge } from './SceneRegistryBridge';
+
+const GIZMO_RAYCAST_PRIORITY_FLAG = '__v2TransformGizmoHandle';
+
+const hasGizmoPriorityAncestor = (object: any): boolean => {
+  let node = object;
+  while (node) {
+    if (node.userData?.[GIZMO_RAYCAST_PRIORITY_FLAG]) return true;
+    node = node.parent;
+  }
+  return false;
+};
+
+const prioritizeGizmoIntersections = (intersections: any[]) => {
+  if (!Array.isArray(intersections) || intersections.length < 2) return intersections;
+  let hasGizmoHit = false;
+  const gizmoHits: any[] = [];
+  const otherHits: any[] = [];
+  for (const hit of intersections) {
+    if (hasGizmoPriorityAncestor(hit?.object)) {
+      hasGizmoHit = true;
+      gizmoHits.push(hit);
+    } else {
+      otherHits.push(hit);
+    }
+  }
+  return hasGizmoHit ? [...gizmoHits, ...otherHits] : intersections;
+};
 
 export function CanvasRoot() {
   const view = useV2Store((s) => s.view);
@@ -28,7 +56,19 @@ export function CanvasRoot() {
 
   return (
     <div className="w-full h-full">
-      <Canvas camera={{ position: [4, 4, 4], fov: 50 }}>
+      <Canvas
+        camera={{ position: [4, 4, 4], fov: 50 }}
+        onCreated={(state) => {
+          const prevFilter = state.events.filter;
+          state.events.filter = (intersections, eventState) => {
+            const base = prevFilter ? prevFilter(intersections, eventState) : intersections;
+            const current = useV2Store.getState();
+            if (!current.selection.partId) return base;
+            if (current.interaction.mode !== 'move' && current.interaction.mode !== 'rotate') return base;
+            return prioritizeGizmoIntersections(base as any[]);
+          };
+        }}
+      >
         <SceneRegistryBridge />
         <ambientLight intensity={0.6} />
         <directionalLight position={[6, 8, 5]} intensity={1.2} castShadow />
@@ -43,6 +83,8 @@ export function CanvasRoot() {
             <ShelfFixture />
           ) : fixture === 'slot' ? (
             <SlotFixture />
+          ) : fixture === 'nested' ? (
+            <NestedFixture />
           ) : (
             <BoxesFixture />
           )

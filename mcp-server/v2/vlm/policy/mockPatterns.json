@@ -1,0 +1,12 @@
+{
+  "intent": {
+    "cover": ["cover", "lid", "cap", "蓋", "盖"],
+    "insert": ["insert", "slot", "plug", "插", "嵌"]
+  },
+  "mode": {
+    "both": ["cover", "insert", "arc", "both", "蓋", "盖", "插入"],
+    "twist": ["twist", "rotate", "旋轉", "旋转"],
+    "translate": ["translate", "move", "平移", "移動", "移动"]
+  }
+}
+

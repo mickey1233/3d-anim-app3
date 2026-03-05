@@ -38,25 +38,60 @@ Legacy UI remains accessible for comparison:
    ```
    Default port: `ws://localhost:3011`
    Default router provider: `mock` (`ROUTER_PROVIDER=mock`).
+   Optional agent router provider: `agent` (`ROUTER_PROVIDER=agent`).
+
+### Router policies / prompts
+- Mock router keyword policy: `mcp-server/v2/router/policy/keywords.json` (override via `V2_ROUTER_KEYWORDS_PATH`)
+- Mock router NLU policy: `mcp-server/v2/router/policy/mockProvider.json` (override via `V2_ROUTER_MOCK_POLICY_PATH`)
+- Agent router prompt/skills/QA: `mcp-server/v2/router/agent/` (override via `ROUTER_AGENT_DIR`)
 
 ### Optional: Real LLM assist (with safe fallback)
-- Default behavior stays deterministic mock routing.
-- To enable real-model assist for chat Q&A + mate inference:
+- Default behavior stays deterministic mock routing, but the server will automatically prefer **Gemini → Ollama → mock** when `ROUTER_LLM_PROVIDER=auto` (default) and the provider is available.
+- To force/disable real-model assist for chat Q&A + mate inference:
   ```bash
-  export ROUTER_LLM_ENABLE=1
+  export ROUTER_LLM_ENABLE=1      # set 0 to disable
   export ROUTER_LLM_PROVIDER=auto   # auto | ollama | gemini
+  export ROUTER_LLM_MODEL=qwen3:30b
+  ```
+- To enable full agent routing (LLM decides tool calls):
+  ```bash
+  export ROUTER_PROVIDER=agent
+  ```
+- To enable server-side web tools (weather + web search):
+  ```bash
+  export ROUTER_WEB_ENABLE=1
+  ```
+- To enable structured VLM mate inference (multi-view → structured JSON):
+  ```bash
+  export V2_VLM_PROVIDER=auto   # auto | ollama | gemini | mock | none (default: auto)
+  export VLM_MATE_MODEL=qwen3.5:27b   # for ollama
   ```
 - **Ollama mode**:
   ```bash
   export OLLAMA_BASE_URL=http://127.0.0.1:11434
-  export OLLAMA_MODEL=qwen2.5:7b-instruct
+  # Optional fallback if ROUTER_LLM_MODEL / VLM_MATE_MODEL are not set
+  export OLLAMA_MODEL=qwen3:30b
   ```
+- Default split models (without extra env):
+  - LLM router/chat: `qwen3:30b`
+  - VLM mate inference: `qwen3.5:27b`
 - **Gemini mode**:
   ```bash
   export GEMINI_API_KEY=your_key
   export GEMINI_MODEL=gemini-1.5-flash
   ```
 - If real provider is unavailable/timeouts, router automatically falls back to mock heuristics.
+
+### How to confirm Ollama is enabled
+- Quick HTTP check: `curl http://127.0.0.1:11434/api/tags`
+- CLI check: `ollama ps`
+- In v2 UI: **AI Chat** header shows the active `LLM:` model (and tooltip includes Ollama reachability).
+- If `api/tags` returns `{"models":[]}` → Ollama is running, but you haven’t pulled any model yet (run `ollama pull <model>`).
+
+### Why CPU/GPU usage may stay low
+- If no real provider is available, the router/VLM fall back to **mock** → almost no extra compute.
+- If you use **Gemini** (`ROUTER_LLM_PROVIDER=gemini` or `V2_VLM_PROVIDER=gemini`), inference runs in the cloud → your local CPU/GPU won’t spike.
+- If you use **Ollama**, it may still run on CPU depending on your install/driver; confirm with `ollama ps` and your system GPU monitor.
 
 ## Chat Examples (v2)
 

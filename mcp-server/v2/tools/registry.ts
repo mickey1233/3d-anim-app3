@@ -28,10 +28,10 @@ export const toolRegistry: Record<string, ToolDef> = {
         })
         .optional(),
       sourceMethod: z
-        .enum(['auto', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'extreme_vertices', 'obb_pca', 'picked'])
+        .enum(['auto', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'obb_pca', 'picked'])
         .optional(),
       targetMethod: z
-        .enum(['auto', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'extreme_vertices', 'obb_pca', 'picked'])
+        .enum(['auto', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'obb_pca', 'picked'])
         .optional(),
     }),
     handler: async (args) => ({ ok: true, mate: args }),

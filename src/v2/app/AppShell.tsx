@@ -15,6 +15,7 @@ import { ViewPanel } from '../ui/View/ViewPanel';
 import { ChatPanel } from '../ui/Chat/ChatPanel';
 import { WorkspaceTabs } from '../ui/layout/WorkspaceTabs';
 import { InteractionModeToggle } from '../ui/layout/InteractionModeToggle';
+import { MateCaptureOverlay } from '../ui/layout/MateCaptureOverlay';
 import { connectV2Client, v2Client } from '../network/client';
 import { registerToolProxyBridge } from '../network/toolProxyBridge';
 import { callMcpTool } from '../network/mcpToolsClient';
@@ -122,6 +123,7 @@ export function AppShell() {
         {/* Center Canvas */}
         <div className="min-h-0 h-full relative">
           <CanvasRoot />
+          <MateCaptureOverlay />
         </div>
 
         {/* Right Panel */}

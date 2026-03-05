@@ -41,6 +41,23 @@ export type VlmImage = {
   file: File;
 };
 
+export type MateCaptureOverlayImage = {
+  id: string;
+  name: string;
+  label: string;
+  dataUrl: string;
+  widthPx: number;
+  heightPx: number;
+  mime: string;
+};
+
+export type MateCaptureOverlayState = {
+  visible: boolean;
+  nonce: number;
+  expiresAt: number;
+  images: MateCaptureOverlayImage[];
+};
+
 export type VlmResult = {
   steps: { from_image: string; to_image: string; inferred_action: string; changes: string[] }[];
   objects: { label: string; description?: string; confidence?: number }[];
@@ -52,6 +69,30 @@ export type VlmResult = {
     target_face: string;
     mcp_text_command: string;
   };
+};
+
+export type ServerStatus = {
+  ts: number;
+  router: { providerEnv: string; providerResolved: 'agent' | 'mock'; llmEnabled: boolean };
+  llm: {
+    providerEnv: string;
+    providerResolved: 'gemini' | 'ollama' | 'mock' | 'none';
+    model: string;
+    geminiKeyPresent: boolean;
+    ollamaBaseUrl: string;
+    ollamaReachable: boolean;
+    ollamaModelsCount: number;
+    ollamaModelRequested: string;
+    ollamaModelAvailable: boolean;
+  };
+  vlm: {
+    providerEnv: string;
+    providerResolved: 'gemini' | 'ollama' | 'mock' | 'none';
+    model: string;
+    ollamaModelRequested: string;
+    ollamaModelAvailable: boolean;
+  };
+  web: { enabled: boolean };
 };
 
 type Snapshot = {
@@ -95,7 +136,8 @@ export type V2State = {
   vlm: { images: VlmImage[]; result?: VlmResult; analyzing: boolean };
   chat: { messages: { id: string; role: 'user' | 'assistant'; text: string }[] };
   view: { environment: string; showGrid: boolean; showAnchors: boolean };
-  connection: { wsConnected: boolean; wsError?: string };
+  connection: { wsConnected: boolean; wsError?: string; serverStatus?: ServerStatus };
+  mateCaptureOverlay: MateCaptureOverlayState;
   mateRequest?: {
     sourceId: string;
     targetId: string;
@@ -187,6 +229,7 @@ export type V2State = {
   setGridVisible: (visible: boolean) => void;
   setAnchorsVisible: (visible: boolean) => void;
   setWsStatus: (connected: boolean, error?: string) => void;
+  setServerStatus: (status?: ServerStatus) => void;
   setMarker: (type: 'start' | 'end', anchor?: Anchor) => void;
   clearMarkers: () => void;
   requestMate: (req: V2State['mateRequest']) => void;
@@ -209,6 +252,8 @@ export type V2State = {
   setVlmResult: (result?: VlmResult) => void;
   setVlmAnalyzing: (active: boolean) => void;
   appendChatMessage: (message: { role: 'user' | 'assistant'; text: string }) => void;
+  showMateCaptureOverlay: (images: MateCaptureOverlayImage[], durationMs?: number) => void;
+  hideMateCaptureOverlay: () => void;
 
   dispatch: (label: string, updater: (state: V2State) => Partial<V2State>) => void;
   undo: () => void;
@@ -283,6 +328,9 @@ const eqPreviewEntry = (
 const eqMatePreview = (left: V2State['matePreview'], right: V2State['matePreview']) =>
   eqPreviewEntry(left.source, right.source) && eqPreviewEntry(left.target, right.target);
 
+const DROPDOWN_CANVAS_LOCK_MS = 250;
+let dropdownSelectionLockUntil = 0;
+
 export const useV2Store = create<V2State>((set, get) => ({
   cadUrl: '',
   cadFileName: '',
@@ -304,7 +352,8 @@ export const useV2Store = create<V2State>((set, get) => ({
     ],
   },
   view: { environment: 'studio', showGrid: true, showAnchors: false },
-  connection: { wsConnected: false, wsError: undefined },
+  connection: { wsConnected: false, wsError: undefined, serverStatus: undefined },
+  mateCaptureOverlay: { visible: false, nonce: 0, expiresAt: 0, images: [] },
   matePick: {},
   mateDraft: {
     sourceId: '',
@@ -312,8 +361,8 @@ export const useV2Store = create<V2State>((set, get) => ({
     sourceFace: 'bottom',
     targetFace: 'top',
     mode: 'translate',
-    sourceMethod: 'auto',
-    targetMethod: 'auto',
+    sourceMethod: 'planar_cluster',
+    targetMethod: 'planar_cluster',
     twistAxisSpace: 'target_face',
     twistAxis: 'normal',
     twistAngleDeg: 0,
@@ -379,8 +428,15 @@ export const useV2Store = create<V2State>((set, get) => ({
 
   setSelection: (partId, source = 'system') =>
     set((state) => {
+      const now = Date.now();
       const nextSource =
         source === 'dropdown' && !partId ? 'system' : source;
+      if (nextSource === 'canvas' && now < dropdownSelectionLockUntil) {
+        return state;
+      }
+      if (nextSource === 'dropdown') {
+        dropdownSelectionLockUntil = now + DROPDOWN_CANVAS_LOCK_MS;
+      }
       if (state.selection.partId === partId && state.selection.source === nextSource) {
         return state;
       }
@@ -516,7 +572,18 @@ export const useV2Store = create<V2State>((set, get) => ({
   setWsStatus: (connected, error) =>
     set((state) => ({
       ...state,
-      connection: { wsConnected: connected, wsError: error },
+      connection: {
+        ...state.connection,
+        wsConnected: connected,
+        wsError: error,
+        ...(connected ? {} : { serverStatus: undefined }),
+      },
+    })),
+
+  setServerStatus: (status) =>
+    set((state) => ({
+      ...state,
+      connection: { ...state.connection, serverStatus: status },
     })),
 
   setMarker: (type, anchor) =>
@@ -685,6 +752,33 @@ export const useV2Store = create<V2State>((set, get) => ({
         messages: [...state.chat.messages, { id: crypto.randomUUID(), ...message }],
       },
     })),
+  showMateCaptureOverlay: (images, durationMs = 5000) =>
+    set((state) => {
+      const now = Date.now();
+      const validDurationMs = Number.isFinite(durationMs) ? Math.max(250, Math.floor(durationMs)) : 5000;
+      return {
+        ...state,
+        mateCaptureOverlay: {
+          visible: images.length > 0,
+          nonce: state.mateCaptureOverlay.nonce + 1,
+          expiresAt: now + validDurationMs,
+          images,
+        },
+      };
+    }),
+  hideMateCaptureOverlay: () =>
+    set((state) => {
+      if (!state.mateCaptureOverlay.visible && state.mateCaptureOverlay.images.length === 0) return state;
+      return {
+        ...state,
+        mateCaptureOverlay: {
+          ...state.mateCaptureOverlay,
+          visible: false,
+          images: [],
+          expiresAt: 0,
+        },
+      };
+    }),
 
   undo: () =>
     set((state) => {

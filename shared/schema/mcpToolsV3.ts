@@ -438,6 +438,173 @@ const QueryMateSuggestionsDataSchema = z.object({
   ),
 });
 
+const QueryMateVlmInferArgsSchema = z.object({
+  sourcePart: PartRefSchema,
+  targetPart: PartRefSchema,
+  instruction: z.string().default(''),
+  preferredSourceFace: FaceIdSchema.optional(),
+  preferredTargetFace: FaceIdSchema.optional(),
+  sourceMethod: AnchorMethodSchema.default('auto'),
+  targetMethod: AnchorMethodSchema.default('auto'),
+  preferredMode: z.enum(['translate', 'twist', 'both']).optional(),
+  maxPairs: z.number().int().min(1).max(36).default(12),
+  maxViews: z.number().int().min(2).max(12).default(6),
+  maxWidthPx: z.number().int().min(64).max(2048).default(960),
+  maxHeightPx: z.number().int().min(64).max(2048).default(640),
+  format: z.enum(['png', 'jpeg']).default('jpeg'),
+});
+const QueryMateVlmInferDataSchema = z.object({
+  source: ResolvedPartSchema,
+  target: ResolvedPartSchema,
+  geometry: z.object({
+    intent: z.enum(['default', 'cover', 'insert']),
+    suggestedMode: z.enum(['translate', 'twist', 'both']),
+    expectedFromCenters: z.object({
+      sourceFace: FaceIdSchema,
+      targetFace: FaceIdSchema,
+    }),
+    rankingTop: z
+      .object({
+        sourceFace: FaceIdSchema,
+        targetFace: FaceIdSchema,
+        sourceMethod: AnchorMethodSchema,
+        targetMethod: AnchorMethodSchema,
+        score: z.number(),
+      })
+      .nullable(),
+  }),
+  capture: z.object({
+    imageCount: z.number().int().nonnegative(),
+    views: z.array(
+      z.object({
+        name: NonEmptyStringSchema,
+        label: NonEmptyStringSchema,
+        widthPx: z.number().int().positive(),
+        heightPx: z.number().int().positive(),
+      })
+    ),
+  }),
+  vlm: z.object({
+    used: z.boolean(),
+    provider: z.string().optional(),
+    confidence: z.number().min(0).max(1).optional(),
+    viewConsensus: z.number().min(0).max(1).optional(),
+    viewAgreement: z.number().min(0).max(1).optional(),
+    voteCount: z.number().int().nonnegative().optional(),
+    consensusCandidateKey: z.string().optional(),
+    diagnostics: z
+      .object({
+        provider: z.string().optional(),
+        repairAttempts: z.number().int().nonnegative().optional(),
+        fallbackUsed: z.boolean().optional(),
+        providerError: z.string().optional(),
+        candidateSelectionSource: z.enum(['model', 'view_votes', 'none']).optional(),
+        selectedMatchesConsensus: z.boolean().optional(),
+        flags: z.array(z.string()).default([]),
+      })
+      .optional(),
+    viewVotes: z
+      .array(
+        z.object({
+          viewName: NonEmptyStringSchema,
+          candidateKey: z.string().optional(),
+          confidence: z.number().min(0).max(1).optional(),
+          weight: z.number().nonnegative().optional(),
+        })
+      )
+      .optional(),
+    fallbackReason: z.string().optional(),
+    mateInference: z
+      .object({
+        selectedCandidateIndex: z.number().int().nonnegative().optional(),
+        sourcePartRef: z.string().optional(),
+        targetPartRef: z.string().optional(),
+        sourceFace: FaceIdSchema.optional(),
+        targetFace: FaceIdSchema.optional(),
+        sourceMethod: AnchorMethodSchema.optional(),
+        targetMethod: AnchorMethodSchema.optional(),
+        mode: z.enum(['translate', 'twist', 'both']).optional(),
+        intent: z.enum(['default', 'cover', 'insert']).optional(),
+        confidence: z.number().min(0).max(1).optional(),
+        reason: z.string().optional(),
+      })
+      .optional(),
+  }),
+  inferred: z.object({
+    sourcePartId: NonEmptyStringSchema,
+    targetPartId: NonEmptyStringSchema,
+    sourceFace: FaceIdSchema,
+    targetFace: FaceIdSchema,
+    sourceMethod: AnchorMethodSchema,
+    targetMethod: AnchorMethodSchema,
+    mode: z.enum(['translate', 'twist', 'both']),
+    intent: z.enum(['default', 'cover', 'insert']),
+    confidence: z.number().min(0).max(1),
+    origin: z.enum(['geometry', 'vlm', 'hybrid']),
+    arbitration: z.array(NonEmptyStringSchema).default([]),
+    reason: z.string().optional(),
+  }),
+  notes: z.array(z.string()).default([]),
+});
+
+const WebSearchResultSchema = z.object({
+  title: NonEmptyStringSchema,
+  url: z.string().optional(),
+  snippet: z.string().optional(),
+});
+
+const QueryWebSearchArgsSchema = z.object({
+  query: NonEmptyStringSchema,
+  maxResults: z.number().int().min(1).max(12).default(6),
+  provider: z.enum(['duckduckgo']).default('duckduckgo'),
+});
+const QueryWebSearchDataSchema = z.object({
+  provider: NonEmptyStringSchema,
+  query: NonEmptyStringSchema,
+  heading: z.string().optional(),
+  abstract: z.string().optional(),
+  abstractUrl: z.string().optional(),
+  results: z.array(WebSearchResultSchema).default([]),
+});
+
+const QueryWeatherArgsSchema = z.object({
+  location: NonEmptyStringSchema,
+  days: z.number().int().min(1).max(7).default(1),
+  units: z.enum(['metric', 'imperial']).default('metric'),
+  language: z.string().optional(),
+});
+const QueryWeatherDataSchema = z.object({
+  provider: z.literal('open-meteo'),
+  requestedLocation: NonEmptyStringSchema,
+  resolvedLocation: z.string().optional(),
+  latitude: z.number(),
+  longitude: z.number(),
+  timezone: z.string().optional(),
+  units: z.object({
+    temperature: NonEmptyStringSchema,
+    windSpeed: NonEmptyStringSchema,
+    precipitation: NonEmptyStringSchema,
+  }),
+  current: z
+    .object({
+      time: z.string().optional(),
+      temperature: z.number().optional(),
+      windSpeed: z.number().optional(),
+      windDirection: z.number().optional(),
+      weatherCode: z.number().optional(),
+      summary: z.string().optional(),
+    })
+    .optional(),
+  today: z
+    .object({
+      date: z.string().optional(),
+      temperatureMax: z.number().optional(),
+      temperatureMin: z.number().optional(),
+      precipitationSum: z.number().optional(),
+    })
+    .optional(),
+});
+
 const ActionTranslateArgsSchema = z
   .object({
     part: PartRefSchema,
@@ -965,6 +1132,18 @@ export const MCPToolSchemas = {
     args: QueryMateSuggestionsArgsSchema,
     result: makeToolResultSchema(QueryMateSuggestionsDataSchema),
   },
+  'query.mate_vlm_infer': {
+    args: QueryMateVlmInferArgsSchema,
+    result: makeToolResultSchema(QueryMateVlmInferDataSchema),
+  },
+  'query.web_search': {
+    args: QueryWebSearchArgsSchema,
+    result: makeToolResultSchema(QueryWebSearchDataSchema),
+  },
+  'query.weather': {
+    args: QueryWeatherArgsSchema,
+    result: makeToolResultSchema(QueryWeatherDataSchema),
+  },
   'view.set_environment': {
     args: ViewSetEnvironmentArgsSchema,
     result: makeToolResultSchema(ViewSetEnvironmentDataSchema),
@@ -1134,6 +1313,9 @@ export const MCPToolNameSchema = z.enum([
   'query.list_mate_modes',
   'query.model_info',
   'query.mate_suggestions',
+  'query.mate_vlm_infer',
+  'query.web_search',
+  'query.weather',
   'view.set_environment',
   'view.set_grid_visible',
   'view.set_anchors_visible',
@@ -1186,6 +1368,9 @@ const typedRequestSchemas = [
   z.object({ tool: z.literal('query.list_mate_modes'), args: QueryListMateModesArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('query.model_info'), args: QueryModelInfoArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('query.mate_suggestions'), args: QueryMateSuggestionsArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('query.mate_vlm_infer'), args: QueryMateVlmInferArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('query.web_search'), args: QueryWebSearchArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('query.weather'), args: QueryWeatherArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('view.set_environment'), args: ViewSetEnvironmentArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('view.set_grid_visible'), args: ViewSetGridVisibleArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('view.set_anchors_visible'), args: ViewSetAnchorsVisibleArgsSchema, meta: ToolMetaSchema.optional() }),
@@ -1229,7 +1414,7 @@ const typedRequestSchemas = [
 export const MCPToolRequestSchema = z.discriminatedUnion('tool', typedRequestSchemas);
 
 export type MCPToolRequest = z.infer<typeof MCPToolRequestSchema>;
-export type MCPToolArgs<T extends MCPToolName> = z.infer<MCPToolRegistry[T]['args']>;
+export type MCPToolArgs<T extends MCPToolName> = z.input<MCPToolRegistry[T]['args']>;
 export type MCPToolResult<T extends MCPToolName> = z.infer<MCPToolRegistry[T]['result']>;
 
 export const MCPToolErrorCodes = ToolErrorCodeSchema.options;

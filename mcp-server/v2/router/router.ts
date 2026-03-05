@@ -1,4 +1,5 @@
 import type { ToolCall } from '../../../shared/schema/index.js';
+import { AgentRouterProvider } from './agentProvider.js';
 import { MockRouterProvider } from './mockProvider.js';
 import type { RouterContext, RouterProvider } from './types.js';
 
@@ -10,6 +11,7 @@ export type RouterResult = {
 const getProvider = (): RouterProvider => {
   const provider = process.env.ROUTER_PROVIDER || 'mock';
   if (provider === 'mock') return MockRouterProvider;
+  if (provider === 'agent') return AgentRouterProvider;
   // Future: Gemini/Ollama providers
   return MockRouterProvider;
 };

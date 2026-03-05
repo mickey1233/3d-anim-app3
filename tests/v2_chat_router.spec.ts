@@ -28,6 +28,14 @@ test.describe('v2 chat router', () => {
 
     const gridVisible = await page.evaluate(() => (window as any).__V2_STORE__.getState().view.showGrid);
     expect(gridVisible).toBe(false);
+
+    await page.getByTestId('chat-input').fill('你是使用mock還是什麼');
+    await page.keyboard.press('Enter');
+    await expect(page.getByTestId('chat-messages')).toContainText('router=', { timeout: 5000 });
+
+    await page.getByTestId('chat-input').fill('今天天氣好嗎');
+    await page.keyboard.press('Enter');
+    await expect(page.getByTestId('chat-messages')).toContainText('我需要地點', { timeout: 5000 });
   });
 
   test('supports step Q&A, model Q&A, and natural mate parsing', async ({ page }) => {
@@ -59,8 +67,12 @@ test.describe('v2 chat router', () => {
 
     await page.getByTestId('chat-input').fill('mate part1 and part2');
     await page.keyboard.press('Enter');
+    await expect(page.getByTestId('mate-capture-overlay')).toBeVisible({ timeout: 7000 });
+    await expect(page.getByTestId('mate-capture-overlay')).toBeHidden({ timeout: 12000 });
     await expect(page.getByTestId('chat-messages')).toContainText('已解析：part1(', { timeout: 7000 });
     await expect(page.getByTestId('chat-messages')).toContainText('-> part2(', { timeout: 7000 });
+    await expect(page.getByTestId('chat-messages')).toContainText('via=', { timeout: 7000 });
+    await expect(page.getByTestId('chat-messages')).not.toContainText('method=auto', { timeout: 7000 });
 
     await page.waitForFunction(
       (beforePos) => {

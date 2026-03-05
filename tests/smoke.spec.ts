@@ -1,8 +1,18 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+
+async function openLegacyAnimationPanel(page: Page) {
+  const loadDemo = page.getByText('Load Demo (Spark.glb)');
+  if ((await loadDemo.count()) === 0) {
+    await page.getByRole('button', { name: /markers & animation/i }).click();
+  }
+  await expect(loadDemo).toBeVisible();
+  await loadDemo.scrollIntoViewIfNeeded();
+  return loadDemo;
+}
 
 test.describe('3D Animation App Smoke Test', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('http://localhost:5173');
+    await page.goto('http://127.0.0.1:5173/?legacy=1', { waitUntil: 'domcontentloaded' });
   });
 
   test('should load app and demo model', async ({ page }) => {
@@ -10,19 +20,24 @@ test.describe('3D Animation App Smoke Test', () => {
     await expect(page).toHaveTitle(/3D Anim/i); // Adjust based on actual title if set
     
     // 2. Load Demo
-    const loadBtn = page.getByText('Load Demo (Spark.glb)');
+    const loadBtn = await openLegacyAnimationPanel(page);
     await loadBtn.click();
     
-    // Wait for canvas to have content (approximated by checking if Scene Graph populates)
-    // We expect "Part1" to appear in sidebar "Scene Objects" or dropdown.
-    await expect(page.getByText('Part1')).toBeVisible();
+    await page.waitForFunction(() => {
+      const store = (window as any).__APP_STORE__?.getState?.();
+      if (!store?.parts) return false;
+      const parts = Object.values(store.parts) as any[];
+      return parts.some((p) => p?.name === 'Part1');
+    });
+    await expect(page.getByTestId('parts-list-item').filter({ hasText: 'Part1' }).first()).toBeVisible();
   });
 
   test('should allow picking start/end points', async ({ page }) => {
-    await page.getByText('Load Demo (Spark.glb)').click();
+    await (await openLegacyAnimationPanel(page)).click();
     
     // Select Moving Object
-    await page.locator('select').selectOption({ label: 'Part1' });
+    const targetSelect = page.locator('label:has-text(\"Target Object\")').locator('..').locator('select');
+    await targetSelect.selectOption({ label: 'Part1' });
     
     // Check Pick Buttons exist
     const startBtn = page.getByTitle('Pick Face Center').first();
@@ -38,12 +53,13 @@ test.describe('3D Animation App Smoke Test', () => {
   });
 
   test('should trigger animation', async ({ page }) => {
-     await page.getByText('Load Demo (Spark.glb)').click();
-     await page.locator('select').selectOption({ label: 'Part1' });
+     await (await openLegacyAnimationPanel(page)).click();
+     const targetSelect = page.locator('label:has-text(\"Target Object\")').locator('..').locator('select');
+     await targetSelect.selectOption({ label: 'Part1' });
      
      // Mocking state via direct JS evaluation if needed, or just clicking run if enabled.
      // Since Start/End are required for RUN to be enabled, we might check it's disabled initially.
-     const runBtn = page.getByRole('button', { name: 'RUN' });
-     await expect(runBtn).toBeDisabled();
+     const playBtn = page.getByRole('button', { name: 'PLAY', exact: true });
+     await expect(playBtn).toBeDisabled();
   });
 });

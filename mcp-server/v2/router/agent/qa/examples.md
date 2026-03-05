@@ -1,0 +1,94 @@
+## QA / Examples（只做參考，最終以 Runtime context 為準）
+
+### Example: 關掉格線
+User: 「把格線關掉」
+Output:
+{
+  "toolCalls": [{ "tool": "view.set_grid_visible", "args": { "visible": false } }],
+  "replyText": "格線已關閉。"
+}
+
+### Example: 新增 step
+User: 「新增 step 安裝定位」
+Output:
+{
+  "toolCalls": [{ "tool": "steps.add", "args": { "label": "安裝定位", "select": true } }],
+  "replyText": "已新增 step：安裝定位"
+}
+
+### Example: Mate（兩輪）
+User: 「mate part2 to part1」
+
+Iteration 0（先推論）：
+{
+  "toolCalls": [
+    {
+      "tool": "query.mate_vlm_infer",
+      "args": {
+        "sourcePart": { "partId": "<part2 id>" },
+        "targetPart": { "partId": "<part1 id>" },
+        "instruction": "mate part2 to part1",
+        "maxPairs": 12,
+        "maxViews": 6,
+        "maxWidthPx": 960,
+        "maxHeightPx": 640,
+        "format": "jpeg"
+      }
+    }
+  ],
+  "replyText": "我先用多角度影像 + VLM/VLA 推論最適合的 face/method/mode/intent，下一步再幫你套用 mate。"
+}
+
+Iteration 1（再執行，參考上一輪 toolResults 裡的推論結果）：
+{
+  "toolCalls": [
+    {
+      "tool": "action.mate_execute",
+      "args": {
+        "sourcePart": { "partId": "<source id>" },
+        "targetPart": { "partId": "<target id>" },
+        "sourceFace": "<inferred>",
+        "targetFace": "<inferred>",
+        "sourceMethod": "<inferred>",
+        "targetMethod": "<inferred>",
+        "mode": "<inferred>",
+        "mateMode": "<derived from mode>",
+        "pathPreference": "<derived from mode>",
+        "commit": true,
+        "pushHistory": true,
+        "stepLabel": "Mate <A> to <B>"
+      }
+    }
+  ],
+  "replyText": "已套用 mate。"
+}
+
+### Example: 查天氣（兩輪）
+User: 「台北今天天氣？」
+
+Iteration 0（先查詢）：
+{
+  "toolCalls": [{ "tool": "query.weather", "args": { "location": "Taipei", "days": 1, "units": "metric" } }],
+  "replyText": "我先幫你查一下台北今天的天氣。"
+}
+
+Iteration 1（整理回覆）：
+{
+  "toolCalls": [],
+  "replyText": "<根據 toolResults 的 current/today 摘要，例如：溫度範圍、目前天氣、降雨等>"
+}
+
+### Example: 查資料（兩輪）
+User: 「什麼是 bayonet lock？」
+
+Iteration 0（先搜尋）：
+{
+  "toolCalls": [{ "tool": "query.web_search", "args": { "query": "bayonet lock meaning", "maxResults": 5 } }],
+  "replyText": "我先幫你搜尋一下，再整理成重點。"
+}
+
+Iteration 1（整理回覆）：
+{
+  "toolCalls": [],
+  "replyText": "<根據 toolResults 的 abstract/results 摘要，必要時附 1~2 個連結>"
+}

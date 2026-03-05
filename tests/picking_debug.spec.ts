@@ -1,15 +1,25 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+
+async function openLegacyAnimationPanel(page: Page) {
+  const loadDemo = page.getByText('Load Demo (Spark.glb)');
+  if ((await loadDemo.count()) === 0) {
+    await page.getByRole('button', { name: /markers & animation/i }).click();
+  }
+  await expect(loadDemo).toBeVisible();
+  await loadDemo.scrollIntoViewIfNeeded();
+  return loadDemo;
+}
 
 test.describe('Picking Debug Test', () => {
   test.beforeEach(async ({ page }) => {
     // Enable console logs to terminal
     page.on('console', msg => console.log('PAGE LOG:', msg.text()));
-    await page.goto('http://localhost:5173');
+    await page.goto('http://127.0.0.1:5173/?legacy=1', { waitUntil: 'domcontentloaded' });
   });
 
   test('should select part on click', async ({ page }) => {
     // 1. Load Demo
-    await page.getByText('Load Demo (Spark.glb)').click();
+    await (await openLegacyAnimationPanel(page)).click();
     
     // 2. Wait for loading (approximate by waiting for sidebar list item?)
     // Or wait for window.__DEBUG_SELECTED_PART__ to be defined/null

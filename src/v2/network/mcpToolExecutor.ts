@@ -167,6 +167,31 @@ const STORE_FACES: StoreFaceId[] = ['top', 'bottom', 'left', 'right', 'front', '
 type MateExecMode = 'translate' | 'twist' | 'both';
 type AnchorMethodId = 'auto' | 'planar_cluster' | 'geometry_aabb' | 'object_aabb' | 'extreme_vertices' | 'obb_pca' | 'picked';
 type MateIntentKind = 'default' | 'cover' | 'insert';
+const EXEC_ANCHOR_METHOD_IDS: AnchorMethodId[] = [
+  'planar_cluster',
+  'geometry_aabb',
+  'object_aabb',
+  'obb_pca',
+  'picked',
+];
+
+function isExecutableAnchorMethod(value: unknown): value is AnchorMethodId {
+  return typeof value === 'string' && EXEC_ANCHOR_METHOD_IDS.includes(value as AnchorMethodId);
+}
+
+function normalizeAnchorMethod(value: unknown, fallback: AnchorMethodId = 'planar_cluster'): AnchorMethodId {
+  if (typeof value !== 'string') return fallback;
+  const method = value.toLowerCase() as AnchorMethodId;
+  if (method === 'auto' || method === 'extreme_vertices') return fallback;
+  return isExecutableAnchorMethod(method) ? method : fallback;
+}
+
+function parseExplicitAnchorMethod(value: unknown): AnchorMethodId | null {
+  if (typeof value !== 'string') return null;
+  const method = value.toLowerCase() as AnchorMethodId;
+  if (method === 'auto' || method === 'extreme_vertices') return null;
+  return isExecutableAnchorMethod(method) ? method : null;
+}
 
 type FaceAnchorCandidate = {
   face: StoreFaceId;
@@ -211,70 +236,6 @@ function normalizeInstructionText(value: unknown) {
     .trim();
 }
 
-function instructionIncludesAny(instruction: string, tokens: string[]) {
-  return tokens.some((token) => instruction.includes(token));
-}
-
-function inferMateIntentKind(instruction: string): MateIntentKind {
-  if (
-    instructionIncludesAny(instruction, [
-      'slot',
-      'insert',
-      'plug',
-      'socket',
-      'into',
-      '插槽',
-      '插入',
-      '塞進',
-      '塞进',
-      '卡入',
-    ])
-  ) {
-    return 'insert';
-  }
-  if (
-    instructionIncludesAny(instruction, [
-      'cover',
-      'lid',
-      'cap',
-      'close',
-      '蓋',
-      '盖',
-      '合上',
-      '蓋上',
-      '盖上',
-    ])
-  ) {
-    return 'cover';
-  }
-  return 'default';
-}
-
-function inferModeFromInstruction(instruction: string): MateExecMode | null {
-  const hasTwist = instructionIncludesAny(instruction, ['twist', 'rotate', 'spin', '旋轉', '旋转', '轉動', '转动']);
-  const hasArc = instructionIncludesAny(instruction, ['arc', 'cover', 'lid', 'cap', 'insert', 'slot', '蓋', '盖', '插入', '插槽']);
-  if (hasTwist && hasArc) return 'both';
-  if (hasArc) return 'both';
-  if (hasTwist) return 'twist';
-  return null;
-}
-
-function methodFromInstruction(instruction: string): AnchorMethodId | null {
-  const table: Array<{ method: AnchorMethodId; tokens: string[] }> = [
-    { method: 'object_aabb', tokens: ['object aabb', 'object_aabb', 'obj aabb', '对象aabb', '物件aabb'] },
-    { method: 'geometry_aabb', tokens: ['geometry aabb', 'geometry_aabb', 'geo aabb', 'mesh aabb', '幾何aabb', '几何aabb'] },
-    { method: 'planar_cluster', tokens: ['planar cluster', 'planar_cluster', '平面分群', '平面聚類', '平面聚类'] },
-    { method: 'extreme_vertices', tokens: ['extreme vertices', 'extreme_vertices', '極值', '极值'] },
-    { method: 'obb_pca', tokens: ['obb pca', 'obb', 'pca'] },
-    { method: 'picked', tokens: ['picked', 'pick face', '手動選面', '手动选面'] },
-    { method: 'auto', tokens: ['auto', '自動', '自动'] },
-  ];
-  for (const row of table) {
-    if (instructionIncludesAny(instruction, row.tokens)) return row.method;
-  }
-  return null;
-}
-
 function overlapRatio1D(
   firstMin: number,
   firstMax: number,
@@ -286,39 +247,98 @@ function overlapRatio1D(
   return overlap / base;
 }
 
-function inferIntentFromGeometry(sourceObject: THREE.Object3D, targetObject: THREE.Object3D): MateIntentKind | null {
-  const sourceBox = new THREE.Box3().setFromObject(sourceObject);
-  const targetBox = new THREE.Box3().setFromObject(targetObject);
-  if (sourceBox.isEmpty() || targetBox.isEmpty()) return null;
+function computeRootLocalBoundingBox(object: THREE.Object3D) {
+  const box = new THREE.Box3().makeEmpty();
+  object.updateWorldMatrix(true, true);
+  const rootInv = new THREE.Matrix4().copy(object.matrixWorld).invert();
+  const localToRoot = new THREE.Matrix4();
+  const transformedPoint = new THREE.Vector3();
+  const corners = Array.from({ length: 8 }, () => new THREE.Vector3());
 
-  const sourceCenter = sourceBox.getCenter(new THREE.Vector3());
-  const targetCenter = targetBox.getCenter(new THREE.Vector3());
-  const sourceSize = sourceBox.getSize(new THREE.Vector3());
-  const targetSize = targetBox.getSize(new THREE.Vector3());
+  object.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    const geometry = mesh.geometry as THREE.BufferGeometry | undefined;
+    if (!geometry?.attributes?.position) return;
+    if (!geometry.boundingBox) geometry.computeBoundingBox();
+    if (!geometry.boundingBox) return;
+
+    localToRoot.multiplyMatrices(rootInv, mesh.matrixWorld);
+    const { min, max } = geometry.boundingBox;
+    corners[0].set(min.x, min.y, min.z);
+    corners[1].set(max.x, min.y, min.z);
+    corners[2].set(max.x, max.y, min.z);
+    corners[3].set(min.x, max.y, min.z);
+    corners[4].set(min.x, min.y, max.z);
+    corners[5].set(max.x, min.y, max.z);
+    corners[6].set(max.x, max.y, max.z);
+    corners[7].set(min.x, max.y, max.z);
+    for (const corner of corners) {
+      transformedPoint.copy(corner).applyMatrix4(localToRoot);
+      box.expandByPoint(transformedPoint);
+    }
+    localToRoot.identity();
+  });
+
+  return box;
+}
+
+function getIntrinsicSizeFromObject(object: THREE.Object3D) {
+  const localBox = computeRootLocalBoundingBox(object);
+  if (!localBox.isEmpty()) return localBox.getSize(new THREE.Vector3());
+  const worldBox = new THREE.Box3().setFromObject(object);
+  if (!worldBox.isEmpty()) return worldBox.getSize(new THREE.Vector3());
+  return new THREE.Vector3(1e-3, 1e-3, 1e-3);
+}
+
+function getWorldCenterFromObject(object: THREE.Object3D) {
+  const worldBox = new THREE.Box3().setFromObject(object);
+  if (!worldBox.isEmpty()) return worldBox.getCenter(new THREE.Vector3());
+  return object.getWorldPosition(new THREE.Vector3());
+}
+
+function inferIntentFromGeometry(sourceObject: THREE.Object3D, targetObject: THREE.Object3D): MateIntentKind | null {
+  const sourceCenter = getWorldCenterFromObject(sourceObject);
+  const targetCenter = getWorldCenterFromObject(targetObject);
+  const sourceSize = getIntrinsicSizeFromObject(sourceObject);
+  const targetSize = getIntrinsicSizeFromObject(targetObject);
   const delta = targetCenter.clone().sub(sourceCenter);
 
-  const overlapX = overlapRatio1D(sourceBox.min.x, sourceBox.max.x, targetBox.min.x, targetBox.max.x);
-  const overlapY = overlapRatio1D(sourceBox.min.y, sourceBox.max.y, targetBox.min.y, targetBox.max.y);
-  const overlapZ = overlapRatio1D(sourceBox.min.z, sourceBox.max.z, targetBox.min.z, targetBox.max.z);
+  const sourceVol = Math.max(1e-6, Math.abs(sourceSize.x * sourceSize.y * sourceSize.z));
+  const targetVol = Math.max(1e-6, Math.abs(targetSize.x * targetSize.y * targetSize.z));
+  const volumeRatio = targetVol / sourceVol;
 
-  const sourceFitsWithinTargetXY = sourceSize.x <= targetSize.x * 0.94 && sourceSize.z <= targetSize.z * 0.94;
-  const sourceFitsWithinTargetXZ = sourceSize.x <= targetSize.x * 0.94 && sourceSize.y <= targetSize.y * 0.94;
-  const sourceFitsWithinTargetYZ = sourceSize.y <= targetSize.y * 0.94 && sourceSize.z <= targetSize.z * 0.94;
+  const srcDims = [Math.abs(sourceSize.x), Math.abs(sourceSize.y), Math.abs(sourceSize.z)].sort((a, b) => a - b);
+  const tgtDims = [Math.abs(targetSize.x), Math.abs(targetSize.y), Math.abs(targetSize.z)].sort((a, b) => a - b);
+  const fitStrictCount = srcDims.filter((value, index) => value <= tgtDims[index] * 0.9).length;
+  const fitLooseCount = srcDims.filter((value, index) => value <= tgtDims[index] * 0.95).length;
+  const centerDistance = delta.length();
+  const targetCharacteristic = Math.max(1e-3, ...tgtDims);
 
-  if ((sourceFitsWithinTargetXY && overlapX > 0.45 && overlapZ > 0.45) ||
-      (sourceFitsWithinTargetXZ && overlapX > 0.45 && overlapY > 0.45) ||
-      (sourceFitsWithinTargetYZ && overlapY > 0.45 && overlapZ > 0.45)) {
+  if (volumeRatio >= 1.55 && fitStrictCount >= 2) {
     return 'insert';
   }
 
-  const stackedAlongY = Math.abs(delta.y) > (sourceSize.y + targetSize.y) * 0.22 && overlapX > 0.5 && overlapZ > 0.5;
+  if (fitLooseCount >= 2 && centerDistance <= targetCharacteristic * 2.2) {
+    return 'insert';
+  }
+
+  const stackedAlongY = Math.abs(delta.y) > (srcDims[1] + tgtDims[1]) * 0.22;
+  const horizontalDist = Math.hypot(delta.x, delta.z);
+  const horizontalAllowance = (srcDims[2] + tgtDims[2]) * 0.42;
+  const closeInPlane = horizontalDist <= Math.max(1e-3, horizontalAllowance);
+  if (stackedAlongY && closeInPlane) return 'cover';
+
+  const pseudoOverlapX = overlapRatio1D(sourceCenter.x - srcDims[2] * 0.5, sourceCenter.x + srcDims[2] * 0.5, targetCenter.x - tgtDims[2] * 0.5, targetCenter.x + tgtDims[2] * 0.5);
+  const pseudoOverlapZ = overlapRatio1D(sourceCenter.z - srcDims[2] * 0.5, sourceCenter.z + srcDims[2] * 0.5, targetCenter.z - tgtDims[2] * 0.5, targetCenter.z + tgtDims[2] * 0.5);
+  const stackedAlongYWithOverlap = Math.abs(delta.y) > (srcDims[1] + tgtDims[1]) * 0.22 && pseudoOverlapX > 0.5 && pseudoOverlapZ > 0.5;
+  if (stackedAlongYWithOverlap) return 'cover';
+
   if (stackedAlongY) return 'cover';
 
   return null;
 }
 
 function defaultModeForIntent(intent: MateIntentKind): MateExecMode {
-  if (intent === 'cover') return 'both';
   return 'translate';
 }
 
@@ -346,23 +366,24 @@ function buildMethodPriority(params: {
   intent: MateIntentKind;
   role: 'source' | 'target';
 }): AnchorMethodId[] {
-  const { explicit, instructionMethod, intent, role } = params;
-  if (explicit) return [explicit];
-  if (instructionMethod && instructionMethod !== 'auto') {
-    return [instructionMethod, 'planar_cluster', 'geometry_aabb', 'object_aabb'];
+  const { explicit, instructionMethod, intent } = params;
+  if (explicit) return [normalizeAnchorMethod(explicit)];
+  if (instructionMethod) {
+    const preferred = normalizeAnchorMethod(instructionMethod);
+    return [preferred, 'planar_cluster', 'geometry_aabb', 'object_aabb', 'obb_pca'].filter(
+      (value, index, array) => array.indexOf(value) === index
+    ) as AnchorMethodId[];
   }
 
   if (intent === 'insert') {
-    return role === 'source'
-      ? ['extreme_vertices', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'auto']
-      : ['planar_cluster', 'extreme_vertices', 'geometry_aabb', 'object_aabb', 'auto'];
+    return ['planar_cluster', 'geometry_aabb', 'obb_pca', 'object_aabb'];
   }
 
   if (intent === 'cover') {
-    return ['auto', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'extreme_vertices'];
+    return ['planar_cluster', 'geometry_aabb', 'object_aabb', 'obb_pca'];
   }
 
-  return ['auto', 'planar_cluster', 'geometry_aabb', 'object_aabb', 'extreme_vertices'];
+  return ['planar_cluster', 'geometry_aabb', 'object_aabb', 'obb_pca'];
 }
 
 function resolveFaceCandidate(
@@ -675,6 +696,300 @@ function dataUrlFromPixels(params: { pixels: Uint8Array; width: number; height: 
   return canvas.toDataURL(mimeType);
 }
 
+type CaptureImagePayload = {
+  name: string;
+  label: string;
+  mime: string;
+  widthPx: number;
+  heightPx: number;
+  dataBase64: string;
+  cameraPose?: [number, number, number, number, number, number, number, number, number];
+};
+
+function dataUrlToBase64(dataUrl: string) {
+  const comma = dataUrl.indexOf(',');
+  if (comma < 0) return dataUrl;
+  return dataUrl.slice(comma + 1);
+}
+
+function renderCaptureWithCamera(params: {
+  camera: THREE.Camera;
+  maxWidthPx: number;
+  maxHeightPx: number;
+  format: 'png' | 'jpeg';
+  jpegQuality?: number;
+}) {
+  const { renderer, scene, viewportPx } = getRendererOrThrow();
+  const mimeType = params.format === 'jpeg' ? 'image/jpeg' : 'image/png';
+  const size = computeCaptureSize({
+    viewportWidth: viewportPx.width,
+    viewportHeight: viewportPx.height,
+    maxWidthPx: params.maxWidthPx,
+    maxHeightPx: params.maxHeightPx,
+  });
+
+  const prevTarget = renderer.getRenderTarget();
+  const renderTarget = new THREE.WebGLRenderTarget(size.width, size.height, {
+    depthBuffer: true,
+    stencilBuffer: false,
+  });
+  const pixels = new Uint8Array(size.width * size.height * 4);
+
+  try {
+    const captureCamera = params.camera;
+    if ((captureCamera as any).isPerspectiveCamera) {
+      const pcam = captureCamera as THREE.PerspectiveCamera;
+      pcam.aspect = size.width / Math.max(1, size.height);
+      pcam.updateProjectionMatrix();
+    } else if ((captureCamera as any).isOrthographicCamera) {
+      (captureCamera as THREE.OrthographicCamera).updateProjectionMatrix();
+    }
+
+    renderer.setRenderTarget(renderTarget);
+    renderer.render(scene, captureCamera);
+    renderer.readRenderTargetPixels(renderTarget, 0, 0, size.width, size.height, pixels);
+  } catch (error: any) {
+    throw new ToolExecutionError({
+      code: 'UNSUPPORTED_OPERATION',
+      message: `View capture failed: ${error?.message || 'unknown'}`,
+      recoverable: true,
+    });
+  } finally {
+    renderer.setRenderTarget(prevTarget);
+    renderTarget.dispose();
+  }
+
+  try {
+    const dataUrl = dataUrlFromPixels({
+      pixels,
+      width: size.width,
+      height: size.height,
+      mimeType,
+      jpegQuality: params.jpegQuality,
+    });
+    return {
+      dataUrl,
+      mimeType,
+      widthPx: size.width,
+      heightPx: size.height,
+    };
+  } catch (error: any) {
+    throw new ToolExecutionError({
+      code: 'UNSUPPORTED_OPERATION',
+      message: `View capture encode failed: ${error?.message || 'unknown'}`,
+      recoverable: true,
+    });
+  }
+}
+
+function cloneCameraForView(baseCamera: THREE.Camera) {
+  const clone = baseCamera.clone() as THREE.Camera;
+  clone.updateMatrixWorld(true);
+  return clone;
+}
+
+function configureCaptureCameraPose(params: {
+  camera: THREE.Camera;
+  eye: THREE.Vector3;
+  target: THREE.Vector3;
+  up?: THREE.Vector3;
+}) {
+  const { camera, eye, target, up } = params;
+  camera.position.copy(eye);
+  if (up && (camera as any).up) (camera as any).up.copy(up);
+  (camera as any).lookAt?.(target);
+  camera.updateMatrixWorld(true);
+}
+
+function buildMateCaptureImages(params: {
+  sourceObject: THREE.Object3D;
+  targetObject: THREE.Object3D;
+  sourceLabel: string;
+  targetLabel: string;
+  maxViews: number;
+  maxWidthPx: number;
+  maxHeightPx: number;
+  format: 'png' | 'jpeg';
+  jpegQuality?: number;
+}) {
+  const { camera: baseCamera } = getRendererOrThrow();
+  const sourceBox = new THREE.Box3().setFromObject(params.sourceObject);
+  const targetBox = new THREE.Box3().setFromObject(params.targetObject);
+  const pairBox = sourceBox.clone().union(targetBox);
+
+  const sourceCenter = getWorldCenterFromObject(params.sourceObject);
+  const targetCenter = getWorldCenterFromObject(params.targetObject);
+  const pairCenter = sourceCenter.clone().add(targetCenter).multiplyScalar(0.5);
+  const sourceIntrinsicSize = getIntrinsicSizeFromObject(params.sourceObject);
+  const targetIntrinsicSize = getIntrinsicSizeFromObject(params.targetObject);
+  const pairIntrinsicSize = sourceIntrinsicSize.clone().max(targetIntrinsicSize);
+  // Use world-space bounding box size for camera distance (pairBox is already in world space).
+  // Using root-local intrinsicSize caused wrong distances when objects had non-unit scale.
+  const pairDiag = Math.max(1e-3, pairBox.getSize(new THREE.Vector3()).length());
+  const pairDelta = targetCenter.clone().sub(sourceCenter);
+  const absPairDelta = new THREE.Vector3(Math.abs(pairDelta.x), Math.abs(pairDelta.y), Math.abs(pairDelta.z));
+  const pairDist = Math.max(1e-3, pairDelta.length());
+  const dirST = pairDelta.lengthSq() > 1e-8 ? pairDelta.clone().normalize() : new THREE.Vector3(0, 1, 0);
+  const targetQuaternion = params.targetObject.getWorldQuaternion(new THREE.Quaternion());
+  const frameRight = new THREE.Vector3(1, 0, 0).applyQuaternion(targetQuaternion).normalize();
+  const frameUp = new THREE.Vector3(0, 1, 0).applyQuaternion(targetQuaternion).normalize();
+  const frameFront = new THREE.Vector3(0, 0, 1).applyQuaternion(targetQuaternion).normalize();
+
+  const defaultDistance = Math.max(pairDiag * 1.4, pairDist * 1.35, 0.5);
+  const closeDistance = Math.max(pairDiag * 0.9, pairDist * 1.0, 0.35);
+
+  const viewSpecs: Array<{
+    name: string;
+    label: string;
+    eye: THREE.Vector3;
+    target: THREE.Vector3;
+    up?: THREE.Vector3;
+  }> = [
+    {
+      name: 'overview_iso_a',
+      label: 'Overview ISO A',
+      eye: pairCenter
+        .clone()
+        .add(frameRight.clone().add(frameUp.clone().multiplyScalar(0.75)).add(frameFront).normalize().multiplyScalar(defaultDistance)),
+      target: pairCenter.clone(),
+    },
+    {
+      name: 'overview_iso_b',
+      label: 'Overview ISO B',
+      eye: pairCenter
+        .clone()
+        .add(
+          frameRight
+            .clone()
+            .multiplyScalar(-1)
+            .add(frameUp.clone().multiplyScalar(0.7))
+            .add(frameFront.clone().multiplyScalar(-0.85))
+            .normalize()
+            .multiplyScalar(defaultDistance)
+        ),
+      target: pairCenter.clone(),
+    },
+    {
+      name: 'top',
+      label: 'Top',
+      eye: pairCenter.clone().add(frameUp.clone().multiplyScalar(defaultDistance)),
+      target: pairCenter.clone(),
+      up: frameFront.clone().multiplyScalar(-1),
+    },
+    {
+      name: 'front',
+      label: 'Front',
+      eye: pairCenter
+        .clone()
+        .add(frameFront.clone().add(frameUp.clone().multiplyScalar(0.15)).normalize().multiplyScalar(defaultDistance)),
+      target: pairCenter.clone(),
+    },
+    {
+      name: 'right',
+      label: 'Right',
+      eye: pairCenter
+        .clone()
+        .add(frameRight.clone().add(frameUp.clone().multiplyScalar(0.12)).normalize().multiplyScalar(defaultDistance)),
+      target: pairCenter.clone(),
+    },
+    {
+      name: 'source_to_target',
+      label: `${params.sourceLabel} -> ${params.targetLabel}`,
+      eye: sourceCenter.clone().sub(dirST.clone().multiplyScalar(closeDistance)).add(frameUp.clone().multiplyScalar(pairDiag * 0.18)),
+      target: pairCenter.clone(),
+    },
+    {
+      name: 'target_to_source',
+      label: `${params.targetLabel} -> ${params.sourceLabel}`,
+      eye: targetCenter.clone().add(dirST.clone().multiplyScalar(closeDistance)).add(frameUp.clone().multiplyScalar(pairDiag * 0.18)),
+      target: pairCenter.clone(),
+    },
+  ];
+
+  const viewByName = new Map(viewSpecs.map((spec) => [spec.name, spec]));
+  const sideViewName = absPairDelta.x >= absPairDelta.z ? 'right' : 'front';
+  const preferredOrder: string[] = [
+    'overview_iso_a',
+    'top',
+    'source_to_target',
+    'target_to_source',
+    sideViewName,
+    'overview_iso_b',
+    'front',
+    'right',
+  ];
+  const selectedNames: string[] = [];
+  for (const name of preferredOrder) {
+    if (!viewByName.has(name)) continue;
+    if (selectedNames.includes(name)) continue;
+    selectedNames.push(name);
+    if (selectedNames.length >= params.maxViews) break;
+  }
+  if (selectedNames.length < Math.max(2, params.maxViews)) {
+    for (const spec of viewSpecs) {
+      if (selectedNames.includes(spec.name)) continue;
+      selectedNames.push(spec.name);
+      if (selectedNames.length >= params.maxViews) break;
+    }
+  }
+  const selected = selectedNames
+    .map((name) => viewByName.get(name))
+    .filter(Boolean)
+    .slice(0, Math.max(2, Math.min(params.maxViews, viewSpecs.length))) as typeof viewSpecs;
+  const images: CaptureImagePayload[] = [];
+  for (const spec of selected) {
+    const captureCamera = cloneCameraForView(baseCamera);
+    configureCaptureCameraPose({
+      camera: captureCamera,
+      eye: spec.eye,
+      target: spec.target,
+      up: spec.up,
+    });
+    const image = renderCaptureWithCamera({
+      camera: captureCamera,
+      maxWidthPx: params.maxWidthPx,
+      maxHeightPx: params.maxHeightPx,
+      format: params.format,
+      jpegQuality: params.jpegQuality,
+    });
+    images.push({
+      name: `${spec.name}.${params.format === 'jpeg' ? 'jpg' : 'png'}`,
+      label: spec.label,
+      mime: image.mimeType,
+      widthPx: image.widthPx,
+      heightPx: image.heightPx,
+      dataBase64: dataUrlToBase64(image.dataUrl),
+      cameraPose: [...tuple3(spec.eye), ...tuple3(spec.target), ...tuple3(spec.up || frameUp)] as [
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+        number,
+      ],
+    });
+  }
+  return {
+    images,
+    sourceCenter: tuple3(sourceCenter),
+    targetCenter: tuple3(targetCenter),
+    pairCenter: tuple3(pairCenter),
+    pairSize: tuple3(pairBox.getSize(new THREE.Vector3())),
+    pairIntrinsicSize: tuple3(pairIntrinsicSize),
+    pairDistance: pairDist,
+    captureFrame: {
+      referencePart: params.targetLabel,
+      rightWorld: tuple3(frameRight),
+      upWorld: tuple3(frameUp),
+      frontWorld: tuple3(frameFront),
+      note: 'face directions are interpreted in target-object frame',
+    },
+  };
+}
+
 function resolvePart(part: PartRef): ResolvedPart {
   const store = currentStore();
   const byId = store.parts.byId;
@@ -845,15 +1160,15 @@ function resolveFeature(feature: FeatureRef): ResolvedFeature {
 
   if (feature.kind === 'face') {
     const part = resolvePart(feature.part);
-    const methodRequested = feature.method ?? 'auto';
-    const methodUsed = methodRequested === 'auto' ? 'geometry_aabb' : methodRequested;
+    const methodRequested = normalizeAnchorMethod(feature.method, 'planar_cluster');
+    const methodUsed = methodRequested;
     return {
       kind: 'face',
       part,
       face: feature.face,
       methodRequested,
       methodUsed,
-      fallbackUsed: methodRequested === 'picked' && methodUsed !== 'picked',
+      fallbackUsed: false,
     };
   }
 
@@ -1162,6 +1477,27 @@ function computeMateAlignedEndTransform(params: {
   };
 }
 
+function worldPoseToLocalPose(
+  object: THREE.Object3D,
+  worldPos: THREE.Vector3,
+  worldQuat: THREE.Quaternion
+) {
+  const parent = object.parent;
+  if (!parent) {
+    return { position: tuple3(worldPos), quaternion: tuple4(worldQuat) };
+  }
+
+  parent.updateWorldMatrix(true, false);
+  const invParent = new THREE.Matrix4().copy(parent.matrixWorld).invert();
+  const localPos = worldPos.clone().applyMatrix4(invParent);
+
+  const parentWorldQuat = new THREE.Quaternion();
+  parent.getWorldQuaternion(parentWorldQuat);
+  const localQuat = parentWorldQuat.invert().multiply(worldQuat).normalize();
+
+  return { position: tuple3(localPos), quaternion: tuple4(localQuat) };
+}
+
 function ensurePreviewBeforeTransform(partId: string) {
   if (runtimeState.previewBeforeTransformByPartId.has(partId)) return;
   const transform = getPartTransformOrThrow(partId);
@@ -1357,7 +1693,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
   if (tool === 'query.face_info') {
     const part = resolvePart((args as any).part);
     const face = (args as any).face;
-    const methodRequested = (args as any).method ?? 'auto';
+    const methodRequested = normalizeAnchorMethod((args as any).method, 'planar_cluster');
     const object = getObjectByPartIdOrThrow(part.partId);
     const primary = resolveAnchor({ object, faceId: face, method: methodRequested });
     const fallback =
@@ -1365,8 +1701,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       (methodRequested === 'geometry_aabb' ? null : resolveAnchor({ object, faceId: face, method: 'geometry_aabb' })) ??
       (methodRequested === 'object_aabb' ? null : resolveAnchor({ object, faceId: face, method: 'object_aabb' }));
     const anchor = primary ?? fallback;
-    const methodUsed =
-      anchor?.method ?? (methodRequested === 'auto' ? 'geometry_aabb' : methodRequested);
+    const methodUsed = normalizeAnchorMethod(anchor?.method, methodRequested);
     const frameWorld = anchor
       ? frameWorldFromAnchor(object, anchor)
       : frameWorldFromAnchor(object, {
@@ -1462,7 +1797,6 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const source = resolvePart(input.sourcePart);
     const target = resolvePart(input.targetPart);
     const instruction = normalizeInstructionText(input.instruction);
-    const instructionIntent = inferMateIntentKind(instruction);
 
     const sourceObject = getObjectByPartIdOrThrow(source.partId);
     const targetObject = getObjectByPartIdOrThrow(target.partId);
@@ -1475,19 +1809,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const expectedFromCenters = getExpectedFacePairFromCenters(sourceCenter, targetCenter);
 
     const geometryIntent = inferIntentFromGeometry(sourceObject, targetObject);
-    const intentKind = instructionIntent === 'default' ? geometryIntent ?? 'default' : instructionIntent;
-    const suggestedMode =
-      inferModeFromInstruction(instruction) ?? defaultModeForIntent(intentKind);
+    const intentKind = geometryIntent ?? 'default';
+    const suggestedMode = defaultModeForIntent(intentKind);
 
-    const instructionMethod = methodFromInstruction(instruction);
-    const explicitSourceMethod =
-      typeof input.sourceMethod === 'string' && input.sourceMethod !== 'auto'
-        ? (input.sourceMethod as AnchorMethodId)
-        : null;
-    const explicitTargetMethod =
-      typeof input.targetMethod === 'string' && input.targetMethod !== 'auto'
-        ? (input.targetMethod as AnchorMethodId)
-        : null;
+    const instructionMethod = null;
+    const explicitSourceMethod = parseExplicitAnchorMethod(input.sourceMethod);
+    const explicitTargetMethod = parseExplicitAnchorMethod(input.targetMethod);
 
     const sourceMethods = buildMethodPriority({
       explicit: explicitSourceMethod,
@@ -1540,10 +1867,708 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             'Mate suggestions computed from live scene geometry',
             `intent=${intentKind}`,
             `geometry_intent=${geometryIntent ?? 'none'}`,
-            `instruction_method=${instructionMethod ?? 'none'}`,
+            `instruction_method=none`,
           ],
         },
       }
+    );
+  }
+
+  if (tool === 'query.mate_vlm_infer') {
+    const input = args as any;
+    const source = resolvePart(input.sourcePart);
+    const target = resolvePart(input.targetPart);
+    if (source.partId === target.partId) {
+      throw new ToolExecutionError({
+        code: 'INVALID_ARGUMENT',
+        message: 'sourcePart and targetPart must be different parts',
+      });
+    }
+
+    const instruction = normalizeInstructionText(input.instruction);
+    const preferredSourceFace =
+      STORE_FACES.includes(input.preferredSourceFace as StoreFaceId)
+        ? (input.preferredSourceFace as StoreFaceId)
+        : undefined;
+    const preferredTargetFace =
+      STORE_FACES.includes(input.preferredTargetFace as StoreFaceId)
+        ? (input.preferredTargetFace as StoreFaceId)
+        : undefined;
+    const explicitSourceMethod = parseExplicitAnchorMethod(input.sourceMethod) ?? undefined;
+    const explicitTargetMethod = parseExplicitAnchorMethod(input.targetMethod) ?? undefined;
+    const preferredMode =
+      typeof input.preferredMode === 'string' && ['translate', 'twist', 'both'].includes(input.preferredMode)
+        ? (input.preferredMode as MateExecMode)
+        : undefined;
+
+    const suggestionEnvelope = await runTool('query.mate_suggestions' as MCPToolName, {
+      sourcePart: { partId: source.partId },
+      targetPart: { partId: target.partId },
+      instruction,
+      ...(preferredSourceFace ? { preferredSourceFace } : {}),
+      ...(preferredTargetFace ? { preferredTargetFace } : {}),
+      sourceMethod: normalizeAnchorMethod(input.sourceMethod, 'planar_cluster'),
+      targetMethod: normalizeAnchorMethod(input.targetMethod, 'planar_cluster'),
+      maxPairs: clampInt(Number(input.maxPairs ?? 12), 1, 36),
+    });
+    const suggestionData = unwrapToolData(suggestionEnvelope, 'SOLVER_FAILED') as any;
+
+    const sourceObject = getObjectByPartIdOrThrow(source.partId);
+    const targetObject = getObjectByPartIdOrThrow(target.partId);
+    const viewStore = currentStore();
+    const prevAnchorsVisible = Boolean(viewStore.view.showAnchors);
+    if (!prevAnchorsVisible) viewStore.setAnchorsVisible(true);
+    let capture: ReturnType<typeof buildMateCaptureImages>;
+    try {
+      capture = buildMateCaptureImages({
+        sourceObject,
+        targetObject,
+        sourceLabel: source.partName,
+        targetLabel: target.partName,
+        maxViews: clampInt(Number(input.maxViews ?? 4), 2, 12),
+        maxWidthPx: clampInt(Number(input.maxWidthPx ?? 640), 64, 2048),
+        maxHeightPx: clampInt(Number(input.maxHeightPx ?? 480), 64, 2048),
+        format: String(input.format || 'jpeg').toLowerCase() === 'png' ? 'png' : 'jpeg',
+        jpegQuality: Number.isFinite(Number(input.jpegQuality)) ? Number(input.jpegQuality) : 0.9,
+      });
+    } finally {
+      if (!prevAnchorsVisible) viewStore.setAnchorsVisible(prevAnchorsVisible);
+    }
+    const overlayImages = capture.images.map((image, index) => ({
+      id: `${Date.now()}-${index}-${image.name}`,
+      name: image.name,
+      label: image.label,
+      dataUrl: `data:${image.mime};base64,${image.dataBase64}`,
+      widthPx: image.widthPx,
+      heightPx: image.heightPx,
+      mime: image.mime,
+    }));
+    if (overlayImages.length > 0) {
+      viewStore.showMateCaptureOverlay(overlayImages, 5000);
+    }
+
+    const ranking = Array.isArray(suggestionData?.ranking) ? suggestionData.ranking : [];
+    const rankingTop = ranking[0] && typeof ranking[0] === 'object' ? ranking[0] : null;
+    const geometryIntent = (['default', 'cover', 'insert'].includes(String(suggestionData?.intent))
+      ? (suggestionData.intent as MateIntentKind)
+      : 'default') as MateIntentKind;
+    const geometryMode = (preferredMode ||
+      (['translate', 'twist', 'both'].includes(String(suggestionData?.suggestedMode))
+        ? (suggestionData.suggestedMode as MateExecMode)
+        : defaultModeForIntent(geometryIntent))) as MateExecMode;
+    const expectedFromCenters = suggestionData?.expectedFromCenters || {
+      sourceFace: 'bottom',
+      targetFace: 'top',
+    };
+
+    const geometrySourceFace = preferredSourceFace || (rankingTop?.sourceFace as StoreFaceId | undefined) || (expectedFromCenters.sourceFace as StoreFaceId) || 'bottom';
+    const geometryTargetFace = preferredTargetFace || (rankingTop?.targetFace as StoreFaceId | undefined) || (expectedFromCenters.targetFace as StoreFaceId) || 'top';
+    const geometrySourceMethod = normalizeAnchorMethod(
+      explicitSourceMethod || (rankingTop?.sourceMethod as AnchorMethodId | undefined),
+      'planar_cluster'
+    );
+    const geometryTargetMethod = normalizeAnchorMethod(
+      explicitTargetMethod || (rankingTop?.targetMethod as AnchorMethodId | undefined),
+      'planar_cluster'
+    );
+
+    const isFaceId = (value: unknown): value is StoreFaceId =>
+      typeof value === 'string' && STORE_FACES.includes(value as StoreFaceId);
+    const isMethodId = (value: unknown): value is AnchorMethodId => isExecutableAnchorMethod(value);
+    const facePairAxis = (sourceFace: StoreFaceId, targetFace: StoreFaceId): 'x' | 'y' | 'z' | 'mixed' => {
+      if ((sourceFace === 'left' && targetFace === 'right') || (sourceFace === 'right' && targetFace === 'left')) return 'x';
+      if ((sourceFace === 'top' && targetFace === 'bottom') || (sourceFace === 'bottom' && targetFace === 'top')) return 'y';
+      if ((sourceFace === 'front' && targetFace === 'back') || (sourceFace === 'back' && targetFace === 'front')) return 'z';
+      return 'mixed';
+    };
+    const overlap1d = (aMin: number, aMax: number, bMin: number, bMax: number) => {
+      const overlap = Math.max(0, Math.min(aMax, bMax) - Math.max(aMin, bMin));
+      const base = Math.max(1e-6, Math.min(aMax - aMin, bMax - bMin));
+      return overlap / base;
+    };
+
+    const sourceCenterRaw = capture.sourceCenter;
+    const targetCenterRaw = capture.targetCenter;
+    const sourceSizeRaw = tuple3(getIntrinsicSizeFromObject(sourceObject));
+    const targetSizeRaw = tuple3(getIntrinsicSizeFromObject(targetObject));
+    const centerDelta = {
+      x: Number(targetCenterRaw[0] ?? 0) - Number(sourceCenterRaw[0] ?? 0),
+      y: Number(targetCenterRaw[1] ?? 0) - Number(sourceCenterRaw[1] ?? 0),
+      z: Number(targetCenterRaw[2] ?? 0) - Number(sourceCenterRaw[2] ?? 0),
+    };
+    const overlapX = overlap1d(
+      Number(sourceCenterRaw[0] ?? 0) - Math.abs(Number(sourceSizeRaw[0] ?? 0)) * 0.5,
+      Number(sourceCenterRaw[0] ?? 0) + Math.abs(Number(sourceSizeRaw[0] ?? 0)) * 0.5,
+      Number(targetCenterRaw[0] ?? 0) - Math.abs(Number(targetSizeRaw[0] ?? 0)) * 0.5,
+      Number(targetCenterRaw[0] ?? 0) + Math.abs(Number(targetSizeRaw[0] ?? 0)) * 0.5
+    );
+    const overlapY = overlap1d(
+      Number(sourceCenterRaw[1] ?? 0) - Math.abs(Number(sourceSizeRaw[1] ?? 0)) * 0.5,
+      Number(sourceCenterRaw[1] ?? 0) + Math.abs(Number(sourceSizeRaw[1] ?? 0)) * 0.5,
+      Number(targetCenterRaw[1] ?? 0) - Math.abs(Number(targetSizeRaw[1] ?? 0)) * 0.5,
+      Number(targetCenterRaw[1] ?? 0) + Math.abs(Number(targetSizeRaw[1] ?? 0)) * 0.5
+    );
+    const overlapZ = overlap1d(
+      Number(sourceCenterRaw[2] ?? 0) - Math.abs(Number(sourceSizeRaw[2] ?? 0)) * 0.5,
+      Number(sourceCenterRaw[2] ?? 0) + Math.abs(Number(sourceSizeRaw[2] ?? 0)) * 0.5,
+      Number(targetCenterRaw[2] ?? 0) - Math.abs(Number(targetSizeRaw[2] ?? 0)) * 0.5,
+      Number(targetCenterRaw[2] ?? 0) + Math.abs(Number(targetSizeRaw[2] ?? 0)) * 0.5
+    );
+    const combinedYSize = Math.abs(Number(sourceSizeRaw[1] ?? 0)) + Math.abs(Number(targetSizeRaw[1] ?? 0));
+    const stackedLikely =
+      Math.abs(centerDelta.y) > (Math.abs(Number(sourceSizeRaw[1] ?? 0)) + Math.abs(Number(targetSizeRaw[1] ?? 0))) * 0.22 &&
+      overlapX > 0.4 &&
+      overlapZ > 0.4;
+    const sourceAboveTarget = centerDelta.y < -(combinedYSize * 0.12);
+    const sourceBelowTarget = centerDelta.y > combinedYSize * 0.12;
+    const ySeparated = sourceAboveTarget || sourceBelowTarget;
+
+    const candidateRows = ranking.slice(0, 8).flatMap((row: any, rankIndex: number) => {
+      if (!row || typeof row !== 'object') return [];
+      if (!isFaceId(row.sourceFace) || !isFaceId(row.targetFace)) return [];
+      if (!isMethodId(row.sourceMethod) || !isMethodId(row.targetMethod)) return [];
+      const axis = facePairAxis(row.sourceFace, row.targetFace);
+      const verticalPair = axis === 'y';
+      const lateralPair = axis === 'x' || axis === 'z';
+      let semanticScore = Number.isFinite(Number(row.score)) ? Number(row.score) : 0;
+      const tags: string[] = [];
+      if (verticalPair) tags.push('vertical_pair');
+      if (lateralPair) tags.push('lateral_pair');
+      if (row.sourceFace === 'bottom' && row.targetFace === 'top') tags.push('bottom_to_top');
+      if (row.sourceFace === 'top' && row.targetFace === 'bottom') tags.push('top_to_bottom');
+      if (row.sourceMethod === 'planar_cluster' || row.targetMethod === 'planar_cluster') tags.push('planar_cluster');
+      if (geometryIntent === 'cover') {
+        if (verticalPair) {
+          semanticScore += 0.22;
+          tags.push('cover_friendly');
+          if (stackedLikely) semanticScore += 0.08;
+        }
+        if (lateralPair) semanticScore -= 0.12;
+      }
+      if (geometryIntent === 'insert') {
+        if (row.targetMethod !== 'object_aabb') {
+          semanticScore += 0.08;
+          tags.push('insert_friendly');
+        } else {
+          semanticScore -= 0.06;
+        }
+        if (verticalPair) {
+          semanticScore += 0.12;
+          tags.push('insert_vertical_pair');
+          if (row.sourceFace === 'bottom' && row.targetFace === 'top') {
+            semanticScore += 0.08;
+            tags.push('insert_downward_pair');
+          }
+        } else if (lateralPair) {
+          semanticScore -= 0.04;
+        }
+      }
+      if (
+        preferredSourceFace &&
+        preferredTargetFace &&
+        row.sourceFace === preferredSourceFace &&
+        row.targetFace === preferredTargetFace
+      ) {
+        semanticScore += 0.35;
+        tags.push('explicit_face_match');
+      }
+      return [
+        {
+          candidateIndex: rankIndex,
+          candidateKey: `${row.sourceFace}:${row.targetFace}:${row.sourceMethod}:${row.targetMethod}`,
+          sourceFace: row.sourceFace as StoreFaceId,
+          targetFace: row.targetFace as StoreFaceId,
+          sourceMethod: normalizeAnchorMethod(row.sourceMethod, 'planar_cluster'),
+          targetMethod: normalizeAnchorMethod(row.targetMethod, 'planar_cluster'),
+          score: Number.isFinite(Number(row.score)) ? Number(row.score) : 0,
+          semanticScore,
+          tags,
+        },
+      ];
+    });
+    const candidateRowsBySemantic = [...candidateRows].sort((a, b) => b.semanticScore - a.semanticScore);
+
+    const store = currentStore();
+    const partsCtx = store.parts.order.map((id) => ({ id, name: store.parts.byId[id]?.name || id }));
+    const mateContext = {
+      instruction,
+      sourcePartId: source.partId,
+      sourcePartName: source.partName,
+      targetPartId: target.partId,
+      targetPartName: target.partName,
+      explicitHints: {
+        preferredSourceFace: preferredSourceFace ?? null,
+        preferredTargetFace: preferredTargetFace ?? null,
+        sourceMethod: explicitSourceMethod ?? null,
+        targetMethod: explicitTargetMethod ?? null,
+        preferredMode: preferredMode ?? null,
+      },
+      geometry: {
+        intent: geometryIntent,
+        suggestedMode: geometryMode,
+        expectedFromCenters: {
+          sourceFace: geometrySourceFace,
+          targetFace: geometryTargetFace,
+        },
+        rankingTop: rankingTop
+          ? {
+              sourceFace: rankingTop.sourceFace,
+              targetFace: rankingTop.targetFace,
+              sourceMethod: rankingTop.sourceMethod,
+              targetMethod: rankingTop.targetMethod,
+              score: rankingTop.score,
+            }
+          : null,
+        rankingTopN: ranking.slice(0, 6).map((row: any) => ({
+          sourceFace: row?.sourceFace,
+          targetFace: row?.targetFace,
+          sourceMethod: row?.sourceMethod,
+          targetMethod: row?.targetMethod,
+          score: row?.score,
+        })),
+        candidates: candidateRowsBySemantic.map((candidate) => ({
+          candidateIndex: candidate.candidateIndex,
+          candidateKey: candidate.candidateKey,
+          sourceFace: candidate.sourceFace,
+          targetFace: candidate.targetFace,
+          sourceMethod: candidate.sourceMethod,
+          targetMethod: candidate.targetMethod,
+          score: candidate.score,
+          semanticScore: candidate.semanticScore,
+          tags: candidate.tags,
+        })),
+      },
+      sceneRelation: {
+        sourceCenter: capture.sourceCenter,
+        targetCenter: capture.targetCenter,
+        pairCenter: capture.pairCenter,
+        pairSize: capture.pairSize,
+        pairIntrinsicSize: capture.pairIntrinsicSize,
+        pairDistance: capture.pairDistance,
+      },
+      captureFrame: capture.captureFrame,
+      captureViews: capture.images.map((img) => ({
+        name: img.name,
+        label: img.label,
+        widthPx: img.widthPx,
+        heightPx: img.heightPx,
+        cameraPose: img.cameraPose,
+      })),
+    };
+
+    let vlmResult: any = null;
+    let vlmError: string | null = null;
+    try {
+      const res: any = await v2Client.request('vlm_analyze', {
+        images: capture.images.map((img) => ({
+          name: img.name,
+          mime: img.mime,
+          data: img.dataBase64,
+        })),
+        parts: partsCtx,
+        mateContext,
+      });
+      vlmResult = res?.result || res;
+    } catch (error: any) {
+      vlmError = error?.message || 'vlm_analyze failed';
+    }
+
+    const asFace = (value: unknown) =>
+      typeof value === 'string' && STORE_FACES.includes(value as StoreFaceId) ? (value as StoreFaceId) : undefined;
+    const asMethod = (value: unknown) => {
+      if (typeof value !== 'string') return undefined;
+      return normalizeAnchorMethod(value, 'planar_cluster');
+    };
+    const asMode = (value: unknown) =>
+      typeof value === 'string' && ['translate', 'twist', 'both'].includes(value) ? (value as MateExecMode) : undefined;
+    const asIntent = (value: unknown) =>
+      typeof value === 'string' && ['default', 'cover', 'insert'].includes(value) ? (value as MateIntentKind) : undefined;
+    const asConfidence = (value: unknown) => {
+      const n = Number(value);
+      if (!Number.isFinite(n)) return undefined;
+      return Math.max(0, Math.min(1, n));
+    };
+    const asShortString = (value: unknown) =>
+      typeof value === 'string' ? value.trim().slice(0, 180) : undefined;
+
+    const rawMate = vlmResult && typeof vlmResult === 'object' ? (vlmResult as any).mate_inference : null;
+    const rawMateDiagnostics = rawMate && typeof rawMate === 'object' && rawMate.diagnostics && typeof rawMate.diagnostics === 'object'
+      ? (rawMate.diagnostics as Record<string, unknown>)
+      : null;
+    const vlmConfidence = asConfidence(rawMate?.confidence);
+    const viewWeightForName = (name: string) => {
+      const lower = name.toLowerCase();
+      if (lower.includes('source_to_target') || lower.includes('target_to_source')) return 1.25;
+      if (lower.includes('top')) return 1.15;
+      if (lower.includes('overview')) return 0.8;
+      if (lower.includes('front') || lower.includes('right')) return 0.9;
+      return 1.0;
+    };
+    const rawViewVotes = Array.isArray(rawMate?.view_votes) ? rawMate.view_votes : [];
+    const parsedViewVotes = rawViewVotes
+      .map((vote: any) => {
+        const viewName = asShortString(vote?.view_name);
+        const candidateIndex = Number.isInteger(Number(vote?.candidate_index)) ? Number(vote.candidate_index) : undefined;
+        const candidateKey = asShortString(vote?.candidate_key);
+        const confidence = asConfidence(vote?.confidence);
+        if (!viewName) return null;
+        return {
+          viewName,
+          candidateIndex,
+          candidateKey,
+          confidence,
+          reason: asShortString(vote?.reason),
+          weight: viewWeightForName(viewName) * Math.max(0.2, confidence ?? 0.5),
+        };
+      })
+      .filter(Boolean) as Array<{
+      viewName: string;
+      candidateIndex?: number;
+      candidateKey?: string;
+      confidence?: number;
+      reason?: string;
+      weight: number;
+    }>;
+    const parsedVlmDiagnostics = rawMateDiagnostics
+      ? {
+          provider: asShortString(rawMateDiagnostics.provider),
+          repairAttempts:
+            typeof rawMateDiagnostics.repair_attempts === 'number' && Number.isFinite(rawMateDiagnostics.repair_attempts)
+              ? Math.max(0, Math.floor(Number(rawMateDiagnostics.repair_attempts)))
+              : undefined,
+          fallbackUsed: rawMateDiagnostics.fallback_used === true ? true : rawMateDiagnostics.fallback_used === false ? false : undefined,
+          providerError: asShortString(rawMateDiagnostics.provider_error),
+          candidateSelectionSource:
+            typeof rawMateDiagnostics.candidate_selection_source === 'string' &&
+            ['model', 'view_votes', 'none'].includes(rawMateDiagnostics.candidate_selection_source)
+              ? (rawMateDiagnostics.candidate_selection_source as 'model' | 'view_votes' | 'none')
+              : undefined,
+          selectedMatchesConsensus:
+            typeof rawMateDiagnostics.selected_matches_consensus === 'boolean'
+              ? rawMateDiagnostics.selected_matches_consensus
+              : undefined,
+          flags: Array.isArray(rawMateDiagnostics.flags)
+            ? rawMateDiagnostics.flags.filter((item): item is string => typeof item === 'string').slice(0, 12)
+            : [],
+        }
+      : undefined;
+    const voteTally = new Map<string, { key: string; weight: number; votes: number }>();
+    const voteCandidateByKey = new Map<string, (typeof candidateRows)[number]>();
+    for (const vote of parsedViewVotes) {
+      let matchedCandidate =
+        candidateRows.find((candidate: (typeof candidateRows)[number]) => {
+          if (vote.candidateIndex !== undefined && candidate.candidateIndex === vote.candidateIndex) return true;
+          if (vote.candidateKey && candidate.candidateKey === vote.candidateKey) return true;
+          return false;
+        }) || null;
+      if (!matchedCandidate && vote.candidateKey) {
+        matchedCandidate =
+          candidateRowsBySemantic.find((candidate: (typeof candidateRowsBySemantic)[number]) => candidate.candidateKey === vote.candidateKey) || null;
+      }
+      const key = matchedCandidate?.candidateKey || vote.candidateKey;
+      if (!key) continue;
+      const prev = voteTally.get(key) || { key, weight: 0, votes: 0 };
+      prev.weight += vote.weight;
+      prev.votes += 1;
+      voteTally.set(key, prev);
+      if (matchedCandidate) voteCandidateByKey.set(key, matchedCandidate);
+    }
+    const voteTallySorted = [...voteTally.values()].sort((a, b) => b.weight - a.weight);
+    const viewVoteWeightTotal = voteTallySorted.reduce((sum, item) => sum + item.weight, 0);
+    const consensusTop = voteTallySorted[0];
+    const viewConsensus =
+      consensusTop && viewVoteWeightTotal > 1e-6 ? Math.max(0, Math.min(1, consensusTop.weight / viewVoteWeightTotal)) : undefined;
+    const viewAgreement =
+      consensusTop && parsedViewVotes.length > 0 ? Math.max(0, Math.min(1, consensusTop.votes / parsedViewVotes.length)) : undefined;
+    const consensusCandidate =
+      consensusTop ? voteCandidateByKey.get(consensusTop.key) || candidateRowsBySemantic.find((candidate) => candidate.candidateKey === consensusTop.key) || null : null;
+
+    const selectedCandidateIndex =
+      Number.isInteger(Number(rawMate?.selected_candidate_index))
+        ? Number(rawMate.selected_candidate_index)
+        : Number.isInteger(Number(rawMate?.candidate_index))
+        ? Number(rawMate.candidate_index)
+        : undefined;
+    const selectedCandidateKey = asShortString(rawMate?.selected_candidate_key ?? rawMate?.candidate_key);
+    const selectedCandidate =
+      candidateRows.find((candidate: (typeof candidateRows)[number]) => {
+        if (selectedCandidateIndex !== undefined && candidate.candidateIndex === selectedCandidateIndex) return true;
+        if (selectedCandidateKey && candidate.candidateKey === selectedCandidateKey) return true;
+        return false;
+      }) || null;
+    const vlmAbstain = rawMate?.abstain === true;
+    const vlmCandidate = rawMate
+      ? {
+          selectedCandidateIndex,
+          selectedCandidateKey,
+          sourcePartRef: asShortString(rawMate.source_part_ref),
+          targetPartRef: asShortString(rawMate.target_part_ref),
+          sourceFace: asFace(rawMate.source_face) ?? selectedCandidate?.sourceFace,
+          targetFace: asFace(rawMate.target_face) ?? selectedCandidate?.targetFace,
+          sourceMethod: asMethod(rawMate.source_method) ?? selectedCandidate?.sourceMethod,
+          targetMethod: asMethod(rawMate.target_method) ?? selectedCandidate?.targetMethod,
+          mode: asMode(rawMate.mode),
+          intent: asIntent(rawMate.intent),
+          confidence: vlmConfidence,
+          reason: asShortString(rawMate.reason),
+        }
+      : undefined;
+
+    const topPairs = ranking
+      .slice(0, 6)
+      .map((row: any) => `${String(row?.sourceFace || '')}:${String(row?.targetFace || '')}`);
+    const vlmFacePair = vlmCandidate?.sourceFace && vlmCandidate?.targetFace
+      ? `${vlmCandidate.sourceFace}:${vlmCandidate.targetFace}`
+      : null;
+    const vlmFaceSupported = !vlmFacePair || topPairs.includes(vlmFacePair);
+    let effectiveVlmConfidence = vlmCandidate?.confidence;
+    if (effectiveVlmConfidence !== undefined && viewConsensus !== undefined) {
+      const consensusFactor = viewConsensus >= 0.55 ? 1 : 0.7 + viewConsensus * 0.55;
+      effectiveVlmConfidence = Math.max(0, Math.min(1, effectiveVlmConfidence * consensusFactor));
+    }
+    const useVlm = Boolean(vlmCandidate && !vlmAbstain && (effectiveVlmConfidence ?? 0) >= 0.62);
+
+    const faceThreshold = vlmFaceSupported ? 0.62 : 0.84;
+    const methodThreshold = 0.7;
+    const modeThreshold = 0.68;
+    const intentThreshold = 0.62;
+
+    let finalIntent =
+      preferredMode && geometryIntent !== 'default'
+        ? geometryIntent
+        : useVlm && (effectiveVlmConfidence ?? 0) >= intentThreshold && vlmCandidate?.intent
+        ? vlmCandidate.intent
+        : geometryIntent;
+    let finalMode =
+      preferredMode ||
+      (useVlm && (effectiveVlmConfidence ?? 0) >= modeThreshold && vlmCandidate?.mode
+        ? vlmCandidate.mode
+        : geometryMode);
+    let finalSourceFace =
+      preferredSourceFace ||
+      (useVlm && (effectiveVlmConfidence ?? 0) >= faceThreshold && vlmCandidate?.sourceFace
+        ? vlmCandidate.sourceFace
+        : geometrySourceFace);
+    let finalTargetFace =
+      preferredTargetFace ||
+      (useVlm && (effectiveVlmConfidence ?? 0) >= faceThreshold && vlmCandidate?.targetFace
+        ? vlmCandidate.targetFace
+        : geometryTargetFace);
+    let finalSourceMethod =
+      explicitSourceMethod ||
+      (useVlm && (effectiveVlmConfidence ?? 0) >= methodThreshold && vlmCandidate?.sourceMethod
+        ? vlmCandidate.sourceMethod
+        : geometrySourceMethod);
+    let finalTargetMethod =
+      explicitTargetMethod ||
+      (useVlm && (effectiveVlmConfidence ?? 0) >= methodThreshold && vlmCandidate?.targetMethod
+        ? vlmCandidate.targetMethod
+        : geometryTargetMethod);
+
+    const arbitration: string[] = [];
+    const coverLike = finalIntent === 'cover' || geometryIntent === 'cover';
+    const insertLike = finalIntent === 'insert' || geometryIntent === 'insert';
+    let finalAxis = facePairAxis(finalSourceFace, finalTargetFace);
+    if (!useVlm && insertLike && !explicitTargetMethod && finalTargetMethod === 'object_aabb') {
+      const insertMethodCandidate = candidateRowsBySemantic.find((candidate) => candidate.tags.includes('insert_friendly'));
+      if (insertMethodCandidate) {
+        finalSourceMethod = insertMethodCandidate.sourceMethod;
+        finalTargetMethod = insertMethodCandidate.targetMethod;
+        arbitration.push('insert_target_method_guard');
+      }
+    }
+    if (viewConsensus !== undefined && viewConsensus >= 0.58) {
+      arbitration.push('vlm_view_consensus_applied');
+    } else if (viewConsensus !== undefined && viewConsensus < 0.5) {
+      arbitration.push('vlm_view_consensus_low');
+    }
+    if (useVlm && consensusCandidate && selectedCandidate && consensusCandidate.candidateKey !== selectedCandidate.candidateKey) {
+      if ((viewConsensus ?? 0) >= 0.66) {
+        finalSourceFace = consensusCandidate.sourceFace;
+        finalTargetFace = consensusCandidate.targetFace;
+        if (!explicitSourceMethod) finalSourceMethod = consensusCandidate.sourceMethod;
+        if (!explicitTargetMethod) finalTargetMethod = consensusCandidate.targetMethod;
+        arbitration.push('vlm_consensus_candidate_override');
+      }
+    }
+    const centerExpectedAxis = facePairAxis(geometrySourceFace, geometryTargetFace);
+    const preferredInsertVerticalCandidate =
+      insertLike && ySeparated && !preferredSourceFace && !preferredTargetFace
+        ? candidateRowsBySemantic.find((candidate) => {
+            if (!candidate.tags.includes('insert_friendly')) return false;
+            if (!candidate.tags.includes('vertical_pair')) return false;
+            if (sourceAboveTarget) return candidate.tags.includes('bottom_to_top');
+            if (sourceBelowTarget) return candidate.tags.includes('top_to_bottom');
+            return true;
+          }) ||
+          candidateRowsBySemantic.find(
+            (candidate) => candidate.tags.includes('insert_friendly') && candidate.tags.includes('vertical_pair')
+          )
+        : null;
+    finalAxis = facePairAxis(finalSourceFace, finalTargetFace);
+    if (
+      insertLike &&
+      ySeparated &&
+      !preferredSourceFace &&
+      !preferredTargetFace &&
+      preferredInsertVerticalCandidate &&
+      finalAxis !== 'y'
+    ) {
+      finalSourceFace = preferredInsertVerticalCandidate.sourceFace;
+      finalTargetFace = preferredInsertVerticalCandidate.targetFace;
+      if (!explicitSourceMethod) finalSourceMethod = preferredInsertVerticalCandidate.sourceMethod;
+      if (!explicitTargetMethod) finalTargetMethod = preferredInsertVerticalCandidate.targetMethod;
+      arbitration.push('insert_vertical_face_override');
+      finalAxis = facePairAxis(finalSourceFace, finalTargetFace);
+    }
+    if (insertLike && !preferredSourceFace && !preferredTargetFace && centerExpectedAxis !== 'y' && finalAxis === 'y') {
+      arbitration.push('insert_center_drift_guard');
+    }
+    if (coverLike && !preferredSourceFace && !preferredTargetFace && centerExpectedAxis !== 'y' && finalAxis === 'y') {
+      arbitration.push('cover_center_drift_guard');
+    }
+    if (useVlm && !vlmFaceSupported) arbitration.push('vlm_face_not_in_geometry_top6');
+    finalSourceMethod = normalizeAnchorMethod(finalSourceMethod, 'planar_cluster');
+    finalTargetMethod = normalizeAnchorMethod(finalTargetMethod, 'planar_cluster');
+
+    const origin: 'geometry' | 'vlm' | 'hybrid' =
+      !useVlm ? 'geometry' : vlmFaceSupported ? 'hybrid' : 'hybrid';
+
+    const notes: string[] = [
+      `geometry.intent=${geometryIntent}`,
+      `geometry.mode=${geometryMode}`,
+      `capture.views=${capture.images.length}`,
+    ];
+    if (vlmCandidate?.confidence !== undefined) notes.push(`vlm.confidence=${vlmCandidate.confidence.toFixed(2)}`);
+    if (effectiveVlmConfidence !== undefined) notes.push(`vlm.conf.effective=${effectiveVlmConfidence.toFixed(2)}`);
+    if (viewConsensus !== undefined) notes.push(`vlm.viewConsensus=${viewConsensus.toFixed(2)}`);
+    if (viewAgreement !== undefined) notes.push(`vlm.viewAgreement=${viewAgreement.toFixed(2)}`);
+    if (vlmError) notes.push(`vlm.error=${vlmError}`);
+    if (useVlm && !vlmFaceSupported) notes.push('vlm.face_pair_not_in_geometry_top6');
+    if (selectedCandidate) notes.push(`vlm.candidate=${selectedCandidate.candidateKey}`);
+    if (arbitration.length) notes.push(`arbitration=${arbitration.join('|')}`);
+
+    return ok(
+      {
+        source,
+        target,
+        geometry: {
+          intent: geometryIntent,
+          suggestedMode: geometryMode,
+          expectedFromCenters: {
+            sourceFace: geometrySourceFace,
+            targetFace: geometryTargetFace,
+          },
+          rankingTop: rankingTop
+            ? {
+                sourceFace: rankingTop.sourceFace,
+                targetFace: rankingTop.targetFace,
+                sourceMethod: rankingTop.sourceMethod,
+                targetMethod: rankingTop.targetMethod,
+                score: Number(rankingTop.score ?? 0),
+              }
+            : null,
+        },
+        capture: {
+          imageCount: capture.images.length,
+          views: capture.images.map((img) => ({
+            name: img.name,
+            label: img.label,
+            widthPx: img.widthPx,
+            heightPx: img.heightPx,
+          })),
+        },
+        vlm: {
+          used: Boolean(vlmResult && !vlmError),
+          ...(parsedVlmDiagnostics?.provider ? { provider: parsedVlmDiagnostics.provider } : {}),
+          ...(vlmCandidate
+            ? {
+                confidence: vlmCandidate.confidence,
+                ...(effectiveVlmConfidence !== undefined ? { viewConsensus } : {}),
+                ...(effectiveVlmConfidence !== undefined ? { viewAgreement } : {}),
+                ...(parsedViewVotes.length ? { voteCount: parsedViewVotes.length } : {}),
+                ...(consensusTop?.key ? { consensusCandidateKey: consensusTop.key } : {}),
+                ...(parsedVlmDiagnostics
+                  ? {
+                      diagnostics: {
+                        ...(parsedVlmDiagnostics.provider ? { provider: parsedVlmDiagnostics.provider } : {}),
+                        ...(parsedVlmDiagnostics.repairAttempts !== undefined
+                          ? { repairAttempts: parsedVlmDiagnostics.repairAttempts }
+                          : {}),
+                        ...(parsedVlmDiagnostics.fallbackUsed !== undefined
+                          ? { fallbackUsed: parsedVlmDiagnostics.fallbackUsed }
+                          : {}),
+                        ...(parsedVlmDiagnostics.providerError ? { providerError: parsedVlmDiagnostics.providerError } : {}),
+                        ...(parsedVlmDiagnostics.candidateSelectionSource
+                          ? { candidateSelectionSource: parsedVlmDiagnostics.candidateSelectionSource }
+                          : {}),
+                        ...(parsedVlmDiagnostics.selectedMatchesConsensus !== undefined
+                          ? { selectedMatchesConsensus: parsedVlmDiagnostics.selectedMatchesConsensus }
+                          : {}),
+                        flags: parsedVlmDiagnostics.flags,
+                      },
+                    }
+                  : {}),
+                ...(parsedViewVotes.length
+                  ? {
+                      viewVotes: parsedViewVotes.slice(0, 8).map((vote) => ({
+                        viewName: vote.viewName,
+                        ...(vote.candidateKey ? { candidateKey: vote.candidateKey } : {}),
+                        ...(vote.confidence !== undefined ? { confidence: vote.confidence } : {}),
+                        weight: Number(vote.weight.toFixed(3)),
+                      })),
+                    }
+                  : {}),
+                mateInference: {
+                  ...vlmCandidate,
+                  ...(vlmCandidate.selectedCandidateIndex !== undefined
+                    ? { selectedCandidateIndex: vlmCandidate.selectedCandidateIndex }
+                    : {}),
+                },
+              }
+            : {}),
+          ...(!vlmCandidate && parsedVlmDiagnostics
+            ? {
+                diagnostics: {
+                  ...(parsedVlmDiagnostics.provider ? { provider: parsedVlmDiagnostics.provider } : {}),
+                  ...(parsedVlmDiagnostics.repairAttempts !== undefined
+                    ? { repairAttempts: parsedVlmDiagnostics.repairAttempts }
+                    : {}),
+                  ...(parsedVlmDiagnostics.fallbackUsed !== undefined
+                    ? { fallbackUsed: parsedVlmDiagnostics.fallbackUsed }
+                    : {}),
+                  ...(parsedVlmDiagnostics.providerError ? { providerError: parsedVlmDiagnostics.providerError } : {}),
+                  ...(parsedVlmDiagnostics.candidateSelectionSource
+                    ? { candidateSelectionSource: parsedVlmDiagnostics.candidateSelectionSource }
+                    : {}),
+                  ...(parsedVlmDiagnostics.selectedMatchesConsensus !== undefined
+                    ? { selectedMatchesConsensus: parsedVlmDiagnostics.selectedMatchesConsensus }
+                    : {}),
+                  flags: parsedVlmDiagnostics.flags,
+                },
+              }
+            : {}),
+          ...(vlmError ? { fallbackReason: vlmError } : {}),
+        },
+        inferred: {
+          sourcePartId: source.partId,
+          targetPartId: target.partId,
+          sourceFace: finalSourceFace,
+          targetFace: finalTargetFace,
+          sourceMethod: finalSourceMethod,
+          targetMethod: finalTargetMethod,
+          mode: finalMode,
+          intent: finalIntent,
+          confidence: Math.max(0.55, Math.min(0.98, useVlm ? (effectiveVlmConfidence ?? 0.62) : 0.58)),
+          origin,
+          arbitration,
+          ...((vlmCandidate?.reason || arbitration.length)
+            ? { reason: [vlmCandidate?.reason, arbitration.join('|')].filter(Boolean).join(' ; ').slice(0, 180) }
+            : {}),
+        },
+        notes,
+      },
+      { mutating: false }
     );
   }
 
@@ -1964,8 +2989,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         const targetObj = getV2ObjectByPartId(target.part.partId);
         const sourceFaceId = source.kind === 'face' && STORE_FACES.includes(source.face as any) ? (source.face as StoreFaceId) : null;
         const targetFaceId = target.kind === 'face' && STORE_FACES.includes(target.face as any) ? (target.face as StoreFaceId) : null;
-        const sourceMethod = source.kind === 'face' ? source.methodRequested ?? source.methodUsed ?? 'auto' : 'auto';
-        const targetMethod = target.kind === 'face' ? target.methodRequested ?? target.methodUsed ?? 'auto' : 'auto';
+        const sourceMethod = source.kind === 'face'
+          ? normalizeAnchorMethod(source.methodRequested ?? source.methodUsed, 'planar_cluster')
+          : 'planar_cluster';
+        const targetMethod = target.kind === 'face'
+          ? normalizeAnchorMethod(target.methodRequested ?? target.methodUsed, 'planar_cluster')
+          : 'planar_cluster';
         const sourceOffset = parseOffsetTuple(input.sourceOffset);
         const targetOffset = parseOffsetTuple(input.targetOffset);
 
@@ -2125,8 +3154,26 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       const twistInput = input.twist ?? { angleDeg: 0, axis: 'normal', axisSpace: 'target_face' };
       const applyTwist = operation === 'both' || operation === 'twist' || Math.abs(Number(twistInput.angleDeg || 0)) > 1e-6;
 
+      const sourceObj = getV2ObjectByPartId(sourcePartId);
+      const sourceWorldPos = sourceObj ? new THREE.Vector3() : null;
+      const sourceWorldQuat = sourceObj ? new THREE.Quaternion() : null;
+      if (sourceObj && sourceWorldPos && sourceWorldQuat) {
+        sourceObj.updateWorldMatrix(true, false);
+        sourceObj.getWorldPosition(sourceWorldPos);
+        sourceObj.getWorldQuaternion(sourceWorldQuat);
+      }
+
+      const sourceWorldTransform: PartTransform =
+        sourceObj && sourceWorldPos && sourceWorldQuat
+          ? {
+              position: tuple3(sourceWorldPos),
+              quaternion: tuple4(sourceWorldQuat),
+              scale: [...sourceTransform.scale],
+            }
+          : sourceTransform;
+
       const solved = computeMateAlignedEndTransform({
-        sourceTransform,
+        sourceTransform: sourceWorldTransform,
         sourceFrame,
         targetFrame,
         offset: Number(input.offset ?? 0),
@@ -2137,10 +3184,14 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         twistAxis: twistInput.axis,
         twistAxisSpace: twistInput.axisSpace,
       });
-      endTransform = solved.endTransform;
+      const endWorldTransform: PartTransform = {
+        position: [...solved.endTransform.position],
+        quaternion: [...solved.endTransform.quaternion],
+        scale: [...sourceTransform.scale],
+      };
 
       if (operation === 'twist') {
-        endTransform.position = sourceTransform.position;
+        endWorldTransform.position = [...sourceWorldTransform.position];
       }
 
       pathType =
@@ -2158,15 +3209,39 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       const durationMs = Number(input.durationMs ?? 900);
       const sampleCount = Number(input.sampleCount ?? 60);
       const arcHeight = Number(input.arc?.height ?? 0);
-      const steps = samplePath({
-        start: sourceTransform,
-        end: endTransform,
+      const stepsWorld = samplePath({
+        start: sourceWorldTransform,
+        end: endWorldTransform,
         durationMs,
         sampleCount,
         pathType: pathType === 'screw' ? 'line' : pathType,
         arcHeight,
         arcLiftAxis: targetFrame.bitangent,
       });
+      const steps =
+        sourceObj && sourceWorldPos && sourceWorldQuat
+          ? stepsWorld.map((step) => {
+              const local = worldPoseToLocalPose(
+                sourceObj,
+                vec3(step.positionWorld),
+                quat4(step.quaternionWorld).normalize()
+              );
+              return {
+                ...step,
+                positionWorld: local.position,
+                quaternionWorld: local.quaternion,
+              };
+            })
+          : stepsWorld;
+
+      // Keep endTransform consistent with store-local space for downstream tooling/debug.
+      endTransform =
+        sourceObj && sourceWorldPos && sourceWorldQuat
+          ? {
+              ...sourceTransform,
+              ...worldPoseToLocalPose(sourceObj, vec3(endWorldTransform.position), quat4(endWorldTransform.quaternion).normalize()),
+            }
+          : endWorldTransform;
 
       const planId = crypto.randomUUID();
       const plan = {
@@ -2277,13 +3352,13 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         kind: 'face',
         part: { partId: source.partId },
         face: input.sourceFace ?? 'bottom',
-        method: input.sourceMethod ?? 'auto',
+        method: normalizeAnchorMethod(input.sourceMethod, 'planar_cluster'),
       },
       target: {
         kind: 'face',
         part: { partId: target.partId },
         face: input.targetFace ?? 'top',
-        method: input.targetMethod ?? 'auto',
+        method: normalizeAnchorMethod(input.targetMethod, 'planar_cluster'),
       },
       sourceOffset: input.sourceOffset,
       targetOffset: input.targetOffset,
@@ -2351,65 +3426,67 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const source = resolvePart(input.sourcePart);
     const target = resolvePart(input.targetPart);
     const instruction = normalizeInstructionText(input.instruction);
-    const instructionIntent = inferMateIntentKind(instruction);
-
     const explicitSourceFace =
-      STORE_FACES.includes(input.sourceFace as StoreFaceId) ? (input.sourceFace as StoreFaceId) : null;
+      STORE_FACES.includes(input.sourceFace as StoreFaceId) ? (input.sourceFace as StoreFaceId) : undefined;
     const explicitTargetFace =
-      STORE_FACES.includes(input.targetFace as StoreFaceId) ? (input.targetFace as StoreFaceId) : null;
+      STORE_FACES.includes(input.targetFace as StoreFaceId) ? (input.targetFace as StoreFaceId) : undefined;
+    const explicitSourceMethod = parseExplicitAnchorMethod(input.sourceMethod) ?? undefined;
+    const explicitTargetMethod = parseExplicitAnchorMethod(input.targetMethod) ?? undefined;
+    const explicitMode =
+      typeof input.mode === 'string' && ['translate', 'twist', 'both'].includes(input.mode)
+        ? (input.mode as MateExecMode)
+        : undefined;
 
-    const explicitSourceMethod = (input.sourceMethod as AnchorMethodId | undefined) ?? null;
-    const explicitTargetMethod = (input.targetMethod as AnchorMethodId | undefined) ?? null;
-    const instructionMethod = methodFromInstruction(instruction);
+    let inferred: any = null;
+    let inferOrigin: string | null = null;
+    let inferConfidence: number | null = null;
+    try {
+      const inferredEnvelope = await runTool('query.mate_vlm_infer' as MCPToolName, {
+        sourcePart: { partId: source.partId },
+        targetPart: { partId: target.partId },
+        instruction,
+        ...(explicitSourceFace ? { preferredSourceFace: explicitSourceFace } : {}),
+        ...(explicitTargetFace ? { preferredTargetFace: explicitTargetFace } : {}),
+        sourceMethod: explicitSourceMethod ?? 'planar_cluster',
+        targetMethod: explicitTargetMethod ?? 'planar_cluster',
+        ...(explicitMode ? { preferredMode: explicitMode } : {}),
+        maxPairs: 12,
+        maxViews: 4,
+        maxWidthPx: 640,
+        maxHeightPx: 480,
+        format: 'jpeg',
+      } as any);
+      const inferredData = unwrapToolData(inferredEnvelope, 'SOLVER_FAILED') as any;
+      inferred = inferredData?.inferred ?? null;
+      inferOrigin = typeof inferred?.origin === 'string' ? inferred.origin : null;
+      inferConfidence = typeof inferred?.confidence === 'number' ? inferred.confidence : null;
+    } catch {
+      inferred = null;
+    }
 
-    const sourceObject = getV2ObjectByPartId(source.partId);
-    const targetObject = getV2ObjectByPartId(target.partId);
-    const geometryIntent =
-      sourceObject && targetObject ? inferIntentFromGeometry(sourceObject, targetObject) : null;
-    const intentKind = instructionIntent === 'default' ? geometryIntent ?? 'default' : instructionIntent;
+    const fallbackPair = getExpectedFacePairFromCenters(
+      vec3(getPartTransformOrThrow(source.partId).position),
+      vec3(getPartTransformOrThrow(target.partId).position)
+    );
 
-    const inferredMode = inferModeFromInstruction(instruction);
     const mode =
-      (input.mode as MateExecMode | undefined) ??
-      inferredMode ??
-      defaultModeForIntent(intentKind);
-    const operation = mode === 'both' ? 'both' : mode === 'twist' ? 'twist' : 'mate';
+      explicitMode ??
+      (typeof inferred?.mode === 'string' && ['translate', 'twist', 'both'].includes(inferred.mode)
+        ? (inferred.mode as MateExecMode)
+        : 'translate');
     const mateMode = input.mateMode ?? (mode === 'both' ? 'face_insert_arc' : 'face_flush');
     const pathPreferenceRaw = (input.pathPreference as 'auto' | 'line' | 'arc' | 'screw' | undefined) ?? 'auto';
     const pathPreference =
       pathPreferenceRaw === 'auto' ? (mode === 'both' ? 'arc' : 'line') : pathPreferenceRaw;
 
-    const sourceMethodPriority = buildMethodPriority({
-      explicit: explicitSourceMethod,
-      instructionMethod,
-      intent: intentKind,
-      role: 'source',
-    });
-    const targetMethodPriority = buildMethodPriority({
-      explicit: explicitTargetMethod,
-      instructionMethod,
-      intent: intentKind,
-      role: 'target',
-    });
-
-    const suggestedFacePair =
-      sourceObject && targetObject
-        ? inferBestFacePair({
-            sourceObject,
-            targetObject,
-            sourceMethods: sourceMethodPriority,
-            targetMethods: targetMethodPriority,
-            preferredSourceFace: explicitSourceFace,
-            preferredTargetFace: explicitTargetFace,
-          })
-        : null;
-
     const chosenSourceFace =
-      explicitSourceFace ?? suggestedFacePair?.sourceFace ?? getExpectedFacePairFromCenters(vec3(getPartTransformOrThrow(source.partId).position), vec3(getPartTransformOrThrow(target.partId).position)).sourceFace;
+      explicitSourceFace ?? (inferred?.sourceFace as StoreFaceId | undefined) ?? fallbackPair.sourceFace;
     const chosenTargetFace =
-      explicitTargetFace ?? suggestedFacePair?.targetFace ?? getExpectedFacePairFromCenters(vec3(getPartTransformOrThrow(source.partId).position), vec3(getPartTransformOrThrow(target.partId).position)).targetFace;
-    const chosenSourceMethod = explicitSourceMethod ?? suggestedFacePair?.sourceMethod ?? sourceMethodPriority[0] ?? 'planar_cluster';
-    const chosenTargetMethod = explicitTargetMethod ?? suggestedFacePair?.targetMethod ?? targetMethodPriority[0] ?? 'planar_cluster';
+      explicitTargetFace ?? (inferred?.targetFace as StoreFaceId | undefined) ?? fallbackPair.targetFace;
+    const chosenSourceMethod =
+      normalizeAnchorMethod(explicitSourceMethod ?? (inferred?.sourceMethod as AnchorMethodId | undefined), 'planar_cluster');
+    const chosenTargetMethod =
+      normalizeAnchorMethod(explicitTargetMethod ?? (inferred?.targetMethod as AnchorMethodId | undefined), 'planar_cluster');
 
     const fallbackClearance = mode === 'both' ? 0.01 : 0;
     const requestedClearance = Number(input.clearance ?? 0);
@@ -2482,10 +3559,9 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         mutating: false,
         debug: {
           notes: [
-            'Smart mate executed with geometry-aware face/method/mode inference',
-            `intent=${intentKind}`,
-            `geometry_intent=${geometryIntent ?? 'none'}`,
-            `instruction_method=${instructionMethod ?? 'none'}`,
+            'Smart mate executed with VLM/LLM inference (fallback-safe).',
+            `infer_origin=${inferOrigin ?? 'none'}`,
+            `infer_confidence=${inferConfidence !== null ? inferConfidence.toFixed(2) : 'n/a'}`,
           ],
           sourceFaceId: chosenSourceFace,
           targetFaceId: chosenTargetFace,
@@ -2493,14 +3569,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           targetMethod: chosenTargetMethod,
           mode,
           pathType: pathPreference,
-          inferenceScore: suggestedFacePair?.score,
-          inferenceRanking: suggestedFacePair?.ranking ?? [],
           explicit: {
-            sourceFace: explicitSourceFace,
-            targetFace: explicitTargetFace,
-            sourceMethod: explicitSourceMethod,
-            targetMethod: explicitTargetMethod,
-            mode: input.mode ?? null,
+            sourceFace: explicitSourceFace ?? null,
+            targetFace: explicitTargetFace ?? null,
+            sourceMethod: explicitSourceMethod ?? null,
+            targetMethod: explicitTargetMethod ?? null,
+            mode: explicitMode ?? null,
           },
         } as any,
       }

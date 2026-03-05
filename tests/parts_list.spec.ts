@@ -1,13 +1,23 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+
+async function openLegacyAnimationPanel(page: Page) {
+  const loadDemo = page.getByText('Load Demo (Spark.glb)');
+  if ((await loadDemo.count()) === 0) {
+    await page.getByRole('button', { name: /markers & animation/i }).click();
+  }
+  await expect(loadDemo).toBeVisible();
+  await loadDemo.scrollIntoViewIfNeeded();
+  return loadDemo;
+}
 
 test.describe('UI: Parts list', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('http://127.0.0.1:5173', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5173/?legacy=1', { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => !!(window as any).__APP_STORE__?.getState);
   });
 
   test('searches and selects a part', async ({ page }) => {
-    await page.getByText('Load Demo (Spark.glb)').click();
+    await (await openLegacyAnimationPanel(page)).click();
 
     await page.waitForFunction(() => {
       const store = (window as any).__APP_STORE__?.getState?.();
@@ -24,4 +34,3 @@ test.describe('UI: Parts list', () => {
       .not.toBeNull();
   });
 });
-

@@ -16,11 +16,9 @@ export type AnchorResult = {
 };
 
 export const ANCHOR_METHOD_OPTIONS: { id: AnchorMethodId; label: string }[] = [
-  { id: 'auto', label: 'Auto (pick > geometry AABB)' },
   { id: 'planar_cluster', label: 'Planar Cluster' },
   { id: 'geometry_aabb', label: 'Geometry AABB' },
   { id: 'object_aabb', label: 'Object AABB' },
-  { id: 'extreme_vertices', label: 'Extreme Vertices' },
   { id: 'obb_pca', label: 'OBB (PCA)' },
   { id: 'picked', label: 'Picked Face Only' },
 ];
@@ -370,6 +368,10 @@ export function resolveAnchor({
 }): AnchorResult | null {
   const mesh = object as THREE.Mesh;
   const requestedMethod = method;
+  if (method === 'extreme_vertices') {
+    // Temporarily disabled (kept for backward compatibility with older tool calls).
+    method = 'planar_cluster';
+  }
   const call = (m: AnchorMethodId): AnchorResult | null => {
     const geometry = (mesh.geometry as THREE.BufferGeometry | undefined) ?? undefined;
     switch (m) {
@@ -427,7 +429,7 @@ export function resolveAnchor({
 
   let result = call(method);
   if (result)
-    return { ...result, requestedMethod, fallbackUsed: false };
+    return { ...result, requestedMethod, fallbackUsed: requestedMethod !== method };
   for (const fb of fallback) {
     result = call(fb);
     if (result) return { ...result, requestedMethod, fallbackUsed: true };

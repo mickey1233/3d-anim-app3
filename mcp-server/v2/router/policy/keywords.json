@@ -1,0 +1,41 @@
+{
+  "grid": {
+    "keywords": ["grid", "格線", "网格", "格子"],
+    "on": ["on", "show", "顯示", "显示", "打開", "打开", "開啟", "开启", "開"],
+    "off": ["off", "hide", "隱藏", "隐藏", "關閉", "关闭", "關掉", "关掉", "關"]
+  },
+  "reset": {
+    "keywords": ["reset", "還原", "还原", "重置", "回復", "恢复"]
+  },
+  "all": {
+    "keywords": ["all", "全部", "全部零件", "所有"]
+  },
+  "select": {
+    "keywords": ["select", "選", "选择", "選擇", "挑", "pick", "選取"]
+  },
+  "mode": {
+    "keywords": ["mode", "模式"]
+  },
+  "greeting": {
+    "keywords": ["你好", "嗨", "hello", "hi", "早安", "午安", "晚安", "在嗎", "在吗"]
+  },
+  "thanks": {
+    "keywords": ["謝謝", "thanks", "thank you"]
+  },
+  "question": {
+    "keywords": ["?", "？", "如何", "怎麼", "怎么", "what", "what is", "how", "can i", "可以", "是什麼", "是什么"]
+  },
+  "step": {
+    "command": ["新增step", "新增 step", "add step", "create step", "new step", "建立步驟", "建立步骤"],
+    "help": ["step 怎麼", "step怎么", "how to add step", "怎麼新增step", "如何新增step", "step 要怎麼"]
+  },
+  "chat": {
+    "help": ["help", "/help", "可以做什麼", "你會什麼", "你能做什麼", "有哪些功能"]
+  },
+  "model": {
+    "info": ["usd", "model", "模型", "這個模型", "这个模型", "這是什麼", "这是什么"]
+  },
+  "mate": {
+    "keywords": ["mate", "對齊", "对齐", "組裝", "组装", "裝配", "装配", "align", "attach", "fit"]
+  }
+}

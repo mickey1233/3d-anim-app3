@@ -3,6 +3,17 @@ import { TransformControls } from '@react-three/drei';
 import { useThree } from '@react-three/fiber';
 import { useV2Store } from '../../store/store';
 
+const GIZMO_RAYCAST_PRIORITY_FLAG = '__v2TransformGizmoHandle';
+
+const markGizmoObjects = (root: any, enabled: boolean) => {
+  if (!root || typeof root.traverse !== 'function') return;
+  root.traverse((obj: any) => {
+    if (!obj?.userData) return;
+    if (enabled) obj.userData[GIZMO_RAYCAST_PRIORITY_FLAG] = true;
+    else delete obj.userData[GIZMO_RAYCAST_PRIORITY_FLAG];
+  });
+};
+
 export function TransformGizmo() {
   const { scene } = useThree();
   const selectedId = useV2Store((s) => s.selection.partId);
@@ -17,6 +28,9 @@ export function TransformGizmo() {
   useEffect(() => {
     const ctrl = controlsRef.current;
     if (!ctrl) return;
+    const helper = typeof ctrl.getHelper === 'function' ? ctrl.getHelper() : null;
+    markGizmoObjects(ctrl, true);
+    markGizmoObjects(helper, true);
     const handleDragging = (event: any) => {
       const dragging = !!event.value;
       setDragging(dragging);
@@ -37,6 +51,8 @@ export function TransformGizmo() {
       ctrl.removeEventListener('dragging-changed', handleDragging);
       ctrl.removeEventListener('mouseDown', handleMouseDown);
       ctrl.removeEventListener('mouseUp', handleMouseUp);
+      markGizmoObjects(ctrl, false);
+      markGizmoObjects(helper, false);
     };
   }, [setDragging, setPartOverride, target]);
 

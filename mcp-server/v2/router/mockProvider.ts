@@ -1,29 +1,15 @@
 import type { ToolCall } from '../../../shared/schema/index.js';
 import type { RouterContext, RouterProvider } from './types.js';
 import { answerGeneralQuestionWithLlm, inferMateWithLlm } from './llmAssist.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 type MentionedPart = RouterContext['parts'][number] & {
   index: number;
   end: number;
   volume: number;
 };
-
-const GRID_KEYWORDS = ['grid', '格線', '网格', '格子'];
-const GRID_ON_KEYWORDS = ['on', 'show', '顯示', '显示', '打開', '打开', '開啟', '开启', '開'];
-const GRID_OFF_KEYWORDS = ['off', 'hide', '隱藏', '隐藏', '關閉', '关闭', '關掉', '关掉', '關'];
-const RESET_KEYWORDS = ['reset', '還原', '还原', '重置', '回復', '恢复'];
-const ALL_KEYWORDS = ['all', '全部', '全部零件', '所有'];
-const SELECT_KEYWORDS = ['select', '選', '选择', '選擇', '挑', 'pick', '選取'];
-const MODE_KEYWORDS = ['mode', '模式'];
-const GREETING_KEYWORDS = ['你好', '嗨', 'hello', 'hi', '早安', '午安', '晚安', '在嗎', '在吗'];
-const THANKS_KEYWORDS = ['謝謝', 'thanks', 'thank you'];
-const QUESTION_KEYWORDS = ['?', '？', '如何', '怎麼', '怎么', 'what', 'what is', 'how', 'can i', '可以', '是什麼', '是什么'];
-
-const STEP_COMMAND_KEYWORDS = ['新增step', '新增 step', 'add step', 'create step', 'new step', '建立步驟', '建立步骤'];
-const STEP_HELP_KEYWORDS = ['step 怎麼', 'step怎么', 'how to add step', '怎麼新增step', '如何新增step', 'step 要怎麼'];
-const CHAT_HELP_KEYWORDS = ['help', '/help', '可以做什麼', '你會什麼', '你能做什麼', '有哪些功能'];
-const MODEL_INFO_KEYWORDS = ['usd', 'model', '模型', '這個模型', '这个模型', '這是什麼', '这是什么'];
-const MATE_KEYWORDS = ['mate', '對齊', '对齐', '組裝', '组装', '裝配', '装配', 'align', 'attach', 'fit'];
 
 const containsAny = (text: string, keywords: string[]) => keywords.some((keyword) => text.includes(keyword));
 
@@ -40,6 +26,350 @@ const normalizeText = (text: string) =>
     .trim();
 
 const normalizeToken = (text: string) => normalizeText(text).replace(/[^a-z0-9\u4e00-\u9fff]+/g, '');
+
+type MateFaceId = 'top' | 'bottom' | 'left' | 'right' | 'front' | 'back';
+type MateMethodId =
+  | 'auto'
+  | 'planar_cluster'
+  | 'geometry_aabb'
+  | 'object_aabb'
+  | 'extreme_vertices'
+  | 'obb_pca'
+  | 'picked';
+type MateModeId = 'translate' | 'twist' | 'both';
+type InteractionModeId = 'select' | 'move' | 'rotate' | 'mate';
+
+type RouterKeywordPolicy = {
+  grid?: { keywords?: unknown; on?: unknown; off?: unknown };
+  reset?: { keywords?: unknown };
+  all?: { keywords?: unknown };
+  select?: { keywords?: unknown };
+  mode?: { keywords?: unknown };
+  greeting?: { keywords?: unknown };
+  thanks?: { keywords?: unknown };
+  question?: { keywords?: unknown };
+  step?: { command?: unknown; help?: unknown };
+  chat?: { help?: unknown };
+  model?: { info?: unknown };
+  mate?: { keywords?: unknown };
+};
+
+type RouterKeywordSets = {
+  grid: { keywords: string[]; on: string[]; off: string[] };
+  reset: string[];
+  all: string[];
+  select: string[];
+  mode: string[];
+  greeting: string[];
+  thanks: string[];
+  question: string[];
+  stepCommand: string[];
+  stepHelp: string[];
+  chatHelp: string[];
+  modelInfo: string[];
+  mate: string[];
+};
+
+const normalizeKeywordList = (value: unknown) => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map((item) => normalizeText(item))
+    .filter(Boolean);
+};
+
+const EMPTY_KEYWORD_SETS: RouterKeywordSets = {
+  grid: { keywords: [], on: [], off: [] },
+  reset: [],
+  all: [],
+  select: [],
+  mode: [],
+  greeting: [],
+  thanks: [],
+  question: [],
+  stepCommand: [],
+  stepHelp: [],
+  chatHelp: [],
+  modelInfo: [],
+  mate: [],
+};
+
+const buildKeywordSets = (policy: RouterKeywordPolicy | null): RouterKeywordSets => {
+  const grid = policy?.grid ?? {};
+  const reset = policy?.reset ?? {};
+  const all = policy?.all ?? {};
+  const select = policy?.select ?? {};
+  const mode = policy?.mode ?? {};
+  const greeting = policy?.greeting ?? {};
+  const thanks = policy?.thanks ?? {};
+  const question = policy?.question ?? {};
+  const step = policy?.step ?? {};
+  const chat = policy?.chat ?? {};
+  const model = policy?.model ?? {};
+  const mate = policy?.mate ?? {};
+
+  return {
+    grid: {
+      keywords: normalizeKeywordList(grid.keywords),
+      on: normalizeKeywordList(grid.on),
+      off: normalizeKeywordList(grid.off),
+    },
+    reset: normalizeKeywordList(reset.keywords),
+    all: normalizeKeywordList(all.keywords),
+    select: normalizeKeywordList(select.keywords),
+    mode: normalizeKeywordList(mode.keywords),
+    greeting: normalizeKeywordList(greeting.keywords),
+    thanks: normalizeKeywordList(thanks.keywords),
+    question: normalizeKeywordList(question.keywords),
+    stepCommand: normalizeKeywordList(step.command),
+    stepHelp: normalizeKeywordList(step.help),
+    chatHelp: normalizeKeywordList(chat.help),
+    modelInfo: normalizeKeywordList(model.info),
+    mate: normalizeKeywordList(mate.keywords),
+  };
+};
+
+const DEFAULT_KEYWORDS_POLICY_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'policy',
+  'keywords.json'
+);
+
+let cachedKeywordSets: { path: string; mtimeMs: number; sets: RouterKeywordSets } | null = null;
+
+const getKeywordSets = (): RouterKeywordSets => {
+  const policyPath = process.env.V2_ROUTER_KEYWORDS_PATH || DEFAULT_KEYWORDS_POLICY_PATH;
+  try {
+    const stat = fs.statSync(policyPath);
+    const mtimeMs = stat.mtimeMs;
+    if (cachedKeywordSets && cachedKeywordSets.path === policyPath && cachedKeywordSets.mtimeMs === mtimeMs) {
+      return cachedKeywordSets.sets;
+    }
+
+    const raw = fs.readFileSync(policyPath, 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    const policy = parsed && typeof parsed === 'object' ? (parsed as RouterKeywordPolicy) : null;
+    const sets = buildKeywordSets(policy);
+    cachedKeywordSets = { path: policyPath, mtimeMs, sets };
+    return sets;
+  } catch {
+    cachedKeywordSets = { path: policyPath, mtimeMs: 0, sets: EMPTY_KEYWORD_SETS };
+    return EMPTY_KEYWORD_SETS;
+  }
+};
+
+type MockProviderPolicy = {
+  faces?: unknown;
+  methods?: unknown;
+  mateModeTokens?: unknown;
+  sourceTarget?: unknown;
+  environments?: unknown;
+  interactionModes?: unknown;
+  generalQuestionTokens?: unknown;
+  stepCommandRegex?: unknown;
+};
+
+type MockProviderNluSets = {
+  faces: Array<{ face: MateFaceId; aliases: string[] }>;
+  methods: Array<{ method: MateMethodId; aliases: string[] }>;
+  mateModeTokens: { both: string[]; twist: string[]; translate: string[] };
+  sourceTarget: {
+    sourceKeywords: string[];
+    targetKeywords: string[];
+    directionTokens: string[];
+    placementKeywords: string[];
+    targetNameKeywords: string[];
+    llmOverrideKeywords: string[];
+  };
+  environments: Array<{ alias: string; environment: string }>;
+  interactionModes: Record<InteractionModeId, string[]>;
+  generalQuestionTokens: string[];
+  stepCommandRegex: RegExp | null;
+};
+
+const EMPTY_MOCK_NLU_SETS: MockProviderNluSets = {
+  faces: [],
+  methods: [],
+  mateModeTokens: { both: [], twist: [], translate: [] },
+  sourceTarget: {
+    sourceKeywords: [],
+    targetKeywords: [],
+    directionTokens: [],
+    placementKeywords: [],
+    targetNameKeywords: [],
+    llmOverrideKeywords: [],
+  },
+  environments: [],
+  interactionModes: { select: [], move: [], rotate: [], mate: [] },
+  generalQuestionTokens: [],
+  stepCommandRegex: null,
+};
+
+const DEFAULT_MOCK_POLICY_PATH = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'policy',
+  'mockProvider.json'
+);
+
+let cachedMockNlu: { path: string; mtimeMs: number; sets: MockProviderNluSets } | null = null;
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === 'object' ? (value as Record<string, unknown>) : null;
+
+const normalizeStringList = normalizeKeywordList;
+
+const normalizeFaceAliasMap = (value: unknown): Array<{ face: MateFaceId; aliases: string[] }> => {
+  const allowedFaces: MateFaceId[] = ['top', 'bottom', 'left', 'right', 'front', 'back'];
+  const record = asRecord(value);
+  if (record) {
+    return allowedFaces
+      .map((face) => ({ face, aliases: normalizeStringList(record[face]) }))
+      .filter((item) => item.aliases.length > 0);
+  }
+
+  if (!Array.isArray(value)) return [];
+  const out: Array<{ face: MateFaceId; aliases: string[] }> = [];
+  for (const item of value) {
+    const obj = asRecord(item);
+    const face = obj && typeof obj.face === 'string' ? (normalizeText(obj.face) as MateFaceId) : null;
+    if (!face || !allowedFaces.includes(face)) continue;
+    const aliases = normalizeStringList(obj.aliases);
+    if (!aliases.length) continue;
+    out.push({ face, aliases });
+  }
+  return out;
+};
+
+const normalizeMethodAliasMap = (value: unknown): Array<{ method: MateMethodId; aliases: string[] }> => {
+  const allowedMethods: MateMethodId[] = [
+    'auto',
+    'extreme_vertices',
+    'planar_cluster',
+    'geometry_aabb',
+    'object_aabb',
+    'obb_pca',
+    'picked',
+  ];
+  const record = asRecord(value);
+  if (record) {
+    return allowedMethods
+      .map((method) => ({ method, aliases: normalizeStringList(record[method]) }))
+      .filter((item) => item.aliases.length > 0);
+  }
+
+  if (!Array.isArray(value)) return [];
+  const out: Array<{ method: MateMethodId; aliases: string[] }> = [];
+  for (const item of value) {
+    const obj = asRecord(item);
+    const method = obj && typeof obj.method === 'string' ? (normalizeText(obj.method) as MateMethodId) : null;
+    if (!method || !allowedMethods.includes(method)) continue;
+    const aliases = normalizeStringList(obj.aliases);
+    if (!aliases.length) continue;
+    out.push({ method, aliases });
+  }
+  return out;
+};
+
+const normalizeMateModeTokens = (value: unknown) => {
+  const record = asRecord(value);
+  if (!record) return { both: [], twist: [], translate: [] };
+  return {
+    both: normalizeStringList(record.both),
+    twist: normalizeStringList(record.twist),
+    translate: normalizeStringList(record.translate),
+  };
+};
+
+const normalizeSourceTargetPolicy = (value: unknown) => {
+  const record = asRecord(value);
+  if (!record) {
+    return {
+      sourceKeywords: [],
+      targetKeywords: [],
+      directionTokens: [],
+      placementKeywords: [],
+      targetNameKeywords: [],
+      llmOverrideKeywords: [],
+    };
+  }
+  return {
+    sourceKeywords: normalizeStringList(record.sourceKeywords),
+    targetKeywords: normalizeStringList(record.targetKeywords),
+    directionTokens: normalizeStringList(record.directionTokens),
+    placementKeywords: normalizeStringList(record.placementKeywords),
+    targetNameKeywords: normalizeStringList(record.targetNameKeywords),
+    llmOverrideKeywords: normalizeStringList(record.llmOverrideKeywords),
+  };
+};
+
+const normalizeEnvironmentAliases = (value: unknown) => {
+  if (!Array.isArray(value)) return [];
+  const out: Array<{ alias: string; environment: string }> = [];
+  for (const item of value) {
+    const obj = asRecord(item);
+    const alias = obj && typeof obj.alias === 'string' ? normalizeText(obj.alias) : '';
+    const environment = obj && typeof obj.environment === 'string' ? normalizeText(obj.environment) : '';
+    if (!alias || !environment) continue;
+    out.push({ alias, environment });
+  }
+  return out;
+};
+
+const normalizeInteractionModeTokens = (value: unknown): Record<InteractionModeId, string[]> => {
+  const record = asRecord(value);
+  if (!record) return { select: [], move: [], rotate: [], mate: [] };
+  return {
+    select: normalizeStringList(record.select),
+    move: normalizeStringList(record.move),
+    rotate: normalizeStringList(record.rotate),
+    mate: normalizeStringList(record.mate),
+  };
+};
+
+const compileStepCommandRegex = (value: unknown) => {
+  if (typeof value !== 'string') return null;
+  const pattern = value.trim();
+  if (!pattern) return null;
+  try {
+    return new RegExp(pattern, 'i');
+  } catch {
+    return null;
+  }
+};
+
+const buildMockNluSets = (policy: MockProviderPolicy | null): MockProviderNluSets => {
+  return {
+    faces: normalizeFaceAliasMap(policy?.faces),
+    methods: normalizeMethodAliasMap(policy?.methods),
+    mateModeTokens: normalizeMateModeTokens(policy?.mateModeTokens),
+    sourceTarget: normalizeSourceTargetPolicy(policy?.sourceTarget),
+    environments: normalizeEnvironmentAliases(policy?.environments),
+    interactionModes: normalizeInteractionModeTokens(policy?.interactionModes),
+    generalQuestionTokens: normalizeStringList(policy?.generalQuestionTokens),
+    stepCommandRegex: compileStepCommandRegex(policy?.stepCommandRegex),
+  };
+};
+
+const getMockNluSets = (): MockProviderNluSets => {
+  const policyPath = process.env.V2_ROUTER_MOCK_POLICY_PATH || DEFAULT_MOCK_POLICY_PATH;
+  try {
+    const stat = fs.statSync(policyPath);
+    const mtimeMs = stat.mtimeMs;
+    if (cachedMockNlu && cachedMockNlu.path === policyPath && cachedMockNlu.mtimeMs === mtimeMs) {
+      return cachedMockNlu.sets;
+    }
+
+    const raw = fs.readFileSync(policyPath, 'utf8');
+    const parsed: unknown = JSON.parse(raw);
+    const policy = parsed && typeof parsed === 'object' ? (parsed as MockProviderPolicy) : null;
+    const sets = buildMockNluSets(policy);
+    cachedMockNlu = { path: policyPath, mtimeMs, sets };
+    return sets;
+  } catch {
+    cachedMockNlu = { path: policyPath, mtimeMs: 0, sets: EMPTY_MOCK_NLU_SETS };
+    return EMPTY_MOCK_NLU_SETS;
+  }
+};
 
 const findPart = (text: string, parts: RouterContext['parts']) => {
   const lower = normalizeText(text);
@@ -95,24 +425,16 @@ const collectMentionedParts = (text: string, parts: RouterContext['parts']): Men
   return found.sort((left, right) => left.index - right.index);
 };
 
-const FACE_ALIASES: Array<{ face: 'top' | 'bottom' | 'left' | 'right' | 'front' | 'back'; aliases: string[] }> = [
-  { face: 'top', aliases: ['top', 'up', '上', '上面', '頂部', '顶部', '+y', 'y+'] },
-  { face: 'bottom', aliases: ['bottom', 'down', '下', '下面', '底', '底部', '-y', 'y-'] },
-  { face: 'left', aliases: ['left', '左', '左側', '左侧', '-x', 'x-'] },
-  { face: 'right', aliases: ['right', '右', '右側', '右侧', '+x', 'x+'] },
-  { face: 'front', aliases: ['front', '前', '前面', '+z', 'z+'] },
-  { face: 'back', aliases: ['back', '後', '后', '後面', '后面', '-z', 'z-'] },
-];
-
 const detectFaceFromSegment = (
   segment: string,
+  nlu: MockProviderNluSets,
   prefer: 'first' | 'last' = 'first'
-): 'top' | 'bottom' | 'left' | 'right' | 'front' | 'back' | null => {
+): MateFaceId | null => {
   const normalized = normalizeText(segment);
-  let selectedFace: 'top' | 'bottom' | 'left' | 'right' | 'front' | 'back' | null = null;
+  let selectedFace: MateFaceId | null = null;
   let selectedIndex = prefer === 'first' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
 
-  for (const item of FACE_ALIASES) {
+  for (const item of nlu.faces) {
     for (const alias of item.aliases) {
       if (!alias.trim()) continue;
       let start = 0;
@@ -138,18 +460,19 @@ const detectFaceNear = (
   text: string,
   partName: string,
   partIndex: number,
-  partEnd: number
-): 'top' | 'bottom' | 'left' | 'right' | 'front' | 'back' | null => {
+  partEnd: number,
+  nlu: MockProviderNluSets
+): MateFaceId | null => {
   const lower = normalizeText(text);
   const before = lower.slice(Math.max(0, partIndex - 24), partIndex);
   const after = lower.slice(partEnd, Math.min(lower.length, partEnd + 24));
-  const directAfter = detectFaceFromSegment(after, 'first');
+  const directAfter = detectFaceFromSegment(after, nlu, 'first');
   if (directAfter) return directAfter;
-  const directBefore = detectFaceFromSegment(before, 'last');
+  const directBefore = detectFaceFromSegment(before, nlu, 'last');
   if (directBefore) return directBefore;
 
   const name = partName.toLowerCase();
-  for (const item of FACE_ALIASES) {
+  for (const item of nlu.faces) {
     for (const alias of item.aliases) {
       if (lower.includes(`${name} ${alias}`) || lower.includes(`${alias} ${name}`)) return item.face;
     }
@@ -157,50 +480,26 @@ const detectFaceNear = (
   return null;
 };
 
-const METHOD_ALIASES: Array<{
-  method: 'auto' | 'planar_cluster' | 'geometry_aabb' | 'object_aabb' | 'extreme_vertices' | 'obb_pca' | 'picked';
-  aliases: string[];
-}> = [
-  { method: 'object_aabb', aliases: ['object aabb', 'object_aabb', 'obj aabb', 'whole object', '物件aabb', '对象aabb'] },
-  { method: 'geometry_aabb', aliases: ['geometry aabb', 'geometry_aabb', 'mesh aabb', 'geo aabb', '幾何aabb', '几何aabb'] },
-  { method: 'planar_cluster', aliases: ['planar cluster', 'planar_cluster', '平面分群', '平面聚類', '平面聚类'] },
-  { method: 'extreme_vertices', aliases: ['extreme vertices', 'extreme_vertices', '極值點', '极值点'] },
-  { method: 'obb_pca', aliases: ['obb', 'pca', 'obb pca', 'obb_pca'] },
-  { method: 'picked', aliases: ['picked', 'pick face', 'clicked face', '手動選面', '手动选面'] },
-  { method: 'auto', aliases: ['auto', '自動', '自动'] },
-];
-
-const detectAnchorMethod = (text: string) => {
+const detectAnchorMethod = (text: string, nlu: MockProviderNluSets) => {
   const lower = normalizeText(text);
-  for (const item of METHOD_ALIASES) {
-    if (containsAny(lower, item.aliases)) return item.method;
+  for (const item of nlu.methods) {
+    if (containsAny(lower, item.aliases)) return normalizeMateMethod(item.method, 'planar_cluster');
   }
-  return 'auto' as const;
+  return 'planar_cluster' as const;
 };
 
-const hasAnchorMethodMention = (text: string) => {
+const hasAnchorMethodMention = (text: string, nlu: MockProviderNluSets) => {
   const lower = normalizeText(text);
-  return METHOD_ALIASES.some((item) => containsAny(lower, item.aliases));
+  return nlu.methods.some((item) => containsAny(lower, item.aliases));
 };
 
-const detectExplicitMateMode = (text: string): 'translate' | 'twist' | 'both' | null => {
+const detectExplicitMateMode = (text: string, nlu: MockProviderNluSets): MateModeId | null => {
   const lower = normalizeText(text);
-  if (containsAny(lower, ['both', 'arc', 'insert', 'cover', '插入', '蓋上', '盖上', '弧線', '弧线'])) return 'both';
-  if (containsAny(lower, ['twist', 'rotate', '旋轉', '旋转'])) return 'twist';
-  if (containsAny(lower, ['translate', 'move only', '平移', '只移動', '只移动'])) return 'translate';
+  if (containsAny(lower, nlu.mateModeTokens.both)) return 'both';
+  if (containsAny(lower, nlu.mateModeTokens.twist)) return 'twist';
+  if (containsAny(lower, nlu.mateModeTokens.translate)) return 'translate';
   return null;
 };
-
-type MateFaceId = 'top' | 'bottom' | 'left' | 'right' | 'front' | 'back';
-type MateMethodId =
-  | 'auto'
-  | 'planar_cluster'
-  | 'geometry_aabb'
-  | 'object_aabb'
-  | 'extreme_vertices'
-  | 'obb_pca'
-  | 'picked';
-type MateModeId = 'translate' | 'twist' | 'both';
 
 type MateSuggestionPick = {
   sourceFace?: MateFaceId;
@@ -222,13 +521,45 @@ type MateSuggestionContext = {
   rankingTop?: MateSuggestionPick;
 };
 
+type MateVlmInferenceContext = {
+  sourcePartId?: string;
+  targetPartId?: string;
+  inferred?: {
+    sourcePartId?: string;
+    targetPartId?: string;
+    sourceFace?: MateFaceId;
+    targetFace?: MateFaceId;
+    sourceMethod?: MateMethodId;
+    targetMethod?: MateMethodId;
+    mode?: MateModeId;
+    intent?: string;
+    confidence?: number;
+    origin?: string;
+    arbitration?: string[];
+    reason?: string;
+  };
+  vlm?: {
+    provider?: string;
+    confidence?: number;
+    viewConsensus?: number;
+    viewAgreement?: number;
+    voteCount?: number;
+    sourcePartRef?: string;
+    targetPartRef?: string;
+    fallbackUsed?: boolean;
+    providerError?: string;
+    candidateSelectionSource?: 'model' | 'view_votes' | 'none';
+    selectedMatchesConsensus?: boolean;
+    diagnosticsFlags?: string[];
+  };
+  geometry?: MateSuggestionContext;
+};
+
 const MATE_FACE_IDS: MateFaceId[] = ['top', 'bottom', 'left', 'right', 'front', 'back'];
-const MATE_METHOD_IDS: MateMethodId[] = [
-  'auto',
+const EXEC_MATE_METHOD_IDS: MateMethodId[] = [
   'planar_cluster',
   'geometry_aabb',
   'object_aabb',
-  'extreme_vertices',
   'obb_pca',
   'picked',
 ];
@@ -240,11 +571,107 @@ const asObject = (value: unknown): Record<string, unknown> | null =>
 const asMateFace = (value: unknown): MateFaceId | undefined =>
   typeof value === 'string' && MATE_FACE_IDS.includes(value as MateFaceId) ? (value as MateFaceId) : undefined;
 
-const asMateMethod = (value: unknown): MateMethodId | undefined =>
-  typeof value === 'string' && MATE_METHOD_IDS.includes(value as MateMethodId) ? (value as MateMethodId) : undefined;
+const isExecutableMateMethod = (value: unknown): value is MateMethodId =>
+  typeof value === 'string' && EXEC_MATE_METHOD_IDS.includes(value as MateMethodId);
+
+const normalizeMateMethod = (value: unknown, fallback: MateMethodId = 'planar_cluster'): MateMethodId => {
+  if (typeof value !== 'string') return fallback;
+  const method = normalizeText(value) as MateMethodId;
+  if (method === 'auto' || method === 'extreme_vertices') return fallback;
+  return isExecutableMateMethod(method) ? method : fallback;
+};
+
+const asMateMethod = (value: unknown): MateMethodId | undefined => {
+  if (typeof value !== 'string') return undefined;
+  return normalizeMateMethod(value, 'planar_cluster');
+};
 
 const asMateMode = (value: unknown): MateModeId | undefined =>
   typeof value === 'string' && MATE_MODE_IDS.includes(value as MateModeId) ? (value as MateModeId) : undefined;
+
+const asMateConfidence = (value: unknown): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(1, Number(value))) : undefined;
+
+const summarizeVlmDiagFlagZh = (flag: string): string | null => {
+  switch (flag) {
+    case 'view_vote_conflict':
+      return '視角衝突';
+    case 'view_votes_consistent':
+      return '視角一致';
+    case 'selected_candidate_derived_from_view_votes':
+      return '投票補選';
+    case 'candidate_field_sync_applied':
+      return '候選回填';
+    case 'part_ref_normalized':
+      return '零件名正規化';
+    case 'confidence_clamped':
+      return '信心值截斷';
+    case 'enum_normalized':
+      return '欄位正規化';
+    case 'view_vote_deduped':
+      return '視角去重';
+    case 'view_votes_missing':
+      return '無視角票';
+    default:
+      return null;
+  }
+};
+
+const summarizeArbitrationZh = (tag: string): string | null => {
+  switch (tag) {
+    case 'cover_center_drift_guard':
+    case 'insert_center_drift_guard':
+      return '防中心漂移';
+    case 'cover_vertical_face_override':
+      return '蓋合改垂直面';
+    case 'insert_vertical_face_override':
+      return '插入改垂直面';
+    case 'cover_mode_force_both':
+      return '蓋合改both';
+    case 'insert_mode_twist_to_both':
+      return '插入改both';
+    case 'insert_target_method_guard':
+      return '插槽方法保護';
+    case 'vlm_view_consensus_low':
+      return '視角一致性低';
+    case 'vlm_view_consensus_applied':
+      return '採用視角共識';
+    case 'vlm_consensus_candidate_override':
+      return '共識候選覆寫';
+    default:
+      return null;
+  }
+};
+
+const summarizeMateVlmContextZh = (params: {
+  consensus?: number;
+  selection?: 'model' | 'view_votes' | 'none';
+  fallback?: boolean;
+  provider?: string;
+  diagFlags?: string[];
+  arbitration?: string[];
+}) => {
+  const items: string[] = [];
+  if (typeof params.consensus === 'number') {
+    if (params.consensus < 0.5) items.push('視角分歧');
+    else if (params.consensus >= 0.75) items.push('視角高度一致');
+    else items.push('視角大致一致');
+  }
+  if (params.selection === 'view_votes') items.push('候選由投票決定');
+  else if (params.selection === 'model') items.push('候選由模型直選');
+  if (params.fallback) items.push(`視覺fallback(${params.provider || 'provider'})`);
+
+  for (const flag of params.diagFlags || []) {
+    const label = summarizeVlmDiagFlagZh(flag);
+    if (label) items.push(label);
+  }
+  for (const tag of params.arbitration || []) {
+    const label = summarizeArbitrationZh(tag);
+    if (label) items.push(label);
+  }
+
+  return [...new Set(items)].slice(0, 3);
+};
 
 const extractSuggestionData = (result: unknown) => {
   const root = asObject(result);
@@ -255,6 +682,49 @@ const extractSuggestionData = (result: unknown) => {
   if (!nestedResult) return root;
   const nestedData = asObject(nestedResult.data);
   return nestedData || nestedResult;
+};
+
+const extractLatestToolResult = (ctx: RouterContext, tool: string) => {
+  const toolResults = Array.isArray(ctx.toolResults) ? ctx.toolResults : [];
+  for (let index = toolResults.length - 1; index >= 0; index -= 1) {
+    const item = toolResults[index];
+    if (!item || item.tool !== tool) continue;
+    return item;
+  }
+  return null;
+};
+
+const summarizeWeatherReply = (result: RouterContext['toolResults'][number]) => {
+  if (!result?.ok) {
+    return `天氣查詢失敗：${result?.error || '暫時無法取得資料'}`;
+  }
+  const data = extractSuggestionData(result.result);
+  const weather = asObject(data);
+  const current = asObject(weather?.current);
+  const today = asObject(weather?.today);
+
+  const resolvedLocation = typeof weather?.resolvedLocation === 'string'
+    ? weather.resolvedLocation
+    : typeof weather?.requestedLocation === 'string'
+    ? weather.requestedLocation
+    : '指定地點';
+  const summary = typeof current?.summary === 'string' ? current.summary : '資料已更新';
+  const temperature = typeof current?.temperature === 'number' ? `${Number(current.temperature).toFixed(1)}°` : null;
+  const highLow =
+    typeof today?.temperatureMax === 'number' && typeof today?.temperatureMin === 'number'
+      ? `${Number(today.temperatureMin).toFixed(1)}° ~ ${Number(today.temperatureMax).toFixed(1)}°`
+      : null;
+  const precipitation =
+    typeof today?.precipitationSum === 'number' ? `降雨 ${Number(today.precipitationSum).toFixed(1)}mm` : null;
+
+  return [
+    `${resolvedLocation}：${summary}`,
+    temperature ? `目前 ${temperature}` : null,
+    highLow ? `今日 ${highLow}` : null,
+    precipitation,
+  ]
+    .filter(Boolean)
+    .join('，');
 };
 
 const extractMateSuggestionContext = (
@@ -312,7 +782,134 @@ const extractMateSuggestionContext = (
   return null;
 };
 
-const inferSourceTarget = (text: string, mentioned: MentionedPart[], _ctx: RouterContext) => {
+const extractMateVlmInferenceContext = (
+  ctx: RouterContext,
+  sourcePartId?: string,
+  targetPartId?: string
+): MateVlmInferenceContext | null => {
+  const toolResults = Array.isArray(ctx.toolResults) ? ctx.toolResults : [];
+  for (let index = toolResults.length - 1; index >= 0; index -= 1) {
+    const item = toolResults[index];
+    if (!item || item.tool !== 'query.mate_vlm_infer' || !item.ok) continue;
+    const data = extractSuggestionData(item.result);
+    if (!data) continue;
+
+    const sourceObj = asObject(data.source);
+    const targetObj = asObject(data.target);
+    const inferredObj = asObject(data.inferred);
+    const vlmObj = asObject(data.vlm);
+    const vlmMateObj = asObject(vlmObj?.mateInference);
+    const vlmDiagObj = asObject(vlmObj?.diagnostics);
+    const geometryObj = asObject(data.geometry);
+    const geometryExpected = asObject(geometryObj?.expectedFromCenters);
+    const geometryRankingTop = asObject(geometryObj?.rankingTop);
+
+    const resultSourceId =
+      (typeof sourceObj?.partId === 'string' ? sourceObj.partId : undefined) ||
+      (typeof inferredObj?.sourcePartId === 'string' ? inferredObj.sourcePartId : undefined);
+    const resultTargetId =
+      (typeof targetObj?.partId === 'string' ? targetObj.partId : undefined) ||
+      (typeof inferredObj?.targetPartId === 'string' ? inferredObj.targetPartId : undefined);
+
+    if (sourcePartId && targetPartId && resultSourceId && resultTargetId) {
+      const sameOrder = resultSourceId === sourcePartId && resultTargetId === targetPartId;
+      const swappedOrder = resultSourceId === targetPartId && resultTargetId === sourcePartId;
+      if (!sameOrder && !swappedOrder) continue;
+    }
+
+    return {
+      sourcePartId: resultSourceId,
+      targetPartId: resultTargetId,
+      inferred: inferredObj
+        ? {
+            sourcePartId: typeof inferredObj.sourcePartId === 'string' ? inferredObj.sourcePartId : undefined,
+            targetPartId: typeof inferredObj.targetPartId === 'string' ? inferredObj.targetPartId : undefined,
+            sourceFace: asMateFace(inferredObj.sourceFace),
+            targetFace: asMateFace(inferredObj.targetFace),
+            sourceMethod: asMateMethod(inferredObj.sourceMethod),
+            targetMethod: asMateMethod(inferredObj.targetMethod),
+            mode: asMateMode(inferredObj.mode),
+            intent: typeof inferredObj.intent === 'string' ? inferredObj.intent : undefined,
+            confidence: asMateConfidence(inferredObj.confidence),
+            origin: typeof inferredObj.origin === 'string' ? inferredObj.origin : undefined,
+            arbitration: Array.isArray(inferredObj.arbitration)
+              ? inferredObj.arbitration.filter((item): item is string => typeof item === 'string').slice(0, 6)
+              : undefined,
+            reason: typeof inferredObj.reason === 'string' ? inferredObj.reason : undefined,
+          }
+        : undefined,
+      vlm: vlmObj
+        ? {
+            provider: typeof vlmObj.provider === 'string' ? vlmObj.provider : (typeof vlmDiagObj?.provider === 'string' ? vlmDiagObj.provider : undefined),
+            confidence: asMateConfidence(vlmObj.confidence),
+            viewConsensus: asMateConfidence(vlmObj.viewConsensus),
+            viewAgreement: asMateConfidence(vlmObj.viewAgreement),
+            voteCount:
+              typeof vlmObj.voteCount === 'number' && Number.isFinite(vlmObj.voteCount)
+                ? Math.max(0, Math.floor(Number(vlmObj.voteCount)))
+                : undefined,
+            sourcePartRef: typeof vlmMateObj?.sourcePartRef === 'string' ? vlmMateObj.sourcePartRef : undefined,
+            targetPartRef: typeof vlmMateObj?.targetPartRef === 'string' ? vlmMateObj.targetPartRef : undefined,
+            fallbackUsed:
+              typeof vlmDiagObj?.fallbackUsed === 'boolean'
+                ? vlmDiagObj.fallbackUsed
+                : typeof vlmDiagObj?.fallback_used === 'boolean'
+                ? (vlmDiagObj.fallback_used as boolean)
+                : undefined,
+            providerError:
+              typeof vlmDiagObj?.providerError === 'string'
+                ? vlmDiagObj.providerError
+                : typeof vlmDiagObj?.provider_error === 'string'
+                ? vlmDiagObj.provider_error
+                : undefined,
+            candidateSelectionSource:
+              typeof vlmDiagObj?.candidateSelectionSource === 'string' &&
+              ['model', 'view_votes', 'none'].includes(vlmDiagObj.candidateSelectionSource)
+                ? (vlmDiagObj.candidateSelectionSource as 'model' | 'view_votes' | 'none')
+                : typeof vlmDiagObj?.candidate_selection_source === 'string' &&
+                  ['model', 'view_votes', 'none'].includes(vlmDiagObj.candidate_selection_source)
+                ? (vlmDiagObj.candidate_selection_source as 'model' | 'view_votes' | 'none')
+                : undefined,
+            selectedMatchesConsensus:
+              typeof vlmDiagObj?.selectedMatchesConsensus === 'boolean'
+                ? vlmDiagObj.selectedMatchesConsensus
+                : typeof vlmDiagObj?.selected_matches_consensus === 'boolean'
+                ? (vlmDiagObj.selected_matches_consensus as boolean)
+                : undefined,
+            diagnosticsFlags: Array.isArray(vlmDiagObj?.flags)
+              ? vlmDiagObj.flags.filter((item): item is string => typeof item === 'string').slice(0, 6)
+              : undefined,
+          }
+        : undefined,
+      geometry: geometryObj
+        ? {
+            sourcePartId: resultSourceId,
+            targetPartId: resultTargetId,
+            suggestedMode: asMateMode(geometryObj.suggestedMode),
+            intent: typeof geometryObj.intent === 'string' ? geometryObj.intent : undefined,
+            expectedFromCenters: geometryExpected
+              ? {
+                  sourceFace: asMateFace(geometryExpected.sourceFace),
+                  targetFace: asMateFace(geometryExpected.targetFace),
+                }
+              : undefined,
+            rankingTop: geometryRankingTop
+              ? {
+                  sourceFace: asMateFace(geometryRankingTop.sourceFace),
+                  targetFace: asMateFace(geometryRankingTop.targetFace),
+                  sourceMethod: asMateMethod(geometryRankingTop.sourceMethod),
+                  targetMethod: asMateMethod(geometryRankingTop.targetMethod),
+                  score: typeof geometryRankingTop.score === 'number' ? Number(geometryRankingTop.score) : undefined,
+                }
+              : undefined,
+          }
+        : undefined,
+    };
+  }
+  return null;
+};
+
+const inferSourceTarget = (text: string, mentioned: MentionedPart[], nlu: MockProviderNluSets) => {
   const lower = normalizeText(text);
   const first = mentioned[0];
   const second = mentioned[1];
@@ -324,8 +921,8 @@ const inferSourceTarget = (text: string, mentioned: MentionedPart[], _ctx: Route
   let sourceFromKeyword = false;
   let targetFromKeyword = false;
 
-  const sourceKeywords = [' source ', '來源', '来源', '從', '从'];
-  const targetKeywords = [' target ', '目標', '目标', '到', '向', ' into ', ' onto ', ' to '];
+  const sourceKeywords = nlu.sourceTarget.sourceKeywords;
+  const targetKeywords = nlu.sourceTarget.targetKeywords;
 
   const sourceNearFirst = sourceKeywords.some((token) => {
     const before = lower.slice(Math.max(0, first.index - 20), first.index);
@@ -362,7 +959,7 @@ const inferSourceTarget = (text: string, mentioned: MentionedPart[], _ctx: Route
     targetFromKeyword = true;
   }
 
-  const directionTokens = [' to ', ' into ', ' onto ', ' -> ', ' 到 ', '到', '對齊到', '对齐到'];
+  const directionTokens = nlu.sourceTarget.directionTokens;
   let directionIndex = -1;
   for (const token of directionTokens) {
     directionIndex = lower.indexOf(token);
@@ -379,10 +976,10 @@ const inferSourceTarget = (text: string, mentioned: MentionedPart[], _ctx: Route
   }
 
   if (!explicitDirection && !sourceFromKeyword && !targetFromKeyword) {
-    const placementKeywords = ['install', 'mount', 'place', 'put', 'attach', '插入', '放進', '放入', '安裝'];
+    const placementKeywords = nlu.sourceTarget.placementKeywords;
     const hasPlacementVerb = containsAny(lower, placementKeywords);
     if (hasPlacementVerb) {
-      const targetNameKeywords = ['base', 'ground', 'floor', 'table', 'platform', 'body', 'chassis', 'frame', '底座', '地面'];
+      const targetNameKeywords = nlu.sourceTarget.targetNameKeywords;
       const firstLooksLikeTarget = targetNameKeywords.some((kw) => first.name.toLowerCase().includes(kw));
       const secondLooksLikeTarget = targetNameKeywords.some((kw) => second.name.toLowerCase().includes(kw));
       if (firstLooksLikeTarget !== secondLooksLikeTarget) {
@@ -398,6 +995,11 @@ const inferSourceTarget = (text: string, mentioned: MentionedPart[], _ctx: Route
   return { source, target, explicitDirection };
 };
 
+const shouldAllowLlmSourceTargetOverride = (text: string, nlu: MockProviderNluSets) => {
+  const lower = normalizeText(text);
+  return containsAny(lower, nlu.sourceTarget.llmOverrideKeywords);
+};
+
 const formatModelSummary = (ctx: RouterContext) => {
   const fileLabel = ctx.cadFileName ? `\`${ctx.cadFileName}\`` : '目前模型';
   const names = ctx.parts.slice(0, 6).map((part) => part.name);
@@ -409,56 +1011,79 @@ const formatModelSummary = (ctx: RouterContext) => {
   return `${fileLabel}，包含 ${partsLine}。${stepLine}。`;
 };
 
-const ENVIRONMENT_ALIASES: Array<{ alias: string; environment: string }> = [
-  { alias: 'warehouse', environment: 'warehouse' },
-  { alias: '倉庫', environment: 'warehouse' },
-  { alias: '仓库', environment: 'warehouse' },
-  { alias: 'studio', environment: 'studio' },
-  { alias: '工作室', environment: 'studio' },
-  { alias: 'city', environment: 'city' },
-  { alias: '城市', environment: 'city' },
-  { alias: 'sunset', environment: 'sunset' },
-  { alias: '黃昏', environment: 'sunset' },
-  { alias: '黄昏', environment: 'sunset' },
-  { alias: 'dawn', environment: 'dawn' },
-  { alias: '清晨', environment: 'dawn' },
-  { alias: 'night', environment: 'night' },
-  { alias: '夜晚', environment: 'night' },
-  { alias: 'forest', environment: 'forest' },
-  { alias: '森林', environment: 'forest' },
-  { alias: 'apartment', environment: 'apartment' },
-  { alias: '公寓', environment: 'apartment' },
-  { alias: 'lobby', environment: 'lobby' },
-  { alias: '大廳', environment: 'lobby' },
-  { alias: '大厅', environment: 'lobby' },
-  { alias: 'park', environment: 'park' },
-  { alias: '公園', environment: 'park' },
-  { alias: '公园', environment: 'park' },
-];
-
-const detectEnvironment = (text: string) => {
-  for (const item of ENVIRONMENT_ALIASES) {
-    if (text.includes(item.alias.toLowerCase())) return item.environment;
+const detectEnvironment = (text: string, nlu: MockProviderNluSets) => {
+  for (const item of nlu.environments) {
+    if (text.includes(item.alias)) return item.environment;
   }
   return null;
 };
 
-const detectMode = (text: string): 'select' | 'move' | 'rotate' | 'mate' | null => {
-  if (containsAny(text, ['rotate', '旋轉', '旋转', '轉動', '转动'])) return 'rotate';
-  if (containsAny(text, ['move', '移動', '移动', '平移'])) return 'move';
-  if (containsAny(text, ['mate', '對齊', '对齐', '組裝', '组装', '裝配', '装配'])) return 'mate';
-  if (containsAny(text, ['select mode', '選取模式', '选择模式'])) return 'select';
+const detectMode = (text: string, nlu: MockProviderNluSets): InteractionModeId | null => {
+  if (containsAny(text, nlu.interactionModes.rotate)) return 'rotate';
+  if (containsAny(text, nlu.interactionModes.move)) return 'move';
+  if (containsAny(text, nlu.interactionModes.mate)) return 'mate';
+  if (containsAny(text, nlu.interactionModes.select)) return 'select';
   return null;
 };
 
-const looksLikeStepQuestion = (text: string) =>
-  containsAny(text, STEP_HELP_KEYWORDS) || (containsAny(text, ['step']) && containsAny(text, QUESTION_KEYWORDS));
+const looksLikeStepQuestion = (text: string, keywords: RouterKeywordSets) =>
+  containsAny(text, keywords.stepHelp) || (containsAny(text, ['step']) && containsAny(text, keywords.question));
 
-const looksLikeGeneralQuestion = (text: string) =>
-  containsAny(text, QUESTION_KEYWORDS) ||
+const looksLikeGeneralQuestion = (text: string, keywords: RouterKeywordSets, nlu: MockProviderNluSets) =>
+  containsAny(text, keywords.question) ||
   text.endsWith('?') ||
   text.endsWith('？') ||
-  containsAny(text, ['請問', '可否', '能不能', '是不是', '是否']);
+  containsAny(text, nlu.generalQuestionTokens);
+
+const WEATHER_KEYWORDS = ['天氣', '天气', 'weather', '氣溫', '气温', '溫度', '温度', '下雨', '降雨'];
+const PROVIDER_STATUS_KEYWORDS = [
+  'mock',
+  'ollama',
+  'gemini',
+  'llm',
+  'vlm',
+  'provider',
+  '模型',
+  'model',
+  '你是使用',
+  '你用',
+];
+
+const extractWeatherLocation = (raw: string): string | null => {
+  const text = String(raw || '').replace(/[?？]/g, ' ').trim();
+  if (!text) return null;
+
+  const explicit = text.match(/(?:在|in)\s*([a-zA-Z\u4e00-\u9fff][a-zA-Z\u4e00-\u9fff\s\-]{1,31})/i);
+  if (explicit?.[1]) return explicit[1].trim();
+
+  const weatherIndex = text.search(/天氣|天气|weather|氣溫|气温|溫度|温度|下雨|降雨/i);
+  if (weatherIndex > 0) {
+    const candidate = text
+      .slice(0, weatherIndex)
+      .replace(/今天|今日|現在|现在|請問|请问|想知道|查一下/gi, '')
+      .trim();
+    if (candidate.length >= 2 && candidate.length <= 24) return candidate;
+  }
+  return null;
+};
+
+const buildProviderStatusReply = () => {
+  const routerProvider = String(process.env.ROUTER_PROVIDER || 'mock').trim().toLowerCase();
+  const llmEnabled = process.env.ROUTER_LLM_ENABLE !== '0';
+  const llmProvider = llmEnabled ? String(process.env.ROUTER_LLM_PROVIDER || 'auto').trim().toLowerCase() : 'none';
+  const vlmProvider = String(process.env.V2_VLM_PROVIDER || process.env.VLM_PROVIDER || 'auto').trim().toLowerCase();
+  const llmModel = process.env.ROUTER_LLM_MODEL || process.env.OLLAMA_MODEL || 'qwen3:30b';
+  const vlmModel = process.env.VLM_MATE_MODEL || process.env.OLLAMA_MODEL || 'qwen3.5:27b';
+  return `目前設定：router=${routerProvider}，llm=${llmProvider}/${llmModel}，vlm=${vlmProvider}/${vlmModel}。`;
+};
+
+const buildFallbackReply = (ctx: RouterContext) => {
+  if (!ctx.parts.length) {
+    return '目前場景還沒有零件。先載入模型，再用「mate part1 and part2」或「切到 rotate 模式」。';
+  }
+  const sampleParts = ctx.parts.slice(0, 3).map((part) => part.name).join('、');
+  return `目前有 ${ctx.parts.length} 個零件（例如：${sampleParts}）。你可以說「mate A and B」、「select A」或「今天天氣（加地點）」。`;
+};
 
 const buildStepHelpReply = () =>
   [
@@ -472,30 +1097,33 @@ const buildStepHelpReply = () =>
 export const MockRouterProvider: RouterProvider = {
   async route(text: string, ctx: RouterContext) {
     const lower = normalizeText(text);
+    const keywords = getKeywordSets();
+    const nlu = getMockNluSets();
     const calls: ToolCall[] = [];
 
     if (!lower.trim()) {
       return { toolCalls: [], replyText: '請先輸入你想做的事。' };
     }
 
-    if (containsAny(lower, GREETING_KEYWORDS)) {
+    if (containsAny(lower, keywords.greeting)) {
       return {
         toolCalls: [],
-        replyText:
-          '你好，我可以聊天，也可以直接控制 3D 功能。你可以說「mate part1 and part2」或「如何新增step」。',
+        replyText: ctx.parts.length
+          ? `你好，目前場景有 ${ctx.parts.length} 個零件。你可以說「mate part1 and part2」或「如何新增step」。`
+          : '你好！先載入模型後，我可以幫你做 mate、選取、重置或切換視圖。',
       };
     }
 
-    if (containsAny(lower, THANKS_KEYWORDS)) {
+    if (containsAny(lower, keywords.thanks)) {
       return { toolCalls: [], replyText: '不客氣。你可以直接用自然句子說你要做的操作。' };
     }
 
-    if (looksLikeStepQuestion(lower)) {
+    if (looksLikeStepQuestion(lower, keywords)) {
       return { toolCalls: [], replyText: buildStepHelpReply() };
     }
 
-    if (containsAny(lower, STEP_COMMAND_KEYWORDS) && !containsAny(lower, QUESTION_KEYWORDS)) {
-      const match = text.match(/(?:新增\s*step|add step|create step|new step)\s+(.+)/i);
+    if (containsAny(lower, keywords.stepCommand) && !containsAny(lower, keywords.question)) {
+      const match = nlu.stepCommandRegex ? text.match(nlu.stepCommandRegex) : null;
       const label = (match?.[1] || 'New Step').trim().slice(0, 80);
       calls.push({
         tool: 'steps.add',
@@ -505,7 +1133,7 @@ export const MockRouterProvider: RouterProvider = {
       return { toolCalls: calls, replyText: `已新增 step：${label}` };
     }
 
-    if (containsAny(lower, CHAT_HELP_KEYWORDS)) {
+    if (containsAny(lower, keywords.chatHelp)) {
       return {
         toolCalls: [],
         replyText: [
@@ -518,7 +1146,7 @@ export const MockRouterProvider: RouterProvider = {
       };
     }
 
-    if (containsAny(lower, MODEL_INFO_KEYWORDS)) {
+    if (containsAny(lower, keywords.modelInfo)) {
       return {
         toolCalls: [],
         replyText: `模型資訊：${formatModelSummary(ctx)}`,
@@ -535,8 +1163,8 @@ export const MockRouterProvider: RouterProvider = {
       return { toolCalls: calls, replyText: '已幫你執行重做。' };
     }
 
-    if (containsAny(lower, RESET_KEYWORDS)) {
-      const resetAll = containsAny(lower, ALL_KEYWORDS);
+    if (containsAny(lower, keywords.reset)) {
+      const resetAll = containsAny(lower, keywords.all);
       if (resetAll) {
         calls.push({ tool: 'action.reset_all', args: {}, confidence: 0.9 });
         return { toolCalls: calls, replyText: '已重置全部零件。' };
@@ -556,9 +1184,9 @@ export const MockRouterProvider: RouterProvider = {
       return { toolCalls: calls, replyText: '沒有辨識到指定零件，已先重置全部零件。' };
     }
 
-    if (containsAny(lower, GRID_KEYWORDS)) {
-      const turnOn = containsAny(lower, GRID_ON_KEYWORDS);
-      const turnOff = containsAny(lower, GRID_OFF_KEYWORDS);
+    if (containsAny(lower, keywords.grid.keywords)) {
+      const turnOn = containsAny(lower, keywords.grid.on);
+      const turnOff = containsAny(lower, keywords.grid.off);
       if (turnOn || turnOff) {
         calls.push({
           tool: 'view.set_grid_visible',
@@ -570,7 +1198,7 @@ export const MockRouterProvider: RouterProvider = {
       return { toolCalls: [], replyText: '你要我把格線打開還是關掉？' };
     }
 
-    const env = detectEnvironment(lower);
+    const env = detectEnvironment(lower, nlu);
     if (env) {
       calls.push({
         tool: 'view.set_environment',
@@ -580,8 +1208,42 @@ export const MockRouterProvider: RouterProvider = {
       return { toolCalls: calls, replyText: `環境已切換到 ${env}。` };
     }
 
+    if (containsAny(lower, PROVIDER_STATUS_KEYWORDS)) {
+      return {
+        toolCalls: [],
+        replyText: buildProviderStatusReply(),
+      };
+    }
+
+    if (containsAny(lower, WEATHER_KEYWORDS)) {
+      const latestWeather = extractLatestToolResult(ctx, 'query.weather');
+      if (latestWeather) {
+        return {
+          toolCalls: [],
+          replyText: summarizeWeatherReply(latestWeather),
+        };
+      }
+      const location = extractWeatherLocation(text);
+      if (!location) {
+        return {
+          toolCalls: [],
+          replyText: '要查天氣我需要地點，例如「台北今天天氣」或「weather in San Francisco」。',
+        };
+      }
+
+      calls.push({
+        tool: 'query.weather',
+        args: { location },
+        confidence: 0.88,
+      });
+      return {
+        toolCalls: calls,
+        replyText: `正在查詢 ${location} 的天氣資料。`,
+      };
+    }
+
     const mentioned = collectMentionedParts(text, ctx.parts);
-    const mateLike = containsAny(lower, MATE_KEYWORDS) || (lower.includes(' and ') && mentioned.length >= 2);
+    const mateLike = containsAny(lower, keywords.mate) || (lower.includes(' and ') && mentioned.length >= 2);
     if (mateLike) {
       if (mentioned.length < 2) {
         return {
@@ -590,7 +1252,7 @@ export const MockRouterProvider: RouterProvider = {
         };
       }
 
-      const inferred = inferSourceTarget(text, mentioned, ctx);
+      const inferred = inferSourceTarget(text, mentioned, nlu);
       if (!inferred) {
         return {
           toolCalls: [],
@@ -600,28 +1262,94 @@ export const MockRouterProvider: RouterProvider = {
 
       let source = inferred.source;
       let target = inferred.target;
-      let mode = detectExplicitMateMode(text) ?? undefined;
-      const detectedSourceFace = detectFaceNear(text, inferred.source.name, inferred.source.index, inferred.source.end);
-      const detectedTargetFace = detectFaceNear(text, inferred.target.name, inferred.target.index, inferred.target.end);
+      let mode = detectExplicitMateMode(text, nlu) ?? undefined;
+      const detectedSourceFace = detectFaceNear(text, inferred.source.name, inferred.source.index, inferred.source.end, nlu);
+      const detectedTargetFace = detectFaceNear(text, inferred.target.name, inferred.target.index, inferred.target.end, nlu);
       let sourceFace = detectedSourceFace || undefined;
       let targetFace = detectedTargetFace || undefined;
-      const methodMentioned = hasAnchorMethodMention(text);
-      const detectedMethod = detectAnchorMethod(text);
+      const methodMentioned = hasAnchorMethodMention(text, nlu);
+      const detectedMethod = detectAnchorMethod(text, nlu);
       let sourceMethod = methodMentioned ? detectedMethod : undefined;
       let targetMethod = methodMentioned ? detectedMethod : undefined;
 
       const explicitSourceFace = detectedSourceFace !== null;
       const explicitTargetFace = detectedTargetFace !== null;
-      const explicitFace = explicitSourceFace || explicitTargetFace;
+      const hasFaceMention = nlu.faces.some((item) => containsAny(lower, item.aliases));
+      const explicitFace = explicitSourceFace || explicitTargetFace || hasFaceMention;
       const explicitMethod = methodMentioned;
       const explicitMode = mode !== undefined;
       const explicitDirection = Boolean(inferred.explicitDirection);
-      const hasMateSuggestionContext = Boolean(extractMateSuggestionContext(ctx));
 
-      if ((!explicitFace || !explicitMethod || !explicitMode) && !hasMateSuggestionContext) {
+      const mateVlmContext = extractMateVlmInferenceContext(ctx, source.id, target.id);
+      const hasMateVlmContext = Boolean(mateVlmContext);
+      const hasMateSuggestionContext = Boolean(extractMateSuggestionContext(ctx, source.id, target.id));
+
+      if (!hasMateVlmContext) {
+        calls.push({
+          tool: 'query.mate_vlm_infer',
+          args: {
+            sourcePart: { partId: source.id },
+            targetPart: { partId: target.id },
+            instruction: text,
+            ...(sourceFace ? { preferredSourceFace: sourceFace } : {}),
+            ...(targetFace ? { preferredTargetFace: targetFace } : {}),
+            sourceMethod: normalizeMateMethod(sourceMethod ?? 'planar_cluster', 'planar_cluster'),
+            targetMethod: normalizeMateMethod(targetMethod ?? 'planar_cluster', 'planar_cluster'),
+            ...(mode ? { preferredMode: mode } : {}),
+            maxPairs: 12,
+            maxViews: 6,
+            maxWidthPx: 960,
+            maxHeightPx: 640,
+            format: 'jpeg',
+          },
+          confidence: 0.95,
+        });
+        return {
+          toolCalls: calls,
+          replyText: `正在擷取 ${source.name} 與 ${target.name} 的多角度影像，並用 VLM/VLA 分析 source/target、face、method、mode、intent…`,
+        };
+      }
+
+      const mapVlmPartRefToMentioned = (ref?: string) => {
+        if (!ref) return null;
+        const token = normalizeToken(ref);
+        if (!token) return null;
+        return (
+          mentioned.find((part) => normalizeToken(part.id) === token || normalizeToken(part.name) === token) || null
+        );
+      };
+
+      const vlmInferred = mateVlmContext?.inferred;
+      const vlmRefSource = mapVlmPartRefToMentioned(mateVlmContext?.vlm?.sourcePartRef);
+      const vlmRefTarget = mapVlmPartRefToMentioned(mateVlmContext?.vlm?.targetPartRef);
+      const vlmRefConfidence = Number(mateVlmContext?.vlm?.confidence ?? 0);
+      if (
+        !explicitDirection &&
+        shouldAllowLlmSourceTargetOverride(text, nlu) &&
+        vlmRefConfidence >= 0.82 &&
+        vlmRefSource &&
+        vlmRefTarget &&
+        vlmRefSource.id !== vlmRefTarget.id
+      ) {
+        source = vlmRefSource;
+        target = vlmRefTarget;
+      }
+
+      if (!explicitMode && vlmInferred?.mode) mode = vlmInferred.mode;
+      if (!explicitSourceFace && vlmInferred?.sourceFace) sourceFace = vlmInferred.sourceFace;
+      if (!explicitTargetFace && vlmInferred?.targetFace) targetFace = vlmInferred.targetFace;
+      const allowVlmMethodOverride = !explicitMethod && (!explicitFace || !explicitMode);
+      if (allowVlmMethodOverride && vlmInferred?.sourceMethod) sourceMethod = vlmInferred.sourceMethod;
+      if (allowVlmMethodOverride && vlmInferred?.targetMethod) targetMethod = vlmInferred.targetMethod;
+
+      if ((!explicitFace || !explicitMethod || !explicitMode) && !hasMateSuggestionContext && !hasMateVlmContext) {
         const llmInference = await inferMateWithLlm(text, ctx);
         if (llmInference) {
-          if (!explicitDirection && Number(llmInference.confidence ?? 0) >= 0.82) {
+          if (
+            !explicitDirection &&
+            shouldAllowLlmSourceTargetOverride(text, nlu) &&
+            Number(llmInference.confidence ?? 0) >= 0.82
+          ) {
             const sourceCandidate = mentioned.find((part) => part.id === llmInference.sourcePartId);
             const targetCandidate = mentioned.find((part) => part.id === llmInference.targetPartId);
             if (sourceCandidate && targetCandidate && sourceCandidate.id !== targetCandidate.id) {
@@ -637,8 +1365,8 @@ export const MockRouterProvider: RouterProvider = {
         }
       }
 
-      const suggestionContext = extractMateSuggestionContext(ctx, source.id, target.id);
-      const needsSuggestionRound = (!explicitFace || !explicitMethod || !explicitMode) && !suggestionContext;
+      const suggestionContext = mateVlmContext?.geometry ?? extractMateSuggestionContext(ctx, source.id, target.id);
+      const needsSuggestionRound = (!explicitFace || !explicitMethod || !explicitMode) && !suggestionContext && !hasMateVlmContext;
       if (needsSuggestionRound) {
         calls.push({
           tool: 'query.mate_suggestions',
@@ -648,8 +1376,8 @@ export const MockRouterProvider: RouterProvider = {
             instruction: text,
             ...(sourceFace ? { preferredSourceFace: sourceFace } : {}),
             ...(targetFace ? { preferredTargetFace: targetFace } : {}),
-            sourceMethod: sourceMethod ?? 'auto',
-            targetMethod: targetMethod ?? 'auto',
+            sourceMethod: normalizeMateMethod(sourceMethod ?? 'planar_cluster', 'planar_cluster'),
+            targetMethod: normalizeMateMethod(targetMethod ?? 'planar_cluster', 'planar_cluster'),
             maxPairs: 12,
           },
           confidence: 0.94,
@@ -662,16 +1390,35 @@ export const MockRouterProvider: RouterProvider = {
 
       const rankingTop = suggestionContext?.rankingTop;
       const expectedFromCenters = suggestionContext?.expectedFromCenters;
-      const useSuggestedMethod = suggestionContext?.intent === 'insert';
+      const useSuggestedMethod = suggestionContext?.intent === 'insert' && !explicitFace;
       const resolvedSourceFace =
         sourceFace ?? rankingTop?.sourceFace ?? expectedFromCenters?.sourceFace ?? 'bottom';
       const resolvedTargetFace =
         targetFace ?? rankingTop?.targetFace ?? expectedFromCenters?.targetFace ?? 'top';
       const resolvedSourceMethod =
-        sourceMethod ?? (useSuggestedMethod ? rankingTop?.sourceMethod : undefined) ?? 'auto';
+        normalizeMateMethod(sourceMethod ?? (useSuggestedMethod ? rankingTop?.sourceMethod : undefined), 'planar_cluster');
       const resolvedTargetMethod =
-        targetMethod ?? (useSuggestedMethod ? rankingTop?.targetMethod : undefined) ?? 'auto';
+        normalizeMateMethod(targetMethod ?? (useSuggestedMethod ? rankingTop?.targetMethod : undefined), 'planar_cluster');
       const resolvedMode = mode ?? suggestionContext?.suggestedMode ?? 'translate';
+      const resolvedIntent = vlmInferred?.intent ?? suggestionContext?.intent;
+      const inferredVia = vlmInferred?.origin ?? (hasMateVlmContext ? 'hybrid' : undefined);
+      const inferredConfidence = typeof vlmInferred?.confidence === 'number' ? vlmInferred.confidence : undefined;
+      const inferredConsensus = mateVlmContext?.vlm?.viewConsensus;
+      const inferredArb = Array.isArray(vlmInferred?.arbitration) ? vlmInferred.arbitration.filter(Boolean).slice(0, 3) : [];
+      const vlmDiagFlags = Array.isArray(mateVlmContext?.vlm?.diagnosticsFlags)
+        ? mateVlmContext.vlm.diagnosticsFlags.filter(Boolean).slice(0, 3)
+        : [];
+      const vlmDiagSelection = mateVlmContext?.vlm?.candidateSelectionSource;
+      const vlmDiagFallback = mateVlmContext?.vlm?.fallbackUsed;
+      const vlmDiagProvider = mateVlmContext?.vlm?.provider;
+      const vlmDiagSummaryZh = summarizeMateVlmContextZh({
+        consensus: inferredConsensus,
+        selection: vlmDiagSelection,
+        fallback: vlmDiagFallback,
+        provider: vlmDiagProvider,
+        diagFlags: vlmDiagFlags,
+        arbitration: inferredArb,
+      });
 
       calls.push({
         tool: 'action.mate_execute',
@@ -695,13 +1442,25 @@ export const MockRouterProvider: RouterProvider = {
       return {
         toolCalls: calls,
         replyText: `已解析：${source.name}(${resolvedSourceFace}) -> ${target.name}(${resolvedTargetFace})，method=${resolvedSourceMethod}/${resolvedTargetMethod}，mode=${resolvedMode}${
-          suggestionContext?.intent ? `，intent=${suggestionContext.intent}` : ''
+          resolvedIntent ? `，intent=${resolvedIntent}` : ''
+        }${inferredVia ? `，via=${inferredVia}` : ''}${inferredConfidence !== undefined ? `，conf=${inferredConfidence.toFixed(2)}` : ''}${
+          inferredConsensus !== undefined ? `，cons=${inferredConsensus.toFixed(2)}` : ''
+        }${
+          vlmDiagSelection && vlmDiagSelection !== 'none' ? `，vsel=${vlmDiagSelection}` : ''
+        }${
+          vlmDiagFallback ? `，vfb=${vlmDiagProvider || 'provider'}` : ''
+        }${
+          vlmDiagFlags.length ? `，vdiag=${vlmDiagFlags.join('+')}` : ''
+        }${
+          vlmDiagSummaryZh.length ? `，診斷=${vlmDiagSummaryZh.join('/')}` : ''
+        }${
+          inferredArb.length ? `，arb=${inferredArb.join('+')}` : ''
         }。`,
       };
     }
 
-    if (containsAny(lower, MODE_KEYWORDS) || containsAny(lower, ['rotate', 'move', 'mate', 'select', '模式'])) {
-      const mode = detectMode(lower);
+    if (containsAny(lower, keywords.mode) || containsAny(lower, ['rotate', 'move', 'mate', 'select', '模式'])) {
+      const mode = detectMode(lower, nlu);
       if (mode) {
         calls.push({
           tool: 'mode.set_interaction_mode',
@@ -712,7 +1471,7 @@ export const MockRouterProvider: RouterProvider = {
       }
     }
 
-    if (containsAny(lower, SELECT_KEYWORDS)) {
+    if (containsAny(lower, keywords.select)) {
       const part = findPart(lower, ctx.parts);
       if (part) {
         calls.push({
@@ -740,7 +1499,7 @@ export const MockRouterProvider: RouterProvider = {
       };
     }
 
-    if (looksLikeGeneralQuestion(lower)) {
+    if (looksLikeGeneralQuestion(lower, keywords, nlu)) {
       const llmAnswer = await answerGeneralQuestionWithLlm(text, ctx);
       if (llmAnswer) {
         return {
@@ -752,8 +1511,7 @@ export const MockRouterProvider: RouterProvider = {
 
     return {
       toolCalls: [],
-      replyText:
-        '我可以回答操作問題，也能直接控制場景。你可以說「如何新增step」、「這個模型是什麼」或「mate part1 and part2」。',
+      replyText: buildFallbackReply(ctx),
     };
   },
 };

@@ -4,6 +4,17 @@ import * as THREE from 'three';
 import { useV2Store } from '../../store/store';
 import { applyMateTransform, solveMateTopBottom } from './solver';
 
+function normalizeMateMethod(method: unknown) {
+  if (typeof method !== 'string') return 'planar_cluster' as const;
+  const normalized = method.trim().toLowerCase();
+  if (normalized === 'auto' || normalized === 'extreme_vertices') return 'planar_cluster' as const;
+  if (normalized === 'geometry_aabb') return 'geometry_aabb' as const;
+  if (normalized === 'object_aabb') return 'object_aabb' as const;
+  if (normalized === 'obb_pca') return 'obb_pca' as const;
+  if (normalized === 'picked') return 'picked' as const;
+  return 'planar_cluster' as const;
+}
+
 export function MateExecutor() {
   const { scene } = useThree();
   const req = useV2Store((s) => s.mateRequest);
@@ -30,8 +41,8 @@ export function MateExecutor() {
     const beforeQuat = new THREE.Quaternion();
     source.getWorldPosition(beforePos);
     source.getWorldQuaternion(beforeQuat);
-    const sourceMethod = req.sourceMethod || 'auto';
-    const targetMethod = req.targetMethod || 'auto';
+    const sourceMethod = normalizeMateMethod(req.sourceMethod);
+    const targetMethod = normalizeMateMethod(req.targetMethod);
     const targetPick = matePick.target?.type === 'face' ? matePick.target : undefined;
     const transform = solveMateTopBottom(
       source,

@@ -2,11 +2,20 @@ import { ClientRequest, ClientRequestSchema, PROTOCOL_VERSION, ServerEvent, Serv
 
 type Handler = (payload: any) => void;
 type StatusHandler = (status: { connected: boolean; error?: string }) => void;
+type RequestOptions = { timeoutMs?: number };
 
 export class WsClient {
   private ws: WebSocket | null = null;
   private handlers = new Map<string, Handler[]>();
-  private pending = new Map<string, { resolve: (v: any) => void; reject: (e: any) => void }>();
+  private pending = new Map<
+    string,
+    {
+      resolve: (v: any) => void;
+      reject: (e: any) => void;
+      timeoutId?: number;
+      command?: string;
+    }
+  >();
   private statusHandlers = new Set<StatusHandler>();
 
   private emitStatus(status: { connected: boolean; error?: string }) {
@@ -23,7 +32,10 @@ export class WsClient {
     };
     this.ws.onclose = () => {
       this.emitStatus({ connected: false });
-      this.pending.forEach((p) => p.reject(new Error('WS closed')));
+      this.pending.forEach((p) => {
+        if (p.timeoutId != null) window.clearTimeout(p.timeoutId);
+        p.reject(new Error('WS closed'));
+      });
       this.pending.clear();
     };
     this.ws.onerror = () => {
@@ -35,6 +47,7 @@ export class WsClient {
       if ((data as ServerResponse).type === 'server_response' && data.id) {
         const pending = this.pending.get(data.id);
         if (pending) {
+          if (pending.timeoutId != null) window.clearTimeout(pending.timeoutId);
           if ((data as ServerResponse).ok) pending.resolve((data as ServerResponse).result);
           else pending.reject((data as ServerResponse).error);
           this.pending.delete(data.id);
@@ -69,7 +82,7 @@ export class WsClient {
     };
   }
 
-  request(command: string, args?: any) {
+  request(command: string, args?: any, options?: RequestOptions) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error('WS not connected'));
     }
@@ -87,7 +100,17 @@ export class WsClient {
 
     this.ws.send(JSON.stringify(message));
     return new Promise((resolve, reject) => {
-      this.pending.set(message.id, { resolve, reject });
+      const timeoutMs = Number(options?.timeoutMs);
+      const hasTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0;
+      const timeoutId = hasTimeout
+        ? window.setTimeout(() => {
+            const current = this.pending.get(message.id);
+            if (!current) return;
+            this.pending.delete(message.id);
+            current.reject(new Error(`WS request timeout (${Math.floor(timeoutMs)}ms): ${command}`));
+          }, Math.floor(timeoutMs))
+        : undefined;
+      this.pending.set(message.id, { resolve, reject, timeoutId, command });
     });
   }
 }

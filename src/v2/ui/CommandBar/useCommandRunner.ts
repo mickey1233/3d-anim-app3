@@ -7,8 +7,8 @@ const HELP_LINES = [
   'Examples:',
   'select <partName>',
   'mate <source> bottom to <target> top [--mode translate|twist|both]',
-  '  --source-method auto|planar_cluster|geometry_aabb|object_aabb|extreme_vertices|obb_pca|picked',
-  '  --target-method auto|planar_cluster|geometry_aabb|object_aabb|extreme_vertices|obb_pca|picked',
+  '  --source-method planar_cluster|geometry_aabb|object_aabb|obb_pca|picked',
+  '  --target-method planar_cluster|geometry_aabb|object_aabb|obb_pca|picked',
   '  --twist-axis normal|tangent|bitangent|x|y|z --twist-space world|source_face|target_face --twist-deg 180',
   'nudge x 0.01',
   'reset all',
@@ -176,17 +176,15 @@ export function useCommandRunner() {
             : 'translate';
 
         const methodSet = new Set([
-          'auto',
           'planar_cluster',
           'geometry_aabb',
           'object_aabb',
-          'extreme_vertices',
           'obb_pca',
           'picked',
         ]);
 
-        const sm = sourceMethod ? sourceMethod.toLowerCase() : 'auto';
-        const tm = targetMethod ? targetMethod.toLowerCase() : 'auto';
+        const sm = sourceMethod ? sourceMethod.toLowerCase() : 'planar_cluster';
+        const tm = targetMethod ? targetMethod.toLowerCase() : 'planar_cluster';
 
         if (!sourceId || !targetId || !sourceFace || !targetFace) {
           return 'Usage: mate <source> <face> to <target> <face> [--mode translate|twist|both]';
@@ -214,13 +212,13 @@ export function useCommandRunner() {
             kind: 'face',
             part: { partId: sourceId },
             face: sourceFace as any,
-            method: methodSet.has(sm) ? (sm as any) : 'auto',
+            method: methodSet.has(sm) ? (sm as any) : 'planar_cluster',
           },
           target: {
             kind: 'face',
             part: { partId: targetId },
             face: targetFace as any,
-            method: methodSet.has(tm) ? (tm as any) : 'auto',
+            method: methodSet.has(tm) ? (tm as any) : 'planar_cluster',
           },
           mateMode: mode === 'both' ? 'face_insert_arc' : 'face_flush',
           pathPreference: mode === 'both' ? 'arc' : 'line',
@@ -307,13 +305,13 @@ export function useCommandRunner() {
             kind: 'face',
             part: { partId: sourceId },
             face: 'bottom',
-            method: 'auto',
+            method: 'planar_cluster',
           },
           target: {
             kind: 'face',
             part: { partId: targetId },
             face: 'top',
-            method: 'auto',
+            method: 'planar_cluster',
           },
           mateMode: mode === 'both' ? 'face_insert_arc' : 'face_flush',
           pathPreference: mode === 'both' ? 'arc' : 'line',

@@ -41,7 +41,7 @@ test.describe('v2 query.mate_suggestions fixtures', () => {
     expect(result.data.ranking[0].targetFace).toBe('left');
   });
 
-  test('lid fixture infers cover intent and suggests both mode', async ({ page }) => {
+  test('lid fixture infers cover intent (mode is a neutral translate fallback)', async ({ page }) => {
     test.setTimeout(120_000);
     await page.goto('http://127.0.0.1:5173/?v=2&fixture=lid', { waitUntil: 'domcontentloaded' });
 
@@ -66,7 +66,7 @@ test.describe('v2 query.mate_suggestions fixtures', () => {
 
     expect(result.ok).toBe(true);
     expect(result.data.intent).toBe('cover');
-    expect(result.data.suggestedMode).toBe('both');
+    expect(result.data.suggestedMode).toBe('translate');
     expect(result.data.ranking.length).toBeGreaterThan(0);
   });
 

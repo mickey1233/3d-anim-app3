@@ -4,11 +4,9 @@ type LlmProvider = 'auto' | 'ollama' | 'gemini';
 type FaceId = 'top' | 'bottom' | 'left' | 'right' | 'front' | 'back';
 type MateMode = 'translate' | 'twist' | 'both';
 type AnchorMethodId =
-  | 'auto'
   | 'planar_cluster'
   | 'geometry_aabb'
   | 'object_aabb'
-  | 'extreme_vertices'
   | 'obb_pca'
   | 'picked';
 
@@ -26,11 +24,9 @@ type MateInference = {
 
 const FACE_IDS: FaceId[] = ['top', 'bottom', 'left', 'right', 'front', 'back'];
 const METHOD_IDS: AnchorMethodId[] = [
-  'auto',
   'planar_cluster',
   'geometry_aabb',
   'object_aabb',
-  'extreme_vertices',
   'obb_pca',
   'picked',
 ];
@@ -38,12 +34,25 @@ const MODE_IDS: MateMode[] = ['translate', 'twist', 'both'];
 
 const DEFAULT_TIMEOUT_MS = Number(process.env.ROUTER_LLM_TIMEOUT_MS || 2200);
 const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || process.env.ROUTER_LLM_MODEL || 'qwen2.5:7b-instruct';
+const OLLAMA_MODEL = process.env.ROUTER_LLM_MODEL || process.env.OLLAMA_MODEL || 'qwen3:30b';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || process.env.ROUTER_LLM_MODEL || 'gemini-1.5-flash';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 
 let lastOllamaHealthCheckAt = 0;
 let lastOllamaHealth = false;
+
+function normalizeOllamaModelName(name: unknown) {
+  if (typeof name !== 'string') return '';
+  return name.trim().toLowerCase();
+}
+
+function isOllamaModelAvailable(model: string, tags: string[]) {
+  const requested = normalizeOllamaModelName(model);
+  if (!requested) return false;
+  const normalizedTags = tags.map(normalizeOllamaModelName).filter(Boolean);
+  if (requested.includes(':')) return normalizedTags.includes(requested);
+  return normalizedTags.some((name) => name === requested || name.startsWith(`${requested}:`));
+}
 
 const normalizeText = (text: string) =>
   text
@@ -68,7 +77,17 @@ async function checkOllamaReachable() {
   const { controller, timeout } = withTimeout(Math.min(DEFAULT_TIMEOUT_MS, 900));
   try {
     const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { signal: controller.signal });
-    lastOllamaHealth = res.ok;
+    if (!res.ok) {
+      lastOllamaHealth = false;
+      return false;
+    }
+    const payload = await res.json().catch(() => null);
+    const names = Array.isArray(payload?.models)
+      ? (payload.models as any[])
+          .map((model: any) => (typeof model?.name === 'string' ? model.name : null))
+          .filter(Boolean)
+      : [];
+    lastOllamaHealth = isOllamaModelAvailable(OLLAMA_MODEL, names);
     return lastOllamaHealth;
   } catch {
     lastOllamaHealth = false;
@@ -197,7 +216,9 @@ const sanitizeFace = (face: unknown): FaceId | undefined => {
 
 const sanitizeMethod = (method: unknown): AnchorMethodId | undefined => {
   if (typeof method !== 'string') return undefined;
-  const value = method.toLowerCase() as AnchorMethodId;
+  const normalized = method.toLowerCase();
+  if (normalized === 'auto' || normalized === 'extreme_vertices') return 'planar_cluster';
+  const value = normalized as AnchorMethodId;
   return METHOD_IDS.includes(value) ? value : undefined;
 };
 
@@ -226,8 +247,8 @@ export async function inferMateWithLlm(text: string, ctx: RouterContext): Promis
     '  "targetPartRef": string,',
     '  "sourceFace": "top|bottom|left|right|front|back",',
     '  "targetFace": "top|bottom|left|right|front|back",',
-    '  "sourceMethod": "auto|planar_cluster|geometry_aabb|object_aabb|extreme_vertices|obb_pca|picked",',
-    '  "targetMethod": "auto|planar_cluster|geometry_aabb|object_aabb|extreme_vertices|obb_pca|picked",',
+    '  "sourceMethod": "planar_cluster|geometry_aabb|object_aabb|obb_pca|picked",',
+    '  "targetMethod": "planar_cluster|geometry_aabb|object_aabb|obb_pca|picked",',
     '  "mode": "translate|twist|both",',
     '  "confidence": number(0..1),',
     '  "reason": string',
