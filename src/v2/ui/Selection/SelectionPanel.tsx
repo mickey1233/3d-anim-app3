@@ -22,12 +22,22 @@ const AxisButton = ({
 
 export function SelectionPanel() {
   const selection = useV2Store((s) => s.selection.partId);
+  const selectionGroupId = useV2Store((s) => s.selection.groupId);
   const parts = useV2Store((s) => s.parts);
+  const assemblyGroups = useV2Store((s) => s.assemblyGroups);
   const getPartTransform = useV2Store((s) => s.getPartTransform);
 
-  const [step, setStep] = React.useState('0.01');
+  const gizmoSpace = useV2Store((s) => s.ui.gizmoSpace);
+  const setGizmoSpace = useV2Store((s) => s.setGizmoSpace);
 
-  const selectedName = selection ? parts.byId[selection]?.name || selection : 'None';
+  const [step, setStep] = React.useState('0.01');
+  const [rotStep, setRotStep] = React.useState('5');
+
+  const selectedPartName = selection ? parts.byId[selection]?.name || selection : 'None';
+  const selectedGroupName = selectionGroupId ? assemblyGroups.byId[selectionGroupId]?.name : undefined;
+  const selectedName = selectedGroupName
+    ? `${selectedGroupName} / ${selectedPartName}`
+    : selectedPartName;
   const transform = selection ? getPartTransform(selection) : null;
   const rotation = React.useMemo(() => {
     if (!transform) return null;
@@ -48,6 +58,30 @@ export function SelectionPanel() {
       quaternion: transform.quaternion,
     };
   }, [transform]);
+
+  const nudgeRotation = (axis: 'x' | 'y' | 'z', dir: -1 | 1) => {
+    if (!selection || !transform) return;
+    const deg = Number(rotStep) || 5;
+    const rad = (deg * dir * Math.PI) / 180;
+    const axisVec = new THREE.Vector3(
+      axis === 'x' ? 1 : 0,
+      axis === 'y' ? 1 : 0,
+      axis === 'z' ? 1 : 0
+    );
+    const deltaQ = new THREE.Quaternion().setFromAxisAngle(axisVec, rad);
+    const curQ = new THREE.Quaternion(...(transform.quaternion as [number, number, number, number]));
+    const newQ = deltaQ.multiply(curQ);
+    void callMcpTool('action.set_part_transform', {
+      part: { partId: selection },
+      transform: {
+        position: transform.position,
+        quaternion: [newQ.x, newQ.y, newQ.z, newQ.w],
+        scale: transform.scale,
+        space: 'world',
+      },
+      previewOnly: false,
+    });
+  };
 
   const nudge = (axis: 'x' | 'y' | 'z', dir: -1 | 1) => {
     if (!selection || !transform) return;
@@ -108,7 +142,17 @@ export function SelectionPanel() {
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">Selection</div>
+      <div className="flex items-center justify-between">
+        <div className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">Selection</div>
+        <button
+          type="button"
+          className="px-2 py-1 text-[10px] rounded border border-white/10 hover:bg-white/10"
+          onClick={() => setGizmoSpace(gizmoSpace === 'world' ? 'local' : 'world')}
+          title="Toggle transform gizmo space"
+        >
+          {gizmoSpace === 'world' ? 'World' : 'Object'}
+        </button>
+      </div>
       <div className="text-xs font-semibold">{selectedName}</div>
 
       <div className="text-[10px] text-[var(--text-secondary)]">Position</div>
@@ -196,6 +240,23 @@ export function SelectionPanel() {
         <AxisButton label="-Y" onClick={() => nudge('y', -1)} />
         <AxisButton label="+Z" onClick={() => nudge('z', 1)} />
         <AxisButton label="-Z" onClick={() => nudge('z', -1)} />
+      </div>
+
+      <div className="flex items-center gap-2 text-[10px] text-[var(--text-secondary)]">
+        Rot (deg)
+        <input
+          value={rotStep}
+          onChange={(e) => setRotStep(e.target.value)}
+          className="w-14 bg-black/40 border border-white/10 rounded px-2 py-1 text-[10px] outline-none"
+        />
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <AxisButton label="+Rx" onClick={() => nudgeRotation('x', 1)} />
+        <AxisButton label="-Rx" onClick={() => nudgeRotation('x', -1)} />
+        <AxisButton label="+Ry" onClick={() => nudgeRotation('y', 1)} />
+        <AxisButton label="-Ry" onClick={() => nudgeRotation('y', -1)} />
+        <AxisButton label="+Rz" onClick={() => nudgeRotation('z', 1)} />
+        <AxisButton label="-Rz" onClick={() => nudgeRotation('z', -1)} />
       </div>
 
       <div className="flex gap-2">

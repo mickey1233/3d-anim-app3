@@ -47,3 +47,7 @@ export function getV2DevicePixelRatio() {
 export function getV2ObjectByPartId(partId: string) {
   return activeScene?.getObjectByProperty('uuid', partId) ?? null;
 }
+
+if (import.meta.env?.DEV && typeof window !== 'undefined') {
+  (window as any).__V2_GET_OBJECT__ = getV2ObjectByPartId;
+}

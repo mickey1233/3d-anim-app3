@@ -11,7 +11,7 @@ import { ENVIRONMENT_PRESETS } from '../three/backgrounds/backgrounds';
 import { v2Client } from './client';
 import { getV2Camera, getV2ObjectByPartId, getV2Renderer, getV2Scene, getV2ViewportPx } from '../three/SceneRegistry';
 import { resolveAnchor } from '../three/mating/anchorMethods';
-import { solveMateTopBottom } from '../three/mating/solver';
+import { solveMateTopBottom, applyMateTransform } from '../three/mating/solver';
 
 type ToolErrorCode =
   | 'INVALID_ARGUMENT'
@@ -318,6 +318,12 @@ function inferIntentFromGeometry(sourceObject: THREE.Object3D, targetObject: THR
     return 'insert';
   }
 
+  // Source dimensions all fit within target (looser tolerance) — position-independent check
+  // (part may be far from target if user hasn't moved it yet)
+  if (fitLooseCount >= 3 && volumeRatio >= 1.3) {
+    return 'insert';
+  }
+
   if (fitLooseCount >= 2 && centerDistance <= targetCharacteristic * 2.2) {
     return 'insert';
   }
@@ -339,6 +345,8 @@ function inferIntentFromGeometry(sourceObject: THREE.Object3D, targetObject: THR
 }
 
 function defaultModeForIntent(intent: MateIntentKind): MateExecMode {
+  // insert typically needs rotation correction too (part may be rotated before insertion)
+  if (intent === 'insert') return 'both';
   return 'translate';
 }
 
@@ -416,6 +424,7 @@ function inferBestFacePair(params: {
   preferredSourceFace?: StoreFaceId | null;
   preferredTargetFace?: StoreFaceId | null;
   limit?: number;
+  intent?: MateIntentKind;
 }): FacePairSuggestion | null {
   const {
     sourceObject,
@@ -425,13 +434,23 @@ function inferBestFacePair(params: {
     preferredSourceFace,
     preferredTargetFace,
     limit,
+    intent,
   } = params;
 
   const sourceCenter = new THREE.Box3().setFromObject(sourceObject).getCenter(new THREE.Vector3());
   const targetCenter = new THREE.Box3().setFromObject(targetObject).getCenter(new THREE.Vector3());
   const sourceToTarget = targetCenter.clone().sub(sourceCenter);
   const sourceToTargetDir = normalize(sourceToTarget, new THREE.Vector3(0, 1, 0));
-  const expectedFaces = getExpectedFacePairFromCenters(sourceCenter, targetCenter);
+  const centerExpectedFaces = getExpectedFacePairFromCenters(sourceCenter, targetCenter);
+
+  // For insert intent the source part is not yet positioned near the target cavity — the
+  // center-to-center direction is misleading.  Use a canonical insert pair (source bottom →
+  // target top) as the geometry expectation instead.  This correctly identifies the cavity
+  // opening (target local +Y) and the mating face of the part being inserted.
+  const expectedFaces: { sourceFace: StoreFaceId; targetFace: StoreFaceId } =
+    intent === 'insert'
+      ? { sourceFace: 'bottom', targetFace: 'top' }
+      : centerExpectedFaces;
 
   const sourceFaces = preferredSourceFace ? [preferredSourceFace] : STORE_FACES;
   const targetFaces = preferredTargetFace ? [preferredTargetFace] : STORE_FACES;
@@ -457,12 +476,17 @@ function inferBestFacePair(params: {
       const expectedFaceScore =
         (sourceCandidate.face === expectedFaces.sourceFace ? 0.5 : 0) +
         (targetCandidate.face === expectedFaces.targetFace ? 0.5 : 0);
+
+      // For insert: the source is not yet near its final position, so approach/distance scores
+      // based on current positions are misleading.  Use only facingScore + expectedFaceScore.
       const score =
-        facingScore * 0.42 +
-        approachScore * 0.24 +
-        distanceScore * 0.20 +
-        expectedFaceScore * 0.10 +
-        Math.min((sourceCandidate.areaHint + targetCandidate.areaHint) / 200, 0.04);
+        intent === 'insert'
+          ? facingScore * 0.55 + expectedFaceScore * 0.45
+          : facingScore * 0.42 +
+            approachScore * 0.24 +
+            distanceScore * 0.20 +
+            expectedFaceScore * 0.10 +
+            Math.min((sourceCandidate.areaHint + targetCandidate.areaHint) / 200, 0.04);
 
       ranking.push({
         sourceFace: sourceCandidate.face,
@@ -811,17 +835,21 @@ function buildMateCaptureImages(params: {
   maxHeightPx: number;
   format: 'png' | 'jpeg';
   jpegQuality?: number;
+  /** Override the source BBox used for camera framing (e.g. combined group box). */
+  sourceBoxOverride?: THREE.Box3;
+  /** Override the target BBox used for camera framing (e.g. combined group box). */
+  targetBoxOverride?: THREE.Box3;
 }) {
   const { camera: baseCamera } = getRendererOrThrow();
-  const sourceBox = new THREE.Box3().setFromObject(params.sourceObject);
-  const targetBox = new THREE.Box3().setFromObject(params.targetObject);
+  const sourceBox = params.sourceBoxOverride ?? new THREE.Box3().setFromObject(params.sourceObject);
+  const targetBox = params.targetBoxOverride ?? new THREE.Box3().setFromObject(params.targetObject);
   const pairBox = sourceBox.clone().union(targetBox);
 
-  const sourceCenter = getWorldCenterFromObject(params.sourceObject);
-  const targetCenter = getWorldCenterFromObject(params.targetObject);
+  const sourceCenter = sourceBox.isEmpty() ? getWorldCenterFromObject(params.sourceObject) : sourceBox.getCenter(new THREE.Vector3());
+  const targetCenter = targetBox.isEmpty() ? getWorldCenterFromObject(params.targetObject) : targetBox.getCenter(new THREE.Vector3());
   const pairCenter = sourceCenter.clone().add(targetCenter).multiplyScalar(0.5);
-  const sourceIntrinsicSize = getIntrinsicSizeFromObject(params.sourceObject);
-  const targetIntrinsicSize = getIntrinsicSizeFromObject(params.targetObject);
+  const sourceIntrinsicSize = sourceBox.isEmpty() ? getIntrinsicSizeFromObject(params.sourceObject) : sourceBox.getSize(new THREE.Vector3());
+  const targetIntrinsicSize = targetBox.isEmpty() ? getIntrinsicSizeFromObject(params.targetObject) : targetBox.getSize(new THREE.Vector3());
   const pairIntrinsicSize = sourceIntrinsicSize.clone().max(targetIntrinsicSize);
   // Use world-space bounding box size for camera distance (pairBox is already in world space).
   // Using root-local intrinsicSize caused wrong distances when objects had non-unit scale.
@@ -1009,7 +1037,29 @@ function resolvePart(part: PartRef): ResolvedPart {
     throw new ToolExecutionError({ code: 'NOT_FOUND', message: 'partName is required when partId is missing' });
   }
 
-  const query = part.partName.trim().toLowerCase();
+  // Support "group_name/part_name" path notation
+  if (part.partName.includes('/')) {
+    const slashIdx = part.partName.indexOf('/');
+    const groupSegment = part.partName.slice(0, slashIdx).trim().toLowerCase();
+    const partSegment = part.partName.slice(slashIdx + 1).trim().toLowerCase();
+    const matchedGroup = Object.values(store.assemblyGroups.byId).find(
+      (g) => g.name.trim().toLowerCase() === groupSegment
+    );
+    if (matchedGroup) {
+      const matchedPartId = matchedGroup.partIds.find(
+        (id) => (byId[id]?.name ?? '').trim().toLowerCase() === partSegment
+      );
+      if (matchedPartId) {
+        const found = byId[matchedPartId];
+        return { partId: found.id, partName: found.name, confidence: 1, autoCorrected: false };
+      }
+    }
+    // Fall through to normal resolution using just the part segment if group not found
+  }
+
+  const query = part.partName.includes('/')
+    ? part.partName.slice(part.partName.indexOf('/') + 1).trim().toLowerCase()
+    : part.partName.trim().toLowerCase();
   const exact = order.filter((id) => byId[id]?.name.toLowerCase() === query);
   if (exact.length === 1) {
     const found = byId[exact[0]];
@@ -1801,15 +1851,49 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const sourceObject = getObjectByPartIdOrThrow(source.partId);
     const targetObject = getObjectByPartIdOrThrow(target.partId);
 
-    const sourceBoxWorld = worldBoundingBoxFromObject(sourceObject);
-    const targetBoxWorld = worldBoundingBoxFromObject(targetObject);
+    // Use combined group bounding box when the part is a group representative,
+    // so that face-pair inference uses the full group geometry, not just one part.
+    const suggestStore = currentStore();
+    const srcGrpId = suggestStore.getGroupForPart(source.partId);
+    const tgtGrpId = suggestStore.getGroupForPart(target.partId);
+    const buildGroupBox = (partIds: string[]) => {
+      const box = new THREE.Box3();
+      for (const pid of partIds) {
+        const obj = getV2ObjectByPartId(pid);
+        if (obj) { const b = new THREE.Box3().setFromObject(obj); if (!b.isEmpty()) box.union(b); }
+      }
+      return box;
+    };
+    const srcBox = srcGrpId
+      ? buildGroupBox(suggestStore.getGroupParts(srcGrpId))
+      : new THREE.Box3().setFromObject(sourceObject);
+    const tgtBox = tgtGrpId
+      ? buildGroupBox(suggestStore.getGroupParts(tgtGrpId))
+      : new THREE.Box3().setFromObject(targetObject);
+
+    const sourceBoxWorld = srcBox.isEmpty() ? worldBoundingBoxFromObject(sourceObject) : {
+      min: tuple3(srcBox.min), max: tuple3(srcBox.max),
+      size: tuple3(srcBox.getSize(new THREE.Vector3())),
+      center: tuple3(srcBox.getCenter(new THREE.Vector3())), space: 'world' as const,
+    };
+    const targetBoxWorld = tgtBox.isEmpty() ? worldBoundingBoxFromObject(targetObject) : {
+      min: tuple3(tgtBox.min), max: tuple3(tgtBox.max),
+      size: tuple3(tgtBox.getSize(new THREE.Vector3())),
+      center: tuple3(tgtBox.getCenter(new THREE.Vector3())), space: 'world' as const,
+    };
 
     const sourceCenter = vec3(sourceBoxWorld.center);
     const targetCenter = vec3(targetBoxWorld.center);
-    const expectedFromCenters = getExpectedFacePairFromCenters(sourceCenter, targetCenter);
 
     const geometryIntent = inferIntentFromGeometry(sourceObject, targetObject);
     const intentKind = geometryIntent ?? 'default';
+
+    // For insert, canonical expected pair is bottom→top (cavity opening is local +Y of target).
+    // For other intents, use center-to-center direction.
+    const expectedFromCenters: { sourceFace: StoreFaceId; targetFace: StoreFaceId } =
+      intentKind === 'insert'
+        ? { sourceFace: 'bottom', targetFace: 'top' }
+        : getExpectedFacePairFromCenters(sourceCenter, targetCenter);
     const suggestedMode = defaultModeForIntent(intentKind);
 
     const instructionMethod = null;
@@ -1847,6 +1931,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       preferredSourceFace,
       preferredTargetFace,
       limit: Number.isFinite(maxPairs) ? Math.max(1, Math.min(36, Math.floor(maxPairs))) : 12,
+      intent: intentKind,
     });
 
     return ok(
@@ -1915,23 +2000,75 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
 
     const sourceObject = getObjectByPartIdOrThrow(source.partId);
     const targetObject = getObjectByPartIdOrThrow(target.partId);
+
+    // Detect rotation mismatch: if source and target have different world orientations,
+    // face normals won't align via translation alone → mode='both' is required.
+    const sourceWorldQuat = sourceObject.getWorldQuaternion(new THREE.Quaternion());
+    const targetWorldQuat = targetObject.getWorldQuaternion(new THREE.Quaternion());
+    const quatDot = Math.abs(sourceWorldQuat.dot(targetWorldQuat));
+    const rotationMismatchDeg = Math.acos(Math.min(1, quatDot)) * 2 * (180 / Math.PI);
+    const hasRotationMismatch = rotationMismatchDeg > 5;
+
     const viewStore = currentStore();
     const prevAnchorsVisible = Boolean(viewStore.view.showAnchors);
     if (!prevAnchorsVisible) viewStore.setAnchorsVisible(true);
+
+    // Determine if source/target are representative parts of assembly groups.
+    // When they are, keep ALL group members visible and compute combined BBoxes
+    // so the capture frames the entire group, not just the representative part.
+    const sourceGroupId = viewStore.getGroupForPart(source.partId);
+    const targetGroupId = viewStore.getGroupForPart(target.partId);
+    const sourceGroupPartIds = sourceGroupId ? viewStore.getGroupParts(sourceGroupId) : [source.partId];
+    const targetGroupPartIds = targetGroupId ? viewStore.getGroupParts(targetGroupId) : [target.partId];
+    const visibleIds = new Set([...sourceGroupPartIds, ...targetGroupPartIds]);
+
+    const sourceLabel = sourceGroupId
+      ? (viewStore.assemblyGroups.byId[sourceGroupId]?.name ?? source.partName)
+      : source.partName;
+    const targetLabel = targetGroupId
+      ? (viewStore.assemblyGroups.byId[targetGroupId]?.name ?? target.partName)
+      : target.partName;
+
+    // Compute combined world BBox for each group (union of all member boxes)
+    const computeGroupBox = (partIds: string[]): THREE.Box3 => {
+      const box = new THREE.Box3();
+      for (const pid of partIds) {
+        const obj = getV2ObjectByPartId(pid);
+        if (obj) {
+          const mBox = new THREE.Box3().setFromObject(obj);
+          if (!mBox.isEmpty()) box.union(mBox);
+        }
+      }
+      return box;
+    };
+    const sourceBoxOverride = sourceGroupPartIds.length > 1 ? computeGroupBox(sourceGroupPartIds) : undefined;
+    const targetBoxOverride = targetGroupPartIds.length > 1 ? computeGroupBox(targetGroupPartIds) : undefined;
+
+    // Hide all parts that are not part of either group
+    const otherPartIds = viewStore.parts.order.filter(id => !visibleIds.has(id));
+    const otherObjects = otherPartIds
+      .map(id => getV2ObjectByPartId(id))
+      .filter((o): o is THREE.Object3D => o !== null);
+    const prevVisibilities = otherObjects.map(o => o.visible);
+    otherObjects.forEach(o => { o.visible = false; });
+
     let capture: ReturnType<typeof buildMateCaptureImages>;
     try {
       capture = buildMateCaptureImages({
         sourceObject,
         targetObject,
-        sourceLabel: source.partName,
-        targetLabel: target.partName,
+        sourceLabel,
+        targetLabel,
         maxViews: clampInt(Number(input.maxViews ?? 4), 2, 12),
         maxWidthPx: clampInt(Number(input.maxWidthPx ?? 640), 64, 2048),
         maxHeightPx: clampInt(Number(input.maxHeightPx ?? 480), 64, 2048),
         format: String(input.format || 'jpeg').toLowerCase() === 'png' ? 'png' : 'jpeg',
         jpegQuality: Number.isFinite(Number(input.jpegQuality)) ? Number(input.jpegQuality) : 0.9,
+        sourceBoxOverride,
+        targetBoxOverride,
       });
     } finally {
+      otherObjects.forEach((o, i) => { o.visible = prevVisibilities[i]; });
       if (!prevAnchorsVisible) viewStore.setAnchorsVisible(prevAnchorsVisible);
     }
     const overlayImages = capture.images.map((image, index) => ({
@@ -1953,9 +2090,10 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       ? (suggestionData.intent as MateIntentKind)
       : 'default') as MateIntentKind;
     const geometryMode = (preferredMode ||
-      (['translate', 'twist', 'both'].includes(String(suggestionData?.suggestedMode))
-        ? (suggestionData.suggestedMode as MateExecMode)
-        : defaultModeForIntent(geometryIntent))) as MateExecMode;
+      (hasRotationMismatch ? 'both' :
+        (['translate', 'twist', 'both'].includes(String(suggestionData?.suggestedMode))
+          ? (suggestionData.suggestedMode as MateExecMode)
+          : defaultModeForIntent(geometryIntent)))) as MateExecMode;
     const expectedFromCenters = suggestionData?.expectedFromCenters || {
       sourceFace: 'bottom',
       targetFace: 'top',
@@ -2145,6 +2283,10 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         pairSize: capture.pairSize,
         pairIntrinsicSize: capture.pairIntrinsicSize,
         pairDistance: capture.pairDistance,
+        sourceQuaternion: [sourceWorldQuat.x, sourceWorldQuat.y, sourceWorldQuat.z, sourceWorldQuat.w] as [number,number,number,number],
+        targetQuaternion: [targetWorldQuat.x, targetWorldQuat.y, targetWorldQuat.z, targetWorldQuat.w] as [number,number,number,number],
+        rotationMismatchDeg: Number(rotationMismatchDeg.toFixed(2)),
+        hasRotationMismatch,
       },
       captureFrame: capture.captureFrame,
       captureViews: capture.images.map((img) => ({
@@ -2321,16 +2463,22 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       ? `${vlmCandidate.sourceFace}:${vlmCandidate.targetFace}`
       : null;
     const vlmFaceSupported = !vlmFacePair || topPairs.includes(vlmFacePair);
-    let effectiveVlmConfidence = vlmCandidate?.confidence;
-    if (effectiveVlmConfidence !== undefined && viewConsensus !== undefined) {
-      const consensusFactor = viewConsensus >= 0.55 ? 1 : 0.7 + viewConsensus * 0.55;
-      effectiveVlmConfidence = Math.max(0, Math.min(1, effectiveVlmConfidence * consensusFactor));
+    // Derive effective confidence from view vote consensus/agreement rather than raw model
+    // confidence. Local VLM models (e.g. ollama/qwen) often output a fixed confidence
+    // (~0.74) regardless of actual certainty. View consensus — how much views AGREE on
+    // the same candidate — is a more reliable signal than the raw number.
+    let effectiveVlmConfidence: number | undefined;
+    if (viewConsensus !== undefined && viewAgreement !== undefined) {
+      effectiveVlmConfidence = viewConsensus * 0.65 + viewAgreement * 0.35;
+    } else if (viewConsensus !== undefined) {
+      effectiveVlmConfidence = viewConsensus;
+    } else {
+      effectiveVlmConfidence = vlmCandidate?.confidence;
     }
     const useVlm = Boolean(vlmCandidate && !vlmAbstain && (effectiveVlmConfidence ?? 0) >= 0.62);
 
     const faceThreshold = vlmFaceSupported ? 0.62 : 0.84;
     const methodThreshold = 0.7;
-    const modeThreshold = 0.68;
     const intentThreshold = 0.62;
 
     let finalIntent =
@@ -2339,11 +2487,13 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         : useVlm && (effectiveVlmConfidence ?? 0) >= intentThreshold && vlmCandidate?.intent
         ? vlmCandidate.intent
         : geometryIntent;
-    let finalMode =
-      preferredMode ||
-      (useVlm && (effectiveVlmConfidence ?? 0) >= modeThreshold && vlmCandidate?.mode
-        ? vlmCandidate.mode
-        : geometryMode);
+    // Mode is determined by geometry + rotation mismatch ONLY — VLM is excluded from
+    // mode decisions because local models tend to conservatively pick 'both' for simple
+    // flat cover/translate mates.  Geometry analysis is more reliable here:
+    //   insert intent  → 'both'   (rotation correction likely needed)
+    //   cover/default  → 'translate' (pure stacking, no rotation)
+    //   rotation mismatch detected → 'both' (forced by quaternion analysis)
+    let finalMode = preferredMode || (hasRotationMismatch ? 'both' : geometryMode);
     let finalSourceFace =
       preferredSourceFace ||
       (useVlm && (effectiveVlmConfidence ?? 0) >= faceThreshold && vlmCandidate?.sourceFace
@@ -2444,6 +2594,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     if (viewConsensus !== undefined) notes.push(`vlm.viewConsensus=${viewConsensus.toFixed(2)}`);
     if (viewAgreement !== undefined) notes.push(`vlm.viewAgreement=${viewAgreement.toFixed(2)}`);
     if (vlmError) notes.push(`vlm.error=${vlmError}`);
+    if (hasRotationMismatch) notes.push(`rotation_mismatch=${rotationMismatchDeg.toFixed(1)}deg`);
     if (useVlm && !vlmFaceSupported) notes.push('vlm.face_pair_not_in_geometry_top6');
     if (selectedCandidate) notes.push(`vlm.candidate=${selectedCandidate.candidateKey}`);
     if (arbitration.length) notes.push(`arbitration=${arbitration.join('|')}`);
@@ -2455,6 +2606,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         geometry: {
           intent: geometryIntent,
           suggestedMode: geometryMode,
+          hasRotationMismatch,
+          rotationMismatchDeg: Number(rotationMismatchDeg.toFixed(2)),
           expectedFromCenters: {
             sourceFace: geometrySourceFace,
             targetFace: geometryTargetFace,
@@ -2796,6 +2949,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const store = currentStore();
     const hadOverride = Boolean(store.parts.overridesById[part.partId]);
     store.clearPartOverride(part.partId);
+    // Also remove the part from any assembly group
+    store.removePartFromGroup(part.partId);
     clearPreviewState(part.partId);
     const transform = store.getPartTransform(part.partId);
     return ok(
@@ -2811,10 +2966,48 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
   if (tool === 'action.reset_all') {
     const store = currentStore();
     const resetCount = Object.keys(store.parts.overridesById || {}).length;
+    const groupCount = Object.keys(store.assemblyGroups?.byId || {}).length;
     store.clearAllPartOverrides();
+    // Also dissolve all assembly groups so parts return to independent state
+    if (groupCount > 0) {
+      store.dispatch('reset_all_groups', () => ({
+        assemblyGroups: { byId: {}, order: [] },
+      }));
+    }
     clearPreviewState();
     runtimeState.previewBeforeTransformByPartId.clear();
-    return ok({ resetCount }, { mutating: resetCount > 0 });
+    return ok({ resetCount, groupsCleared: groupCount }, { mutating: resetCount > 0 || groupCount > 0 });
+  }
+
+  if (tool === 'action.reset_part_transform') {
+    const input = args as any;
+    const part = resolvePart(input.part);
+    const mode = String(input.mode || 'initial') as 'initial' | 'manual';
+    const store = currentStore();
+    if (mode === 'manual') {
+      const manualTransform = store.parts.manualTransformById[part.partId];
+      if (!manualTransform) {
+        return ok(
+          { part, reset: false, mode, reason: 'no_manual_transform_recorded' },
+          { mutating: false }
+        );
+      }
+      store.resetPartToManual(part.partId);
+      const transform = store.getPartTransform(part.partId);
+      return ok(
+        { part, reset: true, mode, transform: transform ? { ...transform, space: 'world' as const } : undefined },
+        { mutating: true }
+      );
+    } else {
+      const hadOverride = Boolean(store.parts.overridesById[part.partId]);
+      store.resetPartToInitial(part.partId);
+      clearPreviewState(part.partId);
+      const transform = store.getPartTransform(part.partId);
+      return ok(
+        { part, reset: hadOverride, mode, transform: transform ? { ...transform, space: 'world' as const } : undefined },
+        { mutating: hadOverride }
+      );
+    }
   }
 
   if (tool === 'action.translate') {
@@ -2999,6 +3192,21 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         const targetOffset = parseOffsetTuple(input.targetOffset);
 
         if (sourceObj && targetObj && sourceFaceId && targetFaceId) {
+          // Sync positions from store to avoid stale React async state
+          const curStore = currentStore();
+          const srcT =
+            curStore.parts.overridesById[sourcePartId] || curStore.parts.initialTransformById[sourcePartId];
+          if (srcT) {
+            sourceObj.position.set(srcT.position[0], srcT.position[1], srcT.position[2]);
+            sourceObj.quaternion.set(srcT.quaternion[0], srcT.quaternion[1], srcT.quaternion[2], srcT.quaternion[3]);
+          }
+          const tgtPartId = target.part.partId;
+          const tgtT =
+            curStore.parts.overridesById[tgtPartId] || curStore.parts.initialTransformById[tgtPartId];
+          if (tgtT) {
+            targetObj.position.set(tgtT.position[0], tgtT.position[1], tgtT.position[2]);
+            targetObj.quaternion.set(tgtT.quaternion[0], tgtT.quaternion[1], tgtT.quaternion[2], tgtT.quaternion[3]);
+          }
           sourceObj.updateWorldMatrix(true, false);
           targetObj.updateWorldMatrix(true, false);
 
@@ -3155,13 +3363,30 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       const applyTwist = operation === 'both' || operation === 'twist' || Math.abs(Number(twistInput.angleDeg || 0)) > 1e-6;
 
       const sourceObj = getV2ObjectByPartId(sourcePartId);
-      const sourceWorldPos = sourceObj ? new THREE.Vector3() : null;
-      const sourceWorldQuat = sourceObj ? new THREE.Quaternion() : null;
-      if (sourceObj && sourceWorldPos && sourceWorldQuat) {
+      const targetObj = target ? getV2ObjectByPartId(target.part.partId) : null;
+
+      // Sync positions from store to avoid stale React async state
+      if (sourceObj && targetObj) {
+        const curStore = currentStore();
+        const srcT = curStore.parts.overridesById[sourcePartId] || curStore.parts.initialTransformById[sourcePartId];
+        if (srcT) {
+          sourceObj.position.set(srcT.position[0], srcT.position[1], srcT.position[2]);
+          sourceObj.quaternion.set(srcT.quaternion[0], srcT.quaternion[1], srcT.quaternion[2], srcT.quaternion[3]);
+        }
+        const tgtPartId = target!.part.partId;
+        const tgtT = curStore.parts.overridesById[tgtPartId] || curStore.parts.initialTransformById[tgtPartId];
+        if (tgtT) {
+          targetObj.position.set(tgtT.position[0], tgtT.position[1], tgtT.position[2]);
+          targetObj.quaternion.set(tgtT.quaternion[0], tgtT.quaternion[1], tgtT.quaternion[2], tgtT.quaternion[3]);
+        }
         sourceObj.updateWorldMatrix(true, false);
-        sourceObj.getWorldPosition(sourceWorldPos);
-        sourceObj.getWorldQuaternion(sourceWorldQuat);
+        targetObj.updateWorldMatrix(true, false);
+      } else if (sourceObj) {
+        sourceObj.updateWorldMatrix(true, false);
       }
+
+      const sourceWorldPos = sourceObj ? sourceObj.getWorldPosition(new THREE.Vector3()) : null;
+      const sourceWorldQuat = sourceObj ? sourceObj.getWorldQuaternion(new THREE.Quaternion()) : null;
 
       const sourceWorldTransform: PartTransform =
         sourceObj && sourceWorldPos && sourceWorldQuat
@@ -3172,26 +3397,94 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             }
           : sourceTransform;
 
-      const solved = computeMateAlignedEndTransform({
-        sourceTransform: sourceWorldTransform,
-        sourceFrame,
-        targetFrame,
-        offset: Number(input.offset ?? 0),
-        clearance: Number(input.clearance ?? 0),
-        flip: Boolean(input.flip),
-        applyTwist,
-        twistAngleDeg: Number(twistInput.angleDeg || 0),
-        twistAxis: twistInput.axis,
-        twistAxisSpace: twistInput.axisSpace,
-      });
-      const endWorldTransform: PartTransform = {
-        position: [...solved.endTransform.position],
-        quaternion: [...solved.endTransform.quaternion],
-        scale: [...sourceTransform.scale],
-      };
+      // Build TwistSpec: undefined = auto tangent alignment via computeTwistFromTangents
+      // explicit angleDeg > 0 = manual override
+      const twistAngleDeg = Math.abs(Number(twistInput.angleDeg || 0));
+      const twistSpec = twistAngleDeg > 1e-6
+        ? {
+            angleDeg: Number(twistInput.angleDeg),
+            axis: (twistInput.axis || 'normal') as 'x' | 'y' | 'z' | 'normal' | 'tangent' | 'bitangent',
+            axisSpace: (twistInput.axisSpace || 'target_face') as 'world' | 'source_face' | 'target_face',
+          }
+        : undefined;
 
-      if (operation === 'twist') {
-        endWorldTransform.position = [...sourceWorldTransform.position];
+      // Try robust solveMateTopBottom path first (uses setFromUnitVectors + computeTwistFromTangents)
+      const sourceFaceId = source.kind === 'face' && STORE_FACES.includes(source.face as any) ? (source.face as StoreFaceId) : null;
+      const targetFaceId = target && target.kind === 'face' && STORE_FACES.includes(target.face as any) ? (target.face as StoreFaceId) : null;
+      const sourceMethod = source.kind === 'face'
+        ? normalizeAnchorMethod(source.methodRequested ?? source.methodUsed, 'planar_cluster')
+        : 'planar_cluster';
+      const targetMethod = target && target.kind === 'face'
+        ? normalizeAnchorMethod(target.methodRequested ?? target.methodUsed, 'planar_cluster')
+        : 'planar_cluster';
+      const sourceOffsetTuple = parseOffsetTuple(input.sourceOffset);
+      const targetOffsetTuple = parseOffsetTuple(input.targetOffset);
+      const solverMode = operation === 'twist' ? 'twist' : 'both';
+
+      let endWorldTransform: PartTransform | null = null;
+      let endTransformPrecomputed = false;
+
+      if (sourceObj && targetObj && sourceFaceId && targetFaceId && sourceWorldPos && sourceWorldQuat) {
+        const solvedBoth = solveMateTopBottom(
+          sourceObj, targetObj,
+          sourceFaceId, targetFaceId,
+          solverMode, twistSpec,
+          sourceMethod, targetMethod,
+          undefined, undefined,
+          sourceOffsetTuple, targetOffsetTuple
+        );
+        if (solvedBoth) {
+          // Simulate applyMateTransform exactly as MateExecutor does, then read back local state
+          const savedPos = sourceObj.position.clone();
+          const savedQuat = sourceObj.quaternion.clone();
+
+          applyMateTransform(sourceObj, solvedBoth);
+          sourceObj.updateMatrixWorld(true);
+
+          const newWorldPosAnim = sourceObj.getWorldPosition(new THREE.Vector3());
+          const newWorldQuatAnim = sourceObj.getWorldQuaternion(new THREE.Quaternion());
+
+          endWorldTransform = {
+            position: operation === 'twist' ? [...sourceWorldTransform.position] : tuple3(newWorldPosAnim),
+            quaternion: tuple4(newWorldQuatAnim),
+            scale: [...sourceTransform.scale],
+          };
+          endTransform = {
+            position: operation === 'twist' ? [...sourceTransform.position] : tuple3(sourceObj.position),
+            quaternion: tuple4(sourceObj.quaternion),
+            scale: [...sourceTransform.scale],
+          };
+          endTransformPrecomputed = true;
+
+          // Restore
+          sourceObj.position.copy(savedPos);
+          sourceObj.quaternion.copy(savedQuat);
+          sourceObj.updateMatrixWorld(true);
+
+          debugNotes.push('Alignment solved by solveMateTopBottom (applyMateTransform simulation, mode=' + solverMode + ')');
+        }
+      }
+
+      if (!endWorldTransform) {
+        // Fallback: frame-based solver
+        const solved = computeMateAlignedEndTransform({
+          sourceTransform: sourceWorldTransform,
+          sourceFrame,
+          targetFrame,
+          offset: Number(input.offset ?? 0),
+          clearance: Number(input.clearance ?? 0),
+          flip: Boolean(input.flip),
+          applyTwist,
+          twistAngleDeg: Number(twistInput.angleDeg || 0),
+          twistAxis: twistInput.axis,
+          twistAxisSpace: twistInput.axisSpace,
+        });
+        endWorldTransform = {
+          position: operation === 'twist' ? [...sourceWorldTransform.position] : [...solved.endTransform.position],
+          quaternion: [...solved.endTransform.quaternion],
+          scale: [...sourceTransform.scale],
+        };
+        debugNotes.push('Alignment solved from source/target feature frames (fallback)');
       }
 
       pathType =
@@ -3203,15 +3496,15 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             : 'arc'
           : 'line';
 
-      debugNotes.push('Alignment solved from source/target feature frames');
       if (operation === 'twist') debugNotes.push('Twist mode keeps part position fixed');
 
       const durationMs = Number(input.durationMs ?? 900);
       const sampleCount = Number(input.sampleCount ?? 60);
       const arcHeight = Number(input.arc?.height ?? 0);
+      const resolvedEndWorldTransform = endWorldTransform!;
       const stepsWorld = samplePath({
         start: sourceWorldTransform,
-        end: endWorldTransform,
+        end: resolvedEndWorldTransform,
         durationMs,
         sampleCount,
         pathType: pathType === 'screw' ? 'line' : pathType,
@@ -3235,13 +3528,15 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           : stepsWorld;
 
       // Keep endTransform consistent with store-local space for downstream tooling/debug.
-      endTransform =
-        sourceObj && sourceWorldPos && sourceWorldQuat
-          ? {
-              ...sourceTransform,
-              ...worldPoseToLocalPose(sourceObj, vec3(endWorldTransform.position), quat4(endWorldTransform.quaternion).normalize()),
-            }
-          : endWorldTransform;
+      if (!endTransformPrecomputed) {
+        endTransform =
+          sourceObj && sourceWorldPos && sourceWorldQuat
+            ? {
+                ...sourceTransform,
+                ...worldPoseToLocalPose(sourceObj, vec3(resolvedEndWorldTransform.position), quat4(resolvedEndWorldTransform.quaternion).normalize()),
+              }
+            : resolvedEndWorldTransform;
+      }
 
       const planId = crypto.randomUUID();
       const plan = {
@@ -3265,10 +3560,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         debug: {
           sourceFrame,
           targetFrame,
-          rotationAxisWorld: solved.debug.rotationQuat,
-          twistAxisWorld: solved.debug.twistAxisWorld,
-          twistAngleDeg: solved.debug.twistAngleDeg,
-          translationWorld: solved.debug.translationWorld,
+          translationWorld: tuple3(vec3(resolvedEndWorldTransform.position).sub(vec3(sourceWorldTransform.position))),
           pathType,
           notes: debugNotes,
         },
@@ -3346,6 +3638,56 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             constraint: 'free',
           });
 
+    // When a sourceGroupId is provided, compute a sourceOffset that shifts the
+    // anchor from part1-only to the combined AABB of the whole group.
+    let computedSourceOffset: [number, number, number] | undefined = input.sourceOffset;
+    if (input.sourceGroupId) {
+      const grpStore = currentStore();
+      const allMemberIds = grpStore.getGroupParts(input.sourceGroupId as string);
+      const sceneRef = getV2Scene();
+      if (sceneRef && allMemberIds.length > 1) {
+        const sourceObjRef = sceneRef.getObjectByProperty('uuid', source.partId) ?? null;
+        if (sourceObjRef) {
+          sourceObjRef.updateWorldMatrix(true, true);
+          const combinedBox = new THREE.Box3();
+          for (const mId of allMemberIds) {
+            const mObj = sceneRef.getObjectByProperty('uuid', mId);
+            if (mObj) {
+              mObj.updateWorldMatrix(true, true);
+              const mBox = new THREE.Box3().setFromObject(mObj);
+              if (!mBox.isEmpty()) combinedBox.union(mBox);
+            }
+          }
+          const part1Box = new THREE.Box3().setFromObject(sourceObjRef);
+          if (!combinedBox.isEmpty() && !part1Box.isEmpty()) {
+            const faceId: string = input.sourceFace ?? 'bottom';
+            const getAabbFaceCenter = (box: THREE.Box3, fId: string): THREE.Vector3 => {
+              const c = box.getCenter(new THREE.Vector3());
+              switch (fId) {
+                case 'top':    return new THREE.Vector3(c.x, box.max.y, c.z);
+                case 'bottom': return new THREE.Vector3(c.x, box.min.y, c.z);
+                case 'left':   return new THREE.Vector3(box.min.x, c.y, c.z);
+                case 'right':  return new THREE.Vector3(box.max.x, c.y, c.z);
+                case 'front':  return new THREE.Vector3(c.x, c.y, box.max.z);
+                case 'back':   return new THREE.Vector3(c.x, c.y, box.min.z);
+                default:       return c;
+              }
+            };
+            const part1AnchorWorld = getAabbFaceCenter(part1Box, faceId);
+            const groupAnchorWorld = getAabbFaceCenter(combinedBox, faceId);
+            const worldDelta = groupAnchorWorld.clone().sub(part1AnchorWorld);
+            if (worldDelta.lengthSq() > 1e-10) {
+              const mat3 = new THREE.Matrix3().setFromMatrix4(sourceObjRef.matrixWorld);
+              const localDelta = worldDelta.clone().applyMatrix3(mat3.clone().invert());
+              const existing = input.sourceOffset ? new THREE.Vector3(...(input.sourceOffset as [number,number,number])) : new THREE.Vector3();
+              const final = existing.add(localDelta);
+              computedSourceOffset = [final.x, final.y, final.z];
+            }
+          }
+        }
+      }
+    }
+
     const generated = await runTool('action.generate_transform_plan' as MCPToolName, {
       operation,
       source: {
@@ -3360,7 +3702,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         face: input.targetFace ?? 'top',
         method: normalizeAnchorMethod(input.targetMethod, 'planar_cluster'),
       },
-      sourceOffset: input.sourceOffset,
+      sourceOffset: computedSourceOffset,
       targetOffset: input.targetOffset,
       mateMode,
       pathPreference,
@@ -3399,6 +3741,10 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       );
     }
 
+    // Capture before-mate transform of source part (for group delta propagation)
+    const sourceBeforeTransform = runtimeState.previewBeforeTransformByPartId.get(source.partId)
+      ?? getPartTransformOrThrow(source.partId);
+
     const committed = await runTool('action.commit_preview' as MCPToolName, {
       previewId: preview.previewId,
       pushHistory: input.pushHistory !== false,
@@ -3406,6 +3752,61 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         input.stepLabel ?? `Mate ${source.partName} to ${target.partName}`,
     } as any);
     const commitData = unwrapToolData(committed, 'PREVIEW_NOT_FOUND');
+
+    // Propagate rigid body delta to other group members if sourceGroupId specified
+    if (input.sourceGroupId) {
+      const store = currentStore();
+      const afterTransform = getPartTransformOrThrow(source.partId);
+      const beforePos = new THREE.Vector3(...sourceBeforeTransform.position);
+      const afterPos = new THREE.Vector3(...afterTransform.position);
+      const beforeQuat = new THREE.Quaternion(...sourceBeforeTransform.quaternion);
+      const afterQuat = new THREE.Quaternion(...afterTransform.quaternion);
+      const rotDelta = afterQuat.clone().multiply(beforeQuat.clone().invert());
+
+      const memberIds = store.getGroupParts(input.sourceGroupId).filter((id: string) => id !== source.partId);
+      for (const memberId of memberIds) {
+        const memberTransform = store.getPartTransform(memberId);
+        if (!memberTransform) continue;
+        const memberPos = new THREE.Vector3(...memberTransform.position);
+        const memberQuat = new THREE.Quaternion(...memberTransform.quaternion);
+        const relPos = memberPos.clone().sub(beforePos);
+        relPos.applyQuaternion(rotDelta);
+        const newPos = afterPos.clone().add(relPos);
+        const newQuat = rotDelta.clone().multiply(memberQuat);
+        // Physically move the Three.js object (store.setPartOverride only updates records, not the scene)
+        const memberObj = getV2Scene()?.getObjectByProperty('uuid', memberId);
+        if (memberObj) {
+          memberObj.position.set(newPos.x, newPos.y, newPos.z);
+          memberObj.quaternion.set(newQuat.x, newQuat.y, newQuat.z, newQuat.w);
+        }
+        store.setPartOverride(memberId, {
+          position: [newPos.x, newPos.y, newPos.z],
+          quaternion: [newQuat.x, newQuat.y, newQuat.z, newQuat.w],
+          scale: memberTransform.scale,
+        });
+        store.setManualTransform(memberId, {
+          position: [newPos.x, newPos.y, newPos.z],
+          quaternion: [newQuat.x, newQuat.y, newQuat.z, newQuat.w],
+          scale: memberTransform.scale,
+        });
+      }
+    }
+
+    // Auto-group source and target after successful mate
+    {
+      const store = currentStore();
+      const srcGroupId = store.getGroupForPart(source.partId);
+      const tgtGroupId = store.getGroupForPart(target.partId);
+      if (srcGroupId && tgtGroupId && srcGroupId !== tgtGroupId) {
+        store.mergeAssemblyGroups(srcGroupId, tgtGroupId);
+      } else if (srcGroupId) {
+        store.addPartToGroup(srcGroupId, target.partId);
+      } else if (tgtGroupId) {
+        store.addPartToGroup(tgtGroupId, source.partId);
+      } else {
+        store.createAssemblyGroup([source.partId, target.partId]);
+      }
+    }
 
     return ok(
       {
@@ -3511,6 +3912,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const executed = await runTool('action.mate_execute' as MCPToolName, {
       sourcePart: { partId: source.partId },
       targetPart: { partId: target.partId },
+      ...(input.sourceGroupId ? { sourceGroupId: input.sourceGroupId } : {}),
+      ...(input.targetGroupId ? { targetGroupId: input.targetGroupId } : {}),
       sourceFace: chosenSourceFace,
       targetFace: chosenTargetFace,
       sourceMethod: chosenSourceMethod,
@@ -3723,6 +4126,35 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     );
   }
 
+  if (tool === 'steps.insert') {
+    const label = String((args as any).label || '').trim();
+    if (!label) {
+      throw new ToolExecutionError({ code: 'INVALID_ARGUMENT', message: 'label is required' });
+    }
+    const afterStepId = (args as any).afterStepId as string | null;
+    const select = (args as any).select !== false;
+
+    const store = currentStore();
+    store.insertStep(afterStepId, label);
+    const list = currentStore().steps.list;
+    // Find the newly inserted step (it's at afterStepId's index + 1, or first if afterStepId is null)
+    const afterIdx = afterStepId ? list.findIndex((s) => s.id === afterStepId) : -1;
+    const step = list[afterIdx + 1];
+    if (!step) {
+      throw new ToolExecutionError({ code: 'INTERNAL_ERROR', message: 'Failed to insert step' });
+    }
+    if (select) currentStore().selectStep(step.id);
+    const stepsState = currentStore().steps;
+
+    return ok(
+      {
+        step: { stepId: step.id, label: step.label },
+        steps: { count: stepsState.list.length, currentStepId: stepsState.currentStepId },
+      },
+      { mutating: true }
+    );
+  }
+
   if (tool === 'steps.select') {
     const store = currentStore();
     const before = store.steps.currentStepId;
@@ -3807,7 +4239,43 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     if (!exists) {
       return ok({ updated: false, stepId }, { mutating: false });
     }
+
+    // 1. Capture current state as new snapshot
     store.updateStepSnapshot(stepId);
+
+    // 2. Reset current visual position to "pre-step" state so next Run shows movement.
+    //    Also reset manualTransformById to the GLOBAL start (before step[0]) so that
+    //    resetToManualTransforms() correctly seeds step 1's "from", not the middle of the sequence.
+    const updatedStore = currentStore();
+    const stepIndex = updatedStore.steps.list.findIndex((s) => s.id === stepId);
+    const updatedStep = updatedStore.steps.list.find((s) => s.id === stepId);
+    const prevStep = stepIndex > 0 ? updatedStore.steps.list[stepIndex - 1] : null;
+    const prevSnapshot = prevStep?.snapshotOverridesById ?? {};
+    const newSnapshot = updatedStep?.snapshotOverridesById ?? {};
+    // baseManualTransforms = manualTransformById captured at addStep time (the true pre-step state)
+    const baseManual = updatedStep?.baseManualTransforms ?? {};
+    // step[0].baseManualTransforms is the "before all steps" baseline for manualTransformById
+    const step0 = updatedStore.steps.list[0];
+    const globalBaseManual = step0?.baseManualTransforms ?? {};
+
+    for (const partId of Object.keys(newSnapshot)) {
+      // Visual reset: part jumps to end-of-previous-step so user sees it ready for this step
+      const preStepTransform =
+        prevSnapshot[partId] ??        // end of previous step (multi-step case)
+        baseManual[partId] ??          // manual position before step was created
+        updatedStore.parts.initialTransformById[partId]; // absolute fallback
+      if (!preStepTransform) continue;
+      updatedStore.setPartOverrideSilent(partId, preStepTransform);
+
+      // Playback baseline: always reset to before-all-steps so step 1's from ≠ step 1's to
+      const globalStartTransform =
+        globalBaseManual[partId] ??
+        updatedStore.parts.initialTransformById[partId];
+      if (globalStartTransform) {
+        updatedStore.setManualTransform(partId, globalStartTransform);
+      }
+    }
+
     return ok({ updated: true, stepId }, { mutating: true });
   }
 
@@ -3817,6 +4285,19 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     if (store.playback.running) return ok({ running: true }, { mutating: false });
     store.startPlayback(durationMs ?? store.playback.durationMs);
     return ok({ running: true }, { mutating: true });
+  }
+
+  if (tool === 'steps.playback_start_at') {
+    const store = currentStore();
+    const stepId = String((args as any).stepId || '');
+    const durationMs = (args as any).durationMs as number | undefined;
+    if (!store.steps.list.some((s) => s.id === stepId)) {
+      return ok({ running: false, targetStepId: stepId }, { mutating: false });
+    }
+    if (store.playback.running) store.stopPlayback();
+    const fromStepId = store.steps.currentStepId ?? undefined;
+    store.startPlaybackAt(stepId, durationMs ?? store.playback.durationMs, fromStepId);
+    return ok({ running: true, targetStepId: stepId }, { mutating: true });
   }
 
   if (tool === 'steps.playback_stop') {
@@ -4098,6 +4579,93 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     );
   }
 
+  if (tool === 'action.auto_assemble') {
+    const input = args as any;
+    const store = currentStore();
+    const allParts = store.parts.order.map((id) => ({
+      id,
+      name: store.parts.byId[id]?.name || id,
+    }));
+    if (allParts.length < 2) {
+      return ok({ totalSteps: 0, completedSteps: 0, steps: [], reason: 'need_at_least_2_parts' }, { mutating: false });
+    }
+
+    // Capture overview image
+    let overviewImages: { name: string; data: string; mime: string }[] = [];
+    try {
+      const captured = await runTool('view.capture_image' as MCPToolName, {
+        format: 'jpeg',
+        jpegQuality: 0.85,
+        maxWidthPx: 640,
+        maxHeightPx: 480,
+      } as any);
+      if (captured.ok && (captured as any).data?.dataUrl) {
+        const dataUrl: string = (captured as any).data.dataUrl;
+        const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        overviewImages = [{ name: 'overview.jpg', data: base64, mime: 'image/jpeg' }];
+      }
+    } catch {
+      // proceed without image
+    }
+
+    // Ask server to infer assembly sequence
+    let steps: Array<{ sourceName: string; targetName: string; instruction: string; stepIndex: number }> = [];
+    try {
+      const res: any = await v2Client.request('vlm_auto_assemble', {
+        images: overviewImages,
+        parts: allParts,
+      });
+      const serverSteps = res?.result?.steps || res?.steps || [];
+      if (Array.isArray(serverSteps)) {
+        steps = serverSteps;
+      }
+    } catch {
+      // Fallback: linear sequence using first part as base
+      const basePart = allParts[0];
+      steps = allParts.slice(1).map((p, i) => ({
+        sourceName: p.name,
+        targetName: i === 0 ? basePart.name : allParts[i].name,
+        instruction: `Mate ${p.name} to ${i === 0 ? basePart.name : allParts[i].name}`,
+        stepIndex: i,
+      }));
+    }
+
+    const maxSteps = typeof input.maxSteps === 'number' ? Math.min(input.maxSteps, 20) : 20;
+    const stepsToRun = steps.slice(0, maxSteps);
+    const completedSteps: typeof stepsToRun = [];
+
+    for (const step of stepsToRun) {
+      try {
+        const sourcePart = resolvePart({ partName: step.sourceName });
+        const targetPart = resolvePart({ partName: step.targetName });
+        await runTool('action.smart_mate_execute' as MCPToolName, {
+          sourcePart: { partId: sourcePart.partId },
+          targetPart: { partId: targetPart.partId },
+          instruction: step.instruction,
+          commit: true,
+          pushHistory: true,
+          stepLabel: step.instruction,
+        } as any);
+        await runTool('steps.add' as MCPToolName, {
+          label: step.instruction,
+          select: true,
+        } as any);
+        completedSteps.push(step);
+      } catch {
+        // skip failed step, continue
+      }
+    }
+
+    return ok(
+      {
+        totalSteps: stepsToRun.length,
+        completedSteps: completedSteps.length,
+        steps: completedSteps,
+      },
+      { mutating: completedSteps.length > 0 }
+    );
+  }
+
   throw new ToolExecutionError({
     code: 'UNSUPPORTED_OPERATION',
     message: `Tool '${tool}' is not implemented in local executor`,
@@ -4126,4 +4694,8 @@ export async function executeMcpToolRequest(request: MCPToolRequest): Promise<To
       warnings: [],
     };
   }
+}
+
+if (import.meta.env.DEV) {
+  (window as any).__executeMcpTool = executeMcpToolRequest;
 }

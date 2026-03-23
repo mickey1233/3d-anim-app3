@@ -35,82 +35,127 @@ function transformEquals(a: { position: [number, number, number]; quaternion: [n
 }
 
 export function StepRunner() {
-  const playback = useV2Store((s) => s.playback);
-  const steps = useV2Store((s) => s.steps.list);
-  const parts = useV2Store((s) => s.parts);
-  const setPartOverrideSilent = useV2Store((s) => s.setPartOverrideSilent);
-  const clearAllPartOverridesSilent = useV2Store((s) => s.clearAllPartOverridesSilent);
-  const setPlaybackIndex = useV2Store((s) => s.setPlaybackIndex);
-  const stopPlayback = useV2Store((s) => s.stopPlayback);
-  const selectStep = useV2Store((s) => s.selectStep);
+  // Subscribe to only the fields that gate the useEffect
+  const playbackRunning = useV2Store((s) => s.playback.running);
+  const playbackOrderLength = useV2Store((s) => s.playback.order.length);
+  const playbackTargetStepId = useV2Store((s) => s.playback.targetStepId);
+  const playbackResetToStepId = useV2Store((s) => s.playback.resetToStepId);
 
   const cacheRef = React.useRef<StepCache | null>(null);
   const runningRef = React.useRef(false);
 
   React.useEffect(() => {
-    if (!playback.running) {
+    if (!playbackRunning) {
       runningRef.current = false;
       cacheRef.current = null;
       return;
     }
-    if (playback.order.length === 0) {
-      stopPlayback();
+    if (playbackOrderLength === 0) {
+      useV2Store.getState().stopPlayback();
       return;
     }
-    clearAllPartOverridesSilent();
+
+    // Always read fresh state inside the effect to avoid mutation-loop and stale closure issues
+    const state = useV2Store.getState();
+    const curParts = state.parts;
+    const curSteps = state.steps.list;
+
+    if (playbackResetToStepId) {
+      // Forward jump: reset to the snapshot of the "from" step
+      const resetStep = curSteps.find((s) => s.id === playbackResetToStepId);
+      curParts.order.forEach((id) => {
+        const t = (resetStep?.snapshotOverridesById?.[id]) ?? curParts.initialTransformById[id];
+        if (t) state.setPartOverrideSilent(id, t);
+      });
+    } else if (playbackTargetStepId) {
+      // Single-step play: reset to the step before target.
+      // If there is no previous step, fall back to the target step's baseManualTransforms
+      // (the user-arranged positions captured at add-step time) so the animation starts
+      // from the user's pre-mate arrangement, not from the original import positions.
+      const targetIndex = curSteps.findIndex((s) => s.id === playbackTargetStepId);
+      const targetStep = curSteps[targetIndex];
+      const prevStep = targetIndex > 0 ? curSteps[targetIndex - 1] : null;
+      curParts.order.forEach((id) => {
+        const t =
+          (prevStep?.snapshotOverridesById?.[id]) ??
+          (targetStep?.baseManualTransforms?.[id]) ??
+          curParts.initialTransformById[id];
+        if (t) state.setPartOverrideSilent(id, t);
+      });
+    } else {
+      // Full playback (RUN button): start from the first step's pre-animation state
+      // (captured in baseManualTransforms at add-step time — the user's arranged positions),
+      // falling back to the original import positions when not available.
+      const firstStep = curSteps[0];
+      curParts.order.forEach((id) => {
+        const t =
+          (firstStep?.baseManualTransforms?.[id]) ??
+          curParts.initialTransformById[id];
+        if (t) state.setPartOverrideSilent(id, t);
+      });
+    }
+
     runningRef.current = true;
     cacheRef.current = null;
-    setPlaybackIndex(0);
-  }, [playback.running, playback.order.length, clearAllPartOverridesSilent, setPlaybackIndex, stopPlayback]);
+    state.setPlaybackIndex(0);
+  }, [playbackRunning, playbackOrderLength, playbackTargetStepId, playbackResetToStepId]);
 
-  const buildStepCache = React.useCallback(
-    (index: number): StepCache | null => {
-      const stepId = playback.order[index];
-      const step = steps.find((s) => s.id === stepId);
-      if (!step) return null;
-      const from: StepCache['from'] = {};
-      const to: StepCache['to'] = {};
-      const partIds: string[] = [];
-      parts.order.forEach((id) => {
-        const initial = parts.initialTransformById[id];
-        if (!initial) return;
-        const current = parts.overridesById[id] || initial;
-        const target = step.snapshotOverridesById?.[id] || initial;
-        if (!transformEquals(current, target)) {
-          from[id] = current;
-          to[id] = target;
-          partIds.push(id);
-        }
-      });
-      selectStep(step.id);
-      return {
-        index,
-        stepId: step.id,
-        startTime: performance.now(),
-        durationMs: playback.durationMs,
-        partIds,
-        from,
-        to,
-      };
-    },
-    [playback.durationMs, playback.order, parts.initialTransformById, parts.order, parts.overridesById, selectStep, steps]
-  );
+  // Build a step cache using fresh store state (avoids stale closure of parts.overridesById)
+  const buildStepCache = React.useCallback((index: number): StepCache | null => {
+    const state = useV2Store.getState();
+    const stepId = state.playback.order[index];
+    const step = state.steps.list.find((s) => s.id === stepId);
+    if (!step) return null;
+
+    const from: StepCache['from'] = {};
+    const to: StepCache['to'] = {};
+    const partIds: string[] = [];
+
+    state.parts.order.forEach((id) => {
+      const initial = state.parts.initialTransformById[id];
+      if (!initial) return;
+      const current = state.parts.overridesById[id] ?? initial;
+      const target = step.snapshotOverridesById?.[id] ?? initial;
+      if (!transformEquals(current, target)) {
+        from[id] = current;
+        to[id] = target;
+        partIds.push(id);
+      }
+    });
+
+    state.selectStep(step.id);
+
+    // Intermediate steps (not the final animated target) play instantly
+    const isInstant = !!state.playback.targetStepId && step.id !== state.playback.targetStepId;
+    return {
+      index,
+      stepId: step.id,
+      startTime: performance.now(),
+      durationMs: isInstant ? 0 : state.playback.durationMs,
+      partIds,
+      from,
+      to,
+    };
+  }, []); // No deps — always reads fresh from store
 
   useFrame(() => {
-    if (!playback.running) return;
+    const state = useV2Store.getState();
+    if (!state.playback.running) return;
     if (!runningRef.current) return;
-    if (!cacheRef.current || cacheRef.current.index !== playback.currentIndex) {
-      const next = buildStepCache(playback.currentIndex);
+
+    if (!cacheRef.current || cacheRef.current.index !== state.playback.currentIndex) {
+      const next = buildStepCache(state.playback.currentIndex);
       if (!next) {
-        stopPlayback();
+        state.stopPlayback();
         return;
       }
       cacheRef.current = next;
     }
+
     const cache = cacheRef.current;
     if (!cache) return;
     const elapsed = performance.now() - cache.startTime;
-    const t = Math.min(1, elapsed / cache.durationMs);
+    const t = cache.durationMs <= 0 ? 1 : Math.min(1, elapsed / cache.durationMs);
     const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 
     const posFrom = new THREE.Vector3();
@@ -121,21 +166,21 @@ export function StepRunner() {
     const scaleTo = new THREE.Vector3();
 
     cache.partIds.forEach((id) => {
-      const from = cache.from[id];
+      const f = cache.from[id];
       const to = cache.to[id];
-      if (!from || !to) return;
-      posFrom.fromArray(from.position);
+      if (!f || !to) return;
+      posFrom.fromArray(f.position);
       posTo.fromArray(to.position);
-      quatFrom.set(from.quaternion[0], from.quaternion[1], from.quaternion[2], from.quaternion[3]);
+      quatFrom.set(f.quaternion[0], f.quaternion[1], f.quaternion[2], f.quaternion[3]);
       quatTo.set(to.quaternion[0], to.quaternion[1], to.quaternion[2], to.quaternion[3]);
-      scaleFrom.fromArray(from.scale);
+      scaleFrom.fromArray(f.scale);
       scaleTo.fromArray(to.scale);
 
       posFrom.lerp(posTo, ease);
       quatFrom.slerp(quatTo, ease);
       scaleFrom.lerp(scaleTo, ease);
 
-      setPartOverrideSilent(id, {
+      state.setPartOverrideSilent(id, {
         position: [posFrom.x, posFrom.y, posFrom.z],
         quaternion: [quatFrom.x, quatFrom.y, quatFrom.z, quatFrom.w],
         scale: [scaleFrom.x, scaleFrom.y, scaleFrom.z],
@@ -144,11 +189,11 @@ export function StepRunner() {
 
     if (t >= 1) {
       const nextIndex = cache.index + 1;
-      if (nextIndex >= playback.order.length) {
-        stopPlayback();
+      if (nextIndex >= state.playback.order.length) {
+        state.stopPlayback();
         return;
       }
-      setPlaybackIndex(nextIndex);
+      state.setPlaybackIndex(nextIndex);
     }
   });
 

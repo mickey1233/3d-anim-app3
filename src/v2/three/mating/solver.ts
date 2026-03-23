@@ -202,17 +202,28 @@ function solveMateWithAabb(
 }
 
 export function applyMateTransform(obj: THREE.Object3D, transform: MateTransform) {
-  // Apply rotation in world space and translation
-  obj.applyQuaternion(transform.rotation);
-
+  // Apply world-space rotation, correctly accounting for any parent transform.
+  // obj.applyQuaternion(q) does localQuat = q * localQuat, which equals
+  // worldQuat = parentQuat * q * localQuat — NOT q * worldQuat when parent ≠ identity.
+  // The correct local-space equivalent of a world-space rotation q is:
+  //   localRot = parentQuat⁻¹ * q * parentQuat
   if (obj.parent) {
-    const parentWorld = new THREE.Matrix4().copy(obj.parent.matrixWorld).invert();
+    const parentQuat = new THREE.Quaternion();
+    obj.parent.getWorldQuaternion(parentQuat);
+    const localRot = parentQuat.clone().invert()
+      .multiply(transform.rotation)
+      .multiply(parentQuat);
+    obj.quaternion.premultiply(localRot);
+    obj.updateMatrixWorld(true);
+
+    const parentWorldInv = new THREE.Matrix4().copy(obj.parent.matrixWorld).invert();
     const worldPos = new THREE.Vector3();
     obj.getWorldPosition(worldPos);
     worldPos.add(transform.translation);
-    worldPos.applyMatrix4(parentWorld);
+    worldPos.applyMatrix4(parentWorldInv);
     obj.position.copy(worldPos);
   } else {
+    obj.applyQuaternion(transform.rotation);
     obj.position.add(transform.translation);
   }
 }
@@ -452,12 +463,33 @@ function buildMateTransform(
     const normalAxisAngle = quaternionToAxisAngle(rotationNormal);
     normalRotation = { axisWorld: normalAxisAngle.axis, angleDeg: normalAxisAngle.angleDeg };
     const rotatedTangent = sourceTangent.clone().applyQuaternion(rotationNormal);
+
+    // When normals are already aligned (< 1°) and no explicit twistSpec was given,
+    // skip tangent-based twist entirely.  computeClusterTangent picks the dominant
+    // edge direction from a histogram which is non-deterministic for square/symmetric
+    // parts — two identical flat plates can produce (1,0,0) on one and (0,0,1) on the
+    // other, resulting in a spurious 90° twist that incorrectly rotates the source part.
+    const normsAligned = !twistSpec && normalAxisAngle.angleDeg < 1;
     const twist =
-      twistSpec
-        ? computeTwistFromSpec(twistSpec, sourceFrame, targetFrame, rotationNormal)
-        : computeTwistFromTangents(rotatedTangent, targetTangent, targetFacing);
-    rotation = twist.quat.multiply(rotationNormal);
-    twistRotation = { axisWorld: twist.axisWorld, angleDeg: twist.angleDeg, source: twist.source };
+      normsAligned
+        ? { quat: new THREE.Quaternion(), axisWorld: targetFacing.clone().normalize(), angleDeg: 0, source: 'tangent' as const }
+        : twistSpec
+          ? computeTwistFromSpec(twistSpec, sourceFrame, targetFrame, rotationNormal)
+          : computeTwistFromTangents(rotatedTangent, targetTangent, targetFacing);
+
+    // When no explicit twistSpec is given, rectangular parts have 4-fold symmetry
+    // so we snap the auto-computed twist to the nearest 90° increment.
+    // This eliminates noise from mesh triangulation and PCA direction ambiguity.
+    let twistAngleDeg = twist.angleDeg;
+    if (!twistSpec && !normsAligned) {
+      twistAngleDeg = Math.round(twistAngleDeg / 90) * 90;
+    }
+    const twistQuat = (twistSpec && !normsAligned)
+      ? twist.quat
+      : new THREE.Quaternion().setFromAxisAngle(twist.axisWorld, THREE.MathUtils.degToRad(twistAngleDeg));
+
+    rotation = twistQuat.clone().multiply(rotationNormal);
+    twistRotation = { axisWorld: twist.axisWorld, angleDeg: twistAngleDeg, source: twist.source };
   }
 
   const sourceWorldPos = new THREE.Vector3();

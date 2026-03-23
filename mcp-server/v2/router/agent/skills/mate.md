@@ -22,10 +22,12 @@ args（常用）：
 {
   "sourcePart": { "partId": "<id>" },
   "targetPart": { "partId": "<id>" },
+  "sourceGroupId": "<group UUID if source part is in a group — from context.groups>",
+  "targetGroupId": "<group UUID if target part is in a group — from context.groups>",
   "sourceFace": "top|bottom|left|right|front|back",
   "targetFace": "top|bottom|left|right|front|back",
-  "sourceMethod": "planar_cluster|geometry_aabb|object_aabb|obb_pca|picked",
-  "targetMethod": "planar_cluster|geometry_aabb|object_aabb|obb_pca|picked",
+  "sourceMethod": "planar_cluster|face_projection|geometry_aabb|object_aabb|obb_pca|picked",
+  "targetMethod": "planar_cluster|face_projection|geometry_aabb|object_aabb|obb_pca|picked",
   "mode": "translate|twist|both",
   "mateMode": "face_flush|face_insert_arc",
   "pathPreference": "auto|arc",
@@ -33,6 +35,15 @@ args（常用）：
   "pushHistory": true,
   "stepLabel": "Mate <A> to <B>"
 }
+
+**重要**：若使用者說「mate Group X and partY」，sourcePart 設 Group X 第一個成員的 partId，並加上 `sourceGroupId: <group.id>`。這樣整個群組會作為剛體一起移動。
+
+### Method 選擇提示
+- `planar_cluster`（預設）：幾何有明顯平面時最準確。
+- `face_projection`：**複雜 CAD 零件首選**。當 `planar_cluster` 各個 face 都落在同一位置、或零件無大平面時改用此方法。它選「中心點在該軸方向最極端」的面群，不依賴法線方向。
+- `geometry_aabb`：快速但被凸出物干擾時失準。
+- `object_aabb`：最粗糙，有插槽時避免使用。
+- `obb_pca`：斜放/旋轉零件較穩定。
 
 ### 提高 VLM/VLA 推論準確度（你在「分析」時可以做的事）
 1) 確保 source/target 兩個零件同時完整出現在畫面中，避免遮擋。

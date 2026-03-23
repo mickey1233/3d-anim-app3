@@ -31,6 +31,7 @@ export const MateModeSchema = z.enum([
 export const AnchorMethodSchema = z.enum([
   'auto',
   'planar_cluster',
+  'face_projection',
   'geometry_aabb',
   'object_aabb',
   'extreme_vertices',
@@ -688,6 +689,8 @@ const GeneratePlanDataSchema = z.object({
 const ActionMateExecuteArgsSchema = z.object({
   sourcePart: PartRefSchema,
   targetPart: PartRefSchema,
+  sourceGroupId: z.string().optional(),
+  targetGroupId: z.string().optional(),
   sourceFace: FaceIdSchema.default('bottom'),
   targetFace: FaceIdSchema.default('top'),
   sourceMethod: AnchorMethodSchema.default('auto'),
@@ -744,6 +747,8 @@ const ActionMateExecuteDataSchema = z.object({
 const ActionSmartMateExecuteArgsSchema = z.object({
   sourcePart: PartRefSchema,
   targetPart: PartRefSchema,
+  sourceGroupId: z.string().optional(),
+  targetGroupId: z.string().optional(),
   instruction: z.string().optional(),
   sourceFace: FaceIdSchema.optional(),
   targetFace: FaceIdSchema.optional(),
@@ -901,6 +906,36 @@ const ActionResetPartDataSchema = z.object({
   transform: PartTransformSchema.optional(),
 });
 
+const ActionResetPartTransformArgsSchema = z.object({
+  part: PartRefSchema,
+  mode: z.enum(['initial', 'manual']).default('initial'),
+});
+const ActionResetPartTransformDataSchema = z.object({
+  part: ResolvedPartSchema,
+  reset: z.boolean(),
+  mode: z.enum(['initial', 'manual']),
+  transform: PartTransformSchema.optional(),
+  reason: z.string().optional(),
+});
+
+const ActionAutoAssembleArgsSchema = z.object({
+  parts: z.array(PartRefSchema).optional(),
+  basePart: PartRefSchema.optional(),
+  instruction: z.string().optional(),
+  maxSteps: z.number().int().min(1).max(20).optional(),
+});
+const ActionAutoAssembleDataSchema = z.object({
+  totalSteps: z.number(),
+  completedSteps: z.number(),
+  steps: z.array(z.object({
+    sourceName: z.string(),
+    targetName: z.string(),
+    instruction: z.string(),
+    stepIndex: z.number(),
+  })),
+  reason: z.string().optional(),
+});
+
 const ActionResetAllArgsSchema = z.object({});
 const ActionResetAllDataSchema = z.object({
   resetCount: z.number().int().nonnegative(),
@@ -942,6 +977,19 @@ const StepsDeleteDataSchema = z.object({
   }),
 });
 
+const StepsInsertArgsSchema = z.object({
+  afterStepId: z.string().nullable(),
+  label: NonEmptyStringSchema,
+  select: z.boolean().default(true),
+});
+const StepsInsertDataSchema = z.object({
+  step: StepSummarySchema,
+  steps: z.object({
+    count: z.number().int().nonnegative(),
+    currentStepId: z.string().nullable(),
+  }),
+});
+
 const StepsMoveArgsSchema = z.object({
   stepId: NonEmptyStringSchema,
   targetStepId: NonEmptyStringSchema,
@@ -965,6 +1013,15 @@ const StepsPlaybackStartArgsSchema = z.object({
 });
 const StepsPlaybackStartDataSchema = z.object({
   running: z.boolean(),
+});
+
+const StepsPlaybackStartAtArgsSchema = z.object({
+  stepId: NonEmptyStringSchema,
+  durationMs: z.number().positive().optional(),
+});
+const StepsPlaybackStartAtDataSchema = z.object({
+  running: z.boolean(),
+  targetStepId: z.string(),
 });
 
 const StepsPlaybackStopArgsSchema = z.object({});
@@ -1184,6 +1241,14 @@ export const MCPToolSchemas = {
     args: ActionResetAllArgsSchema,
     result: makeToolResultSchema(ActionResetAllDataSchema),
   },
+  'action.reset_part_transform': {
+    args: ActionResetPartTransformArgsSchema,
+    result: makeToolResultSchema(ActionResetPartTransformDataSchema),
+  },
+  'action.auto_assemble': {
+    args: ActionAutoAssembleArgsSchema,
+    result: makeToolResultSchema(ActionAutoAssembleDataSchema),
+  },
   'action.generate_transform_plan': {
     args: GeneratePlanArgsSchema,
     result: makeToolResultSchema(GeneratePlanDataSchema),
@@ -1216,6 +1281,10 @@ export const MCPToolSchemas = {
     args: StepsAddArgsSchema,
     result: makeToolResultSchema(StepsAddDataSchema),
   },
+  'steps.insert': {
+    args: StepsInsertArgsSchema,
+    result: makeToolResultSchema(StepsInsertDataSchema),
+  },
   'steps.select': {
     args: StepsSelectArgsSchema,
     result: makeToolResultSchema(StepsSelectDataSchema),
@@ -1235,6 +1304,10 @@ export const MCPToolSchemas = {
   'steps.playback_start': {
     args: StepsPlaybackStartArgsSchema,
     result: makeToolResultSchema(StepsPlaybackStartDataSchema),
+  },
+  'steps.playback_start_at': {
+    args: StepsPlaybackStartAtArgsSchema,
+    result: makeToolResultSchema(StepsPlaybackStartAtDataSchema),
   },
   'steps.playback_stop': {
     args: StepsPlaybackStopArgsSchema,
@@ -1326,6 +1399,8 @@ export const MCPToolNameSchema = z.enum([
   'action.set_part_transform',
   'action.reset_part',
   'action.reset_all',
+  'action.reset_part_transform',
+  'action.auto_assemble',
   'action.generate_transform_plan',
   'action.mate_execute',
   'action.smart_mate_execute',
@@ -1334,11 +1409,13 @@ export const MCPToolNameSchema = z.enum([
   'preview.status',
   'action.commit_preview',
   'steps.add',
+  'steps.insert',
   'steps.select',
   'steps.delete',
   'steps.move',
   'steps.update_snapshot',
   'steps.playback_start',
+  'steps.playback_start_at',
   'steps.playback_stop',
   'vlm.add_images',
   'vlm.move_image',
@@ -1381,6 +1458,8 @@ const typedRequestSchemas = [
   z.object({ tool: z.literal('action.set_part_transform'), args: ActionSetPartTransformArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('action.reset_part'), args: ActionResetPartArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('action.reset_all'), args: ActionResetAllArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('action.reset_part_transform'), args: ActionResetPartTransformArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('action.auto_assemble'), args: ActionAutoAssembleArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('action.generate_transform_plan'), args: GeneratePlanArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('action.mate_execute'), args: ActionMateExecuteArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('action.smart_mate_execute'), args: ActionSmartMateExecuteArgsSchema, meta: ToolMetaSchema.optional() }),
@@ -1389,11 +1468,13 @@ const typedRequestSchemas = [
   z.object({ tool: z.literal('preview.status'), args: PreviewStatusArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('action.commit_preview'), args: ActionCommitPreviewArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('steps.add'), args: StepsAddArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('steps.insert'), args: StepsInsertArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('steps.select'), args: StepsSelectArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('steps.delete'), args: StepsDeleteArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('steps.move'), args: StepsMoveArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('steps.update_snapshot'), args: StepsUpdateSnapshotArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('steps.playback_start'), args: StepsPlaybackStartArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('steps.playback_start_at'), args: StepsPlaybackStartAtArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('steps.playback_stop'), args: StepsPlaybackStopArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('vlm.add_images'), args: VlmAddImagesArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('vlm.move_image'), args: VlmMoveImageArgsSchema, meta: ToolMetaSchema.optional() }),

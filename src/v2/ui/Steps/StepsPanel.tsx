@@ -49,7 +49,7 @@ export function StepsPanel() {
       </div>
 
       <div className="max-h-[32vh] overflow-y-auto custom-scrollbar pr-1 flex flex-col gap-1">
-        {steps.map((step) => (
+        {steps.map((step, idx) => (
           <div
             key={step.id}
             className={`w-full px-2 py-2 rounded border text-xs flex items-center gap-2 ${
@@ -65,7 +65,21 @@ export function StepsPanel() {
               }}
               className="flex-1 text-left"
             >
-              {step.label}
+              <span className="font-semibold">Step {idx + 1}</span>
+              {step.label && step.label !== `Step ${idx + 1}` && (
+                <span className="ml-1 text-white/50">— {step.label}</span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void callMcpTool('steps.playback_start_at', { stepId: step.id });
+              }}
+              className="text-[10px] text-green-300 hover:text-green-200 px-1"
+              aria-label="Play step"
+            >
+              ▶
             </button>
             <button
               type="button"

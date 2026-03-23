@@ -33,13 +33,3 @@
 ### 5) Steps
 - `steps.add` / `steps.select` / `steps.update_snapshot` ...
 
-### 6) 外部資訊（上網查）
-目標：回答「跟本專案無關」但需要查資料的問題（天氣、百科、最新資訊）。
-
-**第 0 輪（查詢）**
-- 天氣：`query.weather { location, days?, units? }`
-- 一般搜尋：`query.web_search { query, maxResults?, provider? }`
-
-**第 1 輪（整理回覆）**
-- 讀取上一輪 `toolResults`，用自然語言摘要成 `replyText`
-- 若使用者沒給地點/時間，請先在 `replyText` 追問（不要硬猜）

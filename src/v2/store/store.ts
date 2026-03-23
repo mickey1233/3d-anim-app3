@@ -7,6 +7,12 @@ export type Part = {
   color?: string;
 };
 
+export type AssemblyGroup = {
+  id: string;
+  name: string;
+  partIds: string[];
+};
+
 export type PartTransform = {
   position: [number, number, number];
   quaternion: [number, number, number, number];
@@ -19,6 +25,7 @@ export type InteractionMode = 'select' | 'move' | 'rotate' | 'mate';
 export type AnchorMethodId =
   | 'auto'
   | 'planar_cluster'
+  | 'face_projection'
   | 'geometry_aabb'
   | 'object_aabb'
   | 'extreme_vertices'
@@ -32,6 +39,8 @@ export type Step = {
   id: string;
   label: string;
   snapshotOverridesById?: Record<string, PartTransform>;
+  /** manualTransformById captured at addStep time — the part positions before this step's animation */
+  baseManualTransforms?: Record<string, PartTransform>;
 };
 
 export type VlmImage = {
@@ -73,7 +82,13 @@ export type VlmResult = {
 
 export type ServerStatus = {
   ts: number;
-  router: { providerEnv: string; providerResolved: 'agent' | 'mock'; llmEnabled: boolean };
+  router: { providerEnv: string; providerResolved: 'agent' | 'mock' | 'codex' | 'openai' | 'smart'; llmEnabled: boolean };
+  codex?: {
+    loggedIn: boolean;
+    authMode: string;
+    cliAvailable: boolean;
+    authFile: string;
+  };
   llm: {
     providerEnv: string;
     providerResolved: 'gemini' | 'ollama' | 'mock' | 'none';
@@ -104,6 +119,7 @@ type Snapshot = {
     leftOpen: boolean;
     rightOpen: boolean;
     workspaceSection: string;
+    gizmoSpace: 'world' | 'local';
   };
   markers: {
     start?: Anchor;
@@ -116,6 +132,10 @@ type Snapshot = {
   parts: {
     overridesById: Record<string, PartTransform>;
   };
+  assemblyGroups: {
+    byId: Record<string, AssemblyGroup>;
+    order: string[];
+  };
 };
 
 export type V2State = {
@@ -126,21 +146,40 @@ export type V2State = {
     order: string[];
     initialTransformById: Record<string, PartTransform>;
     overridesById: Record<string, PartTransform>;
+    manualTransformById: Record<string, PartTransform>;
   };
-  selection: { partId: string | null; source: 'dropdown' | 'canvas' | 'list' | 'command' | 'system' };
+  assemblyGroups: {
+    byId: Record<string, AssemblyGroup>;
+    order: string[];
+  };
+  selection: { partId: string | null; groupId?: string; source: 'dropdown' | 'canvas' | 'list' | 'command' | 'system' };
+  multiSelectIds: string[];
   steps: Snapshot['steps'];
-  playback: { running: boolean; currentIndex: number; order: string[]; durationMs: number };
+  playback: { running: boolean; currentIndex: number; order: string[]; durationMs: number; targetStepId: string | null; resetToStepId: string | null };
   ui: Snapshot['ui'];
   interaction: { mode: InteractionMode; isTransformDragging: boolean; pickFaceMode: 'idle' | 'source' | 'target' };
   markers: Snapshot['markers'];
   vlm: { images: VlmImage[]; result?: VlmResult; analyzing: boolean };
   chat: { messages: { id: string; role: 'user' | 'assistant'; text: string }[] };
-  view: { environment: string; showGrid: boolean; showAnchors: boolean };
+  view: {
+    environment: string;
+    showGrid: boolean;
+    showAnchors: boolean;
+    lighting: {
+      exposure: number;        // tone mapping exposure (0.1–2.0)
+      ambientIntensity: number; // 0–2
+      mainIntensity: number;   // 0–3
+      azimuth: number;         // degrees 0–360 (horizontal)
+      elevation: number;       // degrees 0–90 (vertical)
+    };
+  };
   connection: { wsConnected: boolean; wsError?: string; serverStatus?: ServerStatus };
   mateCaptureOverlay: MateCaptureOverlayState;
   mateRequest?: {
     sourceId: string;
     targetId: string;
+    sourceGroupId?: string;
+    targetGroupId?: string;
     sourceFace: FaceId;
     targetFace: FaceId;
     mode: MateMode;
@@ -153,6 +192,8 @@ export type V2State = {
   mateDraft: {
     sourceId: string;
     targetId: string;
+    sourceGroupId?: string;
+    targetGroupId?: string;
     sourceFace: FaceId;
     targetFace: FaceId;
     mode: MateMode;
@@ -211,23 +252,30 @@ export type V2State = {
 
   setCadUrl: (url: string, fileName: string) => void;
   setParts: (parts: Part[], initialTransformById: Record<string, PartTransform>) => void;
-  setSelection: (partId: string | null, source?: 'dropdown' | 'canvas' | 'list' | 'command' | 'system') => void;
+  setSelection: (partId: string | null, source?: 'dropdown' | 'canvas' | 'list' | 'command' | 'system', groupId?: string) => void;
+  addToMultiSelect: (partId: string) => void;
+  removeFromMultiSelect: (partId: string) => void;
+  clearMultiSelect: () => void;
   addStep: (label: string) => void;
+  insertStep: (afterId: string | null, label: string) => void;
   selectStep: (id: string | null) => void;
   deleteStep: (id: string) => void;
   moveStep: (sourceId: string, targetId: string) => void;
   updateStepSnapshot: (id?: string | null) => void;
   startPlayback: (durationMs?: number) => void;
+  startPlaybackAt: (targetStepId: string, durationMs?: number, fromStepId?: string) => void;
   stopPlayback: () => void;
   setPlaybackIndex: (index: number) => void;
   setPanels: (leftOpen: boolean, rightOpen: boolean) => void;
   setWorkspaceSection: (section: string) => void;
+  setGizmoSpace: (space: 'world' | 'local') => void;
   setInteractionMode: (mode: InteractionMode) => void;
   setTransformDragging: (dragging: boolean) => void;
   setPickFaceMode: (mode: 'idle' | 'source' | 'target') => void;
   setEnvironment: (env: string) => void;
   setGridVisible: (visible: boolean) => void;
   setAnchorsVisible: (visible: boolean) => void;
+  setLighting: (patch: Partial<V2State['view']['lighting']>) => void;
   setWsStatus: (connected: boolean, error?: string) => void;
   setServerStatus: (status?: ServerStatus) => void;
   setMarker: (type: 'start' | 'end', anchor?: Anchor) => void;
@@ -245,7 +293,17 @@ export type V2State = {
   clearPartOverride: (partId: string) => void;
   clearAllPartOverrides: () => void;
   clearAllPartOverridesSilent: () => void;
+  resetToManualTransforms: () => void;
   getPartTransform: (partId: string) => PartTransform | null;
+  setManualTransform: (partId: string, transform: PartTransform) => void;
+  resetPartToInitial: (partId: string) => void;
+  resetPartToManual: (partId: string) => void;
+  createAssemblyGroup: (partIds: string[]) => string;
+  mergeAssemblyGroups: (groupIdA: string, groupIdB: string) => string;
+  addPartToGroup: (groupId: string, partId: string) => void;
+  removePartFromGroup: (partId: string) => void;
+  getGroupForPart: (partId: string) => string | null;
+  getGroupParts: (groupId: string) => string[];
   addVlmImages: (files: File[]) => void;
   moveVlmImage: (id: string, dir: -1 | 1) => void;
   removeVlmImage: (id: string) => void;
@@ -266,6 +324,12 @@ const takeSnapshot = (state: V2State): Snapshot => ({
   markers: { ...state.markers },
   vlm: { result: state.vlm.result, analyzing: state.vlm.analyzing },
   parts: { overridesById: { ...state.parts.overridesById } },
+  assemblyGroups: {
+    byId: Object.fromEntries(
+      Object.entries(state.assemblyGroups.byId).map(([id, g]) => [id, { ...g, partIds: [...g.partIds] }])
+    ),
+    order: [...state.assemblyGroups.order],
+  },
 });
 
 const applySnapshot = (state: V2State, snap: Snapshot): Partial<V2State> => ({
@@ -274,6 +338,7 @@ const applySnapshot = (state: V2State, snap: Snapshot): Partial<V2State> => ({
   markers: snap.markers,
   vlm: { ...state.vlm, result: snap.vlm.result, analyzing: snap.vlm.analyzing },
   parts: { ...state.parts, overridesById: { ...snap.parts.overridesById } },
+  assemblyGroups: snap.assemblyGroups,
 });
 
 const cloneTransform = (t: PartTransform): PartTransform => ({
@@ -334,11 +399,13 @@ let dropdownSelectionLockUntil = 0;
 export const useV2Store = create<V2State>((set, get) => ({
   cadUrl: '',
   cadFileName: '',
-  parts: { byId: {}, order: [], initialTransformById: {}, overridesById: {} },
+  parts: { byId: {}, order: [], initialTransformById: {}, overridesById: {}, manualTransformById: {} },
+  assemblyGroups: { byId: {}, order: [] },
   selection: { partId: null, source: 'system' },
+  multiSelectIds: [],
   steps: { list: [], currentStepId: null },
-  playback: { running: false, currentIndex: 0, order: [], durationMs: 900 },
-  ui: { leftOpen: true, rightOpen: true, workspaceSection: 'selection' },
+  playback: { running: false, currentIndex: 0, order: [], durationMs: 900, targetStepId: null, resetToStepId: null },
+  ui: { leftOpen: true, rightOpen: true, workspaceSection: 'selection', gizmoSpace: 'world' as const },
   interaction: { mode: 'move', isTransformDragging: false, pickFaceMode: 'idle' },
   markers: {},
   vlm: { images: [], result: undefined, analyzing: false },
@@ -351,13 +418,26 @@ export const useV2Store = create<V2State>((set, get) => ({
       },
     ],
   },
-  view: { environment: 'studio', showGrid: true, showAnchors: false },
+  view: {
+    environment: 'studio',
+    showGrid: true,
+    showAnchors: false,
+    lighting: {
+      exposure: 0.65,
+      ambientIntensity: 0.3,
+      mainIntensity: 0.9,
+      azimuth: 50,
+      elevation: 60,
+    },
+  },
   connection: { wsConnected: false, wsError: undefined, serverStatus: undefined },
   mateCaptureOverlay: { visible: false, nonce: 0, expiresAt: 0, images: [] },
   matePick: {},
   mateDraft: {
     sourceId: '',
     targetId: '',
+    sourceGroupId: undefined,
+    targetGroupId: undefined,
     sourceFace: 'bottom',
     targetFace: 'top',
     mode: 'translate',
@@ -381,6 +461,7 @@ export const useV2Store = create<V2State>((set, get) => ({
         ...state,
         ...patch,
         parts: patch.parts ? { ...state.parts, ...patch.parts } : state.parts,
+        assemblyGroups: patch.assemblyGroups ? { ...state.assemblyGroups, ...patch.assemblyGroups } : state.assemblyGroups,
         selection: patch.selection ? { ...state.selection, ...patch.selection } : state.selection,
         steps: patch.steps ? { ...state.steps, ...patch.steps } : state.steps,
         ui: patch.ui ? { ...state.ui, ...patch.ui } : state.ui,
@@ -406,7 +487,9 @@ export const useV2Store = create<V2State>((set, get) => ({
         order: parts.map((p) => p.id),
         initialTransformById,
         overridesById: {},
+        manualTransformById: {},
       },
+      assemblyGroups: { byId: {}, order: [] },
       history: { past: [], future: [], lastCommand: undefined },
     })),
 
@@ -416,17 +499,18 @@ export const useV2Store = create<V2State>((set, get) => ({
       cadUrl: url,
       cadFileName: fileName,
       selection: { partId: null, source: 'system' },
-      parts: { byId: {}, order: [], initialTransformById: {}, overridesById: {} },
+      parts: { byId: {}, order: [], initialTransformById: {}, overridesById: {}, manualTransformById: {} },
+      assemblyGroups: { byId: {}, order: [] },
       markers: {},
       steps: { list: [], currentStepId: null },
       vlm: { images: [], result: undefined, analyzing: false },
       matePick: {},
-      playback: { running: false, currentIndex: 0, order: [], durationMs: state.playback.durationMs },
+      playback: { running: false, currentIndex: 0, order: [], durationMs: state.playback.durationMs, targetStepId: null, resetToStepId: null },
       interaction: { ...state.interaction, mode: 'move', pickFaceMode: 'idle' },
       history: { past: [], future: [], lastCommand: undefined },
     })),
 
-  setSelection: (partId, source = 'system') =>
+  setSelection: (partId, source = 'system', groupId?) =>
     set((state) => {
       const now = Date.now();
       const nextSource =
@@ -437,24 +521,60 @@ export const useV2Store = create<V2State>((set, get) => ({
       if (nextSource === 'dropdown') {
         dropdownSelectionLockUntil = now + DROPDOWN_CANVAS_LOCK_MS;
       }
-      if (state.selection.partId === partId && state.selection.source === nextSource) {
+      if (state.selection.partId === partId && state.selection.source === nextSource && state.selection.groupId === groupId) {
         return state;
       }
       return {
-        selection: { partId, source: nextSource },
+        selection: { partId, source: nextSource, groupId },
       };
     }),
+
+  addToMultiSelect: (partId) =>
+    set((state) => {
+      if (state.multiSelectIds.includes(partId)) return state;
+      return { multiSelectIds: [...state.multiSelectIds, partId] };
+    }),
+
+  removeFromMultiSelect: (partId) =>
+    set((state) => ({
+      multiSelectIds: state.multiSelectIds.filter((id) => id !== partId),
+    })),
+
+  clearMultiSelect: () => set({ multiSelectIds: [] }),
 
   addStep: (label) =>
     get().dispatch('add_step', (state) => ({
       steps: {
         list: [
           ...state.steps.list,
-          { id: crypto.randomUUID(), label, snapshotOverridesById: cloneOverrides(state.parts.overridesById) },
+          {
+            id: crypto.randomUUID(),
+            label,
+            snapshotOverridesById: cloneOverrides(state.parts.overridesById),
+            baseManualTransforms: cloneOverrides(state.parts.manualTransformById),
+          },
         ],
         currentStepId: state.steps.currentStepId,
       },
     })),
+
+  insertStep: (afterId, label) =>
+    get().dispatch('insert_step', (state) => {
+      const newStep = {
+        id: crypto.randomUUID(),
+        label,
+        snapshotOverridesById: cloneOverrides(state.parts.overridesById),
+        baseManualTransforms: cloneOverrides(state.parts.manualTransformById),
+      };
+      const list = [...state.steps.list];
+      if (afterId === null) {
+        list.unshift(newStep);
+      } else {
+        const idx = list.findIndex((s) => s.id === afterId);
+        list.splice(idx < 0 ? list.length : idx + 1, 0, newStep);
+      }
+      return { steps: { ...state.steps, list } };
+    }),
 
   selectStep: (id) =>
     get().dispatch('select_step', (state) => ({
@@ -502,8 +622,41 @@ export const useV2Store = create<V2State>((set, get) => ({
         currentIndex: 0,
         order: state.steps.list.map((s) => s.id),
         durationMs,
+        targetStepId: null,
+        resetToStepId: null,
       },
     })),
+  startPlaybackAt: (targetStepId, durationMs, fromStepId) =>
+    set((state) => {
+      const steps = state.steps.list;
+      const targetIndex = steps.findIndex((s) => s.id === targetStepId);
+      const fromIndex = fromStepId != null ? steps.findIndex((s) => s.id === fromStepId) : -1;
+
+      let order: string[];
+      let resetToStepId: string | null;
+
+      if (fromIndex >= 0 && targetIndex > fromIndex) {
+        // Forward: include intermediate steps (played instantly) then target step (animated)
+        order = steps.slice(fromIndex + 1, targetIndex + 1).map((s) => s.id);
+        resetToStepId = fromStepId ?? null;
+      } else {
+        // Backward or same: just animate the target from its start state
+        order = [targetStepId];
+        resetToStepId = targetIndex > 0 ? steps[targetIndex - 1].id : null;
+      }
+
+      return {
+        playback: {
+          ...state.playback,
+          running: true,
+          currentIndex: 0,
+          order,
+          durationMs: durationMs ?? state.playback.durationMs,
+          targetStepId,
+          resetToStepId,
+        },
+      };
+    }),
   stopPlayback: () =>
     set((state) => ({
       ...state,
@@ -523,6 +676,9 @@ export const useV2Store = create<V2State>((set, get) => ({
       ...state,
       ui: { ...state.ui, workspaceSection: section },
     })),
+
+  setGizmoSpace: (space) =>
+    set((state) => ({ ...state, ui: { ...state.ui, gizmoSpace: space } })),
 
   setInteractionMode: (mode) =>
     set((state) => {
@@ -567,6 +723,12 @@ export const useV2Store = create<V2State>((set, get) => ({
     set((state) => ({
       ...state,
       view: { ...state.view, showAnchors: visible },
+    })),
+
+  setLighting: (patch) =>
+    set((state) => ({
+      ...state,
+      view: { ...state.view, lighting: { ...state.view.lighting, ...patch } },
     })),
 
   setWsStatus: (connected, error) =>
@@ -693,9 +855,118 @@ export const useV2Store = create<V2State>((set, get) => ({
       parts: { ...state.parts, overridesById: {} },
     })),
 
+  resetToManualTransforms: () =>
+    set((state) => {
+      const nextOverrides: Record<string, PartTransform> = {};
+      for (const id of state.parts.order) {
+        const manual = state.parts.manualTransformById[id];
+        if (manual) nextOverrides[id] = manual;
+      }
+      return { ...state, parts: { ...state.parts, overridesById: nextOverrides } };
+    }),
+
   getPartTransform: (partId) => {
     const state = get();
     return state.parts.overridesById[partId] || state.parts.initialTransformById[partId] || null;
+  },
+
+  setManualTransform: (partId, transform) =>
+    set((state) => ({
+      ...state,
+      parts: { ...state.parts, manualTransformById: { ...state.parts.manualTransformById, [partId]: transform } },
+    })),
+
+  resetPartToInitial: (partId) =>
+    get().dispatch('reset_part_to_initial', (state) => {
+      const next = { ...state.parts.overridesById };
+      delete next[partId];
+      return { parts: { ...state.parts, overridesById: next } };
+    }),
+
+  resetPartToManual: (partId) =>
+    get().dispatch('reset_part_to_manual', (state) => {
+      const manual = state.parts.manualTransformById[partId];
+      if (!manual) return { parts: state.parts };
+      return { parts: { ...state.parts, overridesById: { ...state.parts.overridesById, [partId]: manual } } };
+    }),
+
+  createAssemblyGroup: (partIds) => {
+    const groupId = crypto.randomUUID();
+    const existingGroups = get().assemblyGroups;
+    const groupCount = existingGroups.order.length + 1;
+    const group: AssemblyGroup = { id: groupId, name: `Group ${groupCount}`, partIds: [...partIds] };
+    get().dispatch('create_assembly_group', (state) => ({
+      assemblyGroups: {
+        byId: { ...state.assemblyGroups.byId, [groupId]: group },
+        order: [...state.assemblyGroups.order, groupId],
+      },
+    }));
+    return groupId;
+  },
+
+  mergeAssemblyGroups: (groupIdA, groupIdB) => {
+    const state = get();
+    const groupA = state.assemblyGroups.byId[groupIdA];
+    const groupB = state.assemblyGroups.byId[groupIdB];
+    if (!groupA || !groupB) return groupIdA;
+    const mergedPartIds = [...new Set([...groupA.partIds, ...groupB.partIds])];
+    const survivingId = groupIdA;
+    get().dispatch('merge_assembly_groups', (s) => {
+      const nextById = { ...s.assemblyGroups.byId };
+      nextById[survivingId] = { ...groupA, partIds: mergedPartIds };
+      delete nextById[groupIdB];
+      return {
+        assemblyGroups: {
+          byId: nextById,
+          order: s.assemblyGroups.order.filter((id) => id !== groupIdB),
+        },
+      };
+    });
+    return survivingId;
+  },
+
+  addPartToGroup: (groupId, partId) =>
+    get().dispatch('add_part_to_group', (state) => {
+      const group = state.assemblyGroups.byId[groupId];
+      if (!group || group.partIds.includes(partId)) return { assemblyGroups: state.assemblyGroups };
+      return {
+        assemblyGroups: {
+          ...state.assemblyGroups,
+          byId: {
+            ...state.assemblyGroups.byId,
+            [groupId]: { ...group, partIds: [...group.partIds, partId] },
+          },
+        },
+      };
+    }),
+
+  removePartFromGroup: (partId) =>
+    get().dispatch('remove_part_from_group', (state) => {
+      let changed = false;
+      const nextById: Record<string, AssemblyGroup> = {};
+      for (const [id, group] of Object.entries(state.assemblyGroups.byId)) {
+        if (group.partIds.includes(partId)) {
+          changed = true;
+          nextById[id] = { ...group, partIds: group.partIds.filter((pid) => pid !== partId) };
+        } else {
+          nextById[id] = group;
+        }
+      }
+      if (!changed) return { assemblyGroups: state.assemblyGroups };
+      return { assemblyGroups: { ...state.assemblyGroups, byId: nextById } };
+    }),
+
+  getGroupForPart: (partId) => {
+    const state = get();
+    for (const [groupId, group] of Object.entries(state.assemblyGroups.byId)) {
+      if (group.partIds.includes(partId)) return groupId;
+    }
+    return null;
+  },
+
+  getGroupParts: (groupId) => {
+    const state = get();
+    return state.assemblyGroups.byId[groupId]?.partIds ?? [];
   },
 
   addVlmImages: (files) =>

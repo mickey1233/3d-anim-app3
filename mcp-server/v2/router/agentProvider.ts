@@ -225,6 +225,7 @@ function loadAgentDocs() {
 const summarizeContext = (ctx: RouterContext) => {
   const summary: RouterContext = {
     parts: ctx.parts.slice(0, 32),
+    ...(ctx.groups && ctx.groups.length > 0 ? { groups: ctx.groups.slice(0, 16) } : {}),
     cadFileName: ctx.cadFileName ?? null,
     stepCount: ctx.stepCount,
     currentStepId: ctx.currentStepId ?? null,
@@ -296,6 +297,25 @@ export const AgentRouterProvider: RouterProvider = {
     }
 
     if (toolCalls.length === 0 && !replyText) return MockRouterProvider.route(text, ctx);
+
+    // Post-process: inject sourceGroupId/targetGroupId when part belongs to a group
+    if (ctx.groups && ctx.groups.length > 0) {
+      for (const call of toolCalls) {
+        if (call.tool === 'action.mate_execute' || call.tool === 'action.smart_mate_execute') {
+          const args = call.args as Record<string, unknown>;
+          const srcId = (args.sourcePart as any)?.partId as string | undefined;
+          const tgtId = (args.targetPart as any)?.partId as string | undefined;
+          if (srcId && !args.sourceGroupId) {
+            const grp = ctx.groups.find((g) => g.partIds.includes(srcId));
+            if (grp) args.sourceGroupId = grp.id;
+          }
+          if (tgtId && !args.targetGroupId) {
+            const grp = ctx.groups.find((g) => g.partIds.includes(tgtId));
+            if (grp) args.targetGroupId = grp.id;
+          }
+        }
+      }
+    }
 
     return { toolCalls, replyText };
   },

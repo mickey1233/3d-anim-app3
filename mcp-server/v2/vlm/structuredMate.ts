@@ -23,6 +23,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const FACE_VALUES = new Set(['top', 'bottom', 'left', 'right', 'front', 'back']);
 const METHOD_VALUES = new Set([
   'planar_cluster',
+  'face_projection',
   'geometry_aabb',
   'object_aabb',
   'obb_pca',
@@ -508,8 +509,8 @@ function buildMatePrompt(params: { images: VlmImage[]; parts: VlmPart[]; mateCon
     '  "target_part_ref": string,',
     '  "source_face": "top|bottom|left|right|front|back",',
     '  "target_face": "top|bottom|left|right|front|back",',
-    '  "source_method": "planar_cluster|geometry_aabb|object_aabb|obb_pca|picked",',
-    '  "target_method": "planar_cluster|geometry_aabb|object_aabb|obb_pca|picked",',
+    '  "source_method": "planar_cluster|face_projection|geometry_aabb|object_aabb|obb_pca|picked",',
+    '  "target_method": "planar_cluster|face_projection|geometry_aabb|object_aabb|obb_pca|picked",',
     '  "mode": "translate|twist|both",',
     '  "intent": "default|cover|insert",',
     '  "abstain": boolean,',

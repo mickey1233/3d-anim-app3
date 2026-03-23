@@ -17,9 +17,13 @@ export function ChatPanel() {
   const [pendingSince, setPendingSince] = React.useState<number | null>(null);
   const [pendingTick, setPendingTick] = React.useState(0);
   const [lastLatencyMs, setLastLatencyMs] = React.useState<number | null>(null);
+  const [lastRouteMeta, setLastRouteMeta] = React.useState<{
+    route: string; category: string; model?: string; docsMs: number; fastMs?: number; codexMs?: number;
+  } | null>(null);
   const messages = useV2Store((s) => s.chat.messages);
   const appendChatMessage = useV2Store((s) => s.appendChatMessage);
   const parts = useV2Store((s) => s.parts);
+  const assemblyGroups = useV2Store((s) => s.assemblyGroups);
   const cadFileName = useV2Store((s) => s.cadFileName);
   const steps = useV2Store((s) => s.steps);
   const selectionPartId = useV2Store((s) => s.selection.partId);
@@ -83,16 +87,34 @@ export function ChatPanel() {
           bboxSize: [Math.abs(scale[0]), Math.abs(scale[1]), Math.abs(scale[2])] as [number, number, number],
         };
       }),
+      groups: assemblyGroups.order
+        .map((id) => assemblyGroups.byId[id])
+        .filter(Boolean)
+        .map((g) => ({ id: g.id, name: g.name, partIds: g.partIds })),
+      steps: steps.list.map((s, i) => ({ id: s.id, index: i, label: s.label })),
     };
     try {
       const startedAt = performance.now();
       setSending(true);
       setPendingTick(0);
       setPendingSince(Date.now());
-      const res: any = await v2Client.request('router_execute', { text, context: ctx }, { timeoutMs: 18_000 });
+      const res: any = await v2Client.request('router_execute', { text, context: ctx }, { timeoutMs: 30_000 });
       const reportedMs = Number(res?.meta?.timings?.totalMs);
       const measuredMs = Math.round(performance.now() - startedAt);
       setLastLatencyMs(Number.isFinite(reportedMs) ? Math.max(0, Math.floor(reportedMs)) : measuredMs);
+      const rm = res?.meta?.routeMeta;
+      if (rm) {
+        setLastRouteMeta({
+          route: String(rm.route ?? ''),
+          category: String(rm.category ?? ''),
+          ...(rm.model ? { model: String(rm.model) } : {}),
+          docsMs: Number(rm.docsMs ?? 0),
+          ...(rm.fastMs != null ? { fastMs: Number(rm.fastMs) } : {}),
+          ...(rm.codexMs != null ? { codexMs: Number(rm.codexMs) } : {}),
+        });
+      } else {
+        setLastRouteMeta(null);
+      }
       const toolCount = res?.trace?.toolCalls?.length ?? 0;
       const reply =
         res?.replyText ||
@@ -144,29 +166,48 @@ export function ChatPanel() {
     return () => window.clearInterval(interval);
   }, [refreshServerStatus, wsConnected]);
 
-  const modelBadge = React.useMemo(() => {
+  const [statusExpanded, setStatusExpanded] = React.useState(false);
+
+  const modelBadgeLabel = React.useMemo(() => {
     if (!serverStatus) return null;
+    const router = serverStatus.router?.providerResolved;
+    const codex = serverStatus.codex;
+    if (router === 'codex' || router === 'openai') {
+      if (codex?.loggedIn) return { text: 'Codex ✓', ok: true };
+      if (codex?.cliAvailable) return { text: 'Codex (not logged in)', ok: false };
+      return { text: 'Codex (not set up)', ok: false };
+    }
     const provider = serverStatus.llm?.providerResolved;
     const model = serverStatus.llm?.model;
     if (!provider) return null;
-    if (provider === 'mock') return 'LLM: mock';
-    if (provider === 'none') return 'LLM: off';
-    return model ? `LLM: ${provider}/${model}` : `LLM: ${provider}`;
+    if (provider === 'mock') return { text: 'LLM: mock', ok: false };
+    if (provider === 'none') return { text: 'LLM: off', ok: false };
+    return { text: model ? `LLM: ${provider}/${model}` : `LLM: ${provider}`, ok: true };
   }, [serverStatus]);
 
-  const modelBadgeTitle = React.useMemo(() => {
-    if (!serverStatus) return undefined;
-    const lines = [
-      `Router: ${serverStatus.router?.providerResolved || 'unknown'} (env=${serverStatus.router?.providerEnv || 'n/a'})`,
-      `LLM: ${serverStatus.llm?.providerResolved || 'unknown'} (env=${serverStatus.llm?.providerEnv || 'n/a'}, model=${serverStatus.llm?.model || 'n/a'})`,
-      `VLM: ${serverStatus.vlm?.providerResolved || 'unknown'} (env=${serverStatus.vlm?.providerEnv || 'n/a'}, model=${serverStatus.vlm?.model || 'n/a'})`,
-      `Ollama: ${serverStatus.llm?.ollamaReachable ? 'reachable' : 'not reachable'} (models=${serverStatus.llm?.ollamaModelsCount ?? 'n/a'}, url=${serverStatus.llm?.ollamaBaseUrl || 'n/a'})`,
-      `Ollama LLM model: ${serverStatus.llm?.ollamaModelRequested || 'n/a'} (${serverStatus.llm?.ollamaModelAvailable ? 'available' : 'missing'})`,
-      `Ollama VLM model: ${serverStatus.vlm?.ollamaModelRequested || 'n/a'} (${serverStatus.vlm?.ollamaModelAvailable ? 'available' : 'missing'})`,
-    ];
-    if (serverStatus.web?.enabled) lines.push('Web tools: enabled');
-    lines.push('Click badge to refresh');
-    return lines.join('\n');
+  const statusLines = React.useMemo(() => {
+    if (!serverStatus) return [];
+    const codex = serverStatus.codex;
+    const lines: { label: string; value: string; warn?: boolean }[] = [];
+    lines.push({ label: 'Router', value: `${serverStatus.router?.providerResolved || '?'} (env=${serverStatus.router?.providerEnv || 'n/a'})` });
+    if (codex) {
+      lines.push({ label: 'Codex', value: codex.loggedIn ? `✓ logged in (${codex.authMode})` : '✗ not logged in', warn: !codex.loggedIn });
+      lines.push({ label: 'Codex CLI', value: codex.cliAvailable ? 'available' : 'not found in PATH', warn: !codex.cliAvailable });
+      if (!codex.loggedIn) lines.push({ label: '→', value: 'run: codex login', warn: true });
+    }
+    lines.push({ label: 'LLM', value: `${serverStatus.llm?.providerResolved || '?'} / ${serverStatus.llm?.model || 'n/a'}` });
+    lines.push({ label: 'VLM', value: `${serverStatus.vlm?.providerResolved || '?'} / ${serverStatus.vlm?.model || 'n/a'}` });
+    lines.push({
+      label: 'Ollama',
+      value: serverStatus.llm?.ollamaReachable
+        ? `reachable (${serverStatus.llm.ollamaModelsCount} models)`
+        : 'not reachable',
+      warn: !serverStatus.llm?.ollamaReachable,
+    });
+    lines.push({ label: 'LLM model', value: `${serverStatus.llm?.ollamaModelRequested || 'n/a'} (${serverStatus.llm?.ollamaModelAvailable ? 'available' : 'missing'})`, warn: !serverStatus.llm?.ollamaModelAvailable });
+    lines.push({ label: 'VLM model', value: `${serverStatus.vlm?.ollamaModelRequested || 'n/a'} (${serverStatus.vlm?.ollamaModelAvailable ? 'available' : 'missing'})`, warn: !serverStatus.vlm?.ollamaModelAvailable });
+    if (serverStatus.web?.enabled) lines.push({ label: 'Web tools', value: 'enabled' });
+    return lines;
   }, [serverStatus]);
 
   return (
@@ -174,18 +215,41 @@ export function ChatPanel() {
       <div className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)] flex items-center gap-2">
         <Sparkles className="w-3.5 h-3.5 text-[var(--accent-color)]" />
         AI Chat
-        {modelBadge ? (
+        {modelBadgeLabel ? (
           <button
             type="button"
-            className="ml-1 px-1.5 py-0.5 rounded border border-white/10 bg-black/30 text-[9px] normal-case tracking-normal text-[var(--text-secondary)]"
-            title={modelBadgeTitle}
-            onClick={() => void refreshServerStatus()}
-            disabled={statusLoading}
+            className={`ml-1 px-1.5 py-0.5 rounded border text-[9px] normal-case tracking-normal transition-colors ${
+              modelBadgeLabel.ok
+                ? 'border-green-500/30 bg-green-500/10 text-green-400'
+                : 'border-yellow-500/30 bg-yellow-500/10 text-yellow-400'
+            }`}
+            onClick={() => setStatusExpanded((v) => !v)}
           >
-            {statusLoading ? 'Refreshing…' : modelBadge}
+            {modelBadgeLabel.text} {statusExpanded ? '▲' : '▼'}
           </button>
         ) : null}
+        {modelBadgeLabel && (
+          <button
+            type="button"
+            className="text-[9px] text-[var(--text-secondary)] hover:text-white transition-colors"
+            onClick={() => void refreshServerStatus()}
+            disabled={statusLoading}
+            title="Refresh server status"
+          >
+            {statusLoading ? '⟳…' : '⟳'}
+          </button>
+        )}
       </div>
+      {statusExpanded && statusLines.length > 0 && (
+        <div className="bg-black/50 border border-white/10 rounded px-2 py-1.5 flex flex-col gap-0.5">
+          {statusLines.map((line, i) => (
+            <div key={i} className="flex gap-2 text-[10px] leading-4">
+              <span className="text-[var(--text-secondary)] shrink-0 w-20 text-right">{line.label}</span>
+              <span className={line.warn ? 'text-yellow-400' : 'text-[var(--text-primary)]'}>{line.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {!wsConnected ? (
         <div className="text-[10px] text-yellow-200 flex items-center justify-between gap-2 bg-yellow-500/10 border border-yellow-500/30 rounded px-2 py-1">
           <span>{wsError ? `WS error: ${wsError}` : 'WS not connected'}</span>
@@ -221,8 +285,23 @@ export function ChatPanel() {
         ) : null}
       </div>
       {lastLatencyMs != null ? (
-        <div className="text-[10px] text-[var(--text-secondary)]" data-testid="chat-last-latency">
-          Last reply latency: {lastLatencyMs} ms
+        <div className="text-[10px] text-[var(--text-secondary)] flex items-center gap-2 flex-wrap" data-testid="chat-last-latency">
+          <span>Latency: {lastLatencyMs} ms</span>
+          {lastRouteMeta ? (
+            <>
+              <span className={`px-1 rounded text-[9px] ${
+                lastRouteMeta.route === 'docs' ? 'bg-green-500/20 text-green-400' :
+                lastRouteMeta.route === 'codex' ? 'bg-purple-500/20 text-purple-400' :
+                'bg-blue-500/20 text-blue-400'
+              }`}>
+                {lastRouteMeta.route}
+              </span>
+              {lastRouteMeta.model && (
+                <span className="text-[var(--text-secondary)]">{lastRouteMeta.model}</span>
+              )}
+              <span className="text-[var(--text-secondary)] opacity-60">{lastRouteMeta.category}</span>
+            </>
+          ) : null}
         </div>
       ) : null}
       <div className="flex items-center gap-2 bg-black/40 border border-white/10 rounded px-2 py-1.5">

@@ -1,5 +1,10 @@
+import { execSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 type ProviderName = 'gemini' | 'ollama' | 'mock' | 'none';
-type RouterProviderName = 'agent' | 'mock';
+type RouterProviderName = 'agent' | 'mock' | 'codex' | 'openai' | 'smart';
 
 export type ServerStatus = {
   ts: number;
@@ -7,6 +12,12 @@ export type ServerStatus = {
     providerEnv: string;
     providerResolved: RouterProviderName;
     llmEnabled: boolean;
+  };
+  codex?: {
+    loggedIn: boolean;
+    authMode: string;
+    cliAvailable: boolean;
+    authFile: string;
   };
   llm: {
     providerEnv: string;
@@ -92,7 +103,33 @@ function resolveRouterProvider(): RouterProviderName {
     .toLowerCase();
   if (provider === 'mock') return 'mock';
   if (provider === 'agent') return 'agent';
+  if (provider === 'codex') return 'codex';
+  if (provider === 'openai') return 'openai';
+  if (provider === 'smart') return 'smart';
   return 'mock';
+}
+
+function checkCodexStatus(): ServerStatus['codex'] {
+  const authFile = path.join(os.homedir(), '.codex', 'auth.json');
+  let loggedIn = false;
+  let authMode = 'none';
+  try {
+    const raw = fs.readFileSync(authFile, 'utf8');
+    const data = JSON.parse(raw);
+    authMode = String(data?.auth_mode || 'unknown');
+    loggedIn = authMode === 'chatgpt'
+      ? !!(data?.tokens)
+      : !!(data?.OPENAI_API_KEY || data?.api_key || data?.tokens);
+  } catch { /* auth.json missing or unreadable */ }
+
+  // Check if codex CLI binary is available in PATH
+  let cliAvailable = false;
+  try {
+    execSync('codex --version', { stdio: 'ignore', timeout: 2000 });
+    cliAvailable = true;
+  } catch { /* codex not in PATH */ }
+
+  return { loggedIn, authMode, cliAvailable, authFile };
 }
 
 function resolveModelForProvider(params: {
@@ -175,6 +212,8 @@ export async function getServerStatus(): Promise<ServerStatus> {
     defaultGeminiModel: 'gemini-1.5-flash',
   });
 
+  const isCodexRouter = routerProviderResolved === 'codex' || routerProviderResolved === 'openai';
+
   return {
     ts: Date.now(),
     router: {
@@ -182,6 +221,7 @@ export async function getServerStatus(): Promise<ServerStatus> {
       providerResolved: routerProviderResolved,
       llmEnabled,
     },
+    ...(isCodexRouter ? { codex: checkCodexStatus() } : {}),
     llm: {
       providerEnv: String(process.env.ROUTER_LLM_PROVIDER || 'auto'),
       providerResolved: llmProviderResolved,

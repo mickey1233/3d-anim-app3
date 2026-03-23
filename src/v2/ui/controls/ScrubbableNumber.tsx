@@ -18,6 +18,8 @@ export function ScrubbableNumber({
   testId?: string;
 }) {
   const startRef = React.useRef<{ x: number; value: number; steps: number } | null>(null);
+  const [editing, setEditing] = React.useState(false);
+  const [editValue, setEditValue] = React.useState('');
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (disabled || value === null) return;
@@ -39,13 +41,42 @@ export function ScrubbableNumber({
   };
 
   const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (startRef.current) {
+    const start = startRef.current;
+    if (start) {
+      if (start.steps === 0 && value !== null && !disabled) {
+        setEditing(true);
+        setEditValue(value.toFixed(precision));
+      }
       startRef.current = null;
     }
     try {
       (e.target as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {}
   };
+
+  const commitEdit = () => {
+    const parsed = parseFloat(editValue);
+    if (!isNaN(parsed) && onChange) onChange(parsed);
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <input
+        type="number"
+        autoFocus
+        value={editValue}
+        onChange={(e) => setEditValue(e.target.value)}
+        onBlur={commitEdit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commitEdit();
+          if (e.key === 'Escape') setEditing(false);
+        }}
+        className={`w-full bg-black/40 border border-white/20 rounded px-2 py-1 text-[10px] outline-none ${className || ''}`}
+        data-testid={testId}
+      />
+    );
+  }
 
   const display = value === null ? '—' : value.toFixed(precision);
 

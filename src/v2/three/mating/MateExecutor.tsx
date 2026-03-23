@@ -37,6 +37,24 @@ export function MateExecutor() {
 
     const mode = req.mode || 'translate';
     const twistSpec = req.twistSpec;
+
+    // Sync THREE.js objects from store to ensure we use current positions (not stale React state)
+    const storeState = useV2Store.getState();
+    const srcStored =
+      storeState.parts.overridesById[req.sourceId] || storeState.parts.initialTransformById[req.sourceId];
+    if (srcStored) {
+      source.position.set(srcStored.position[0], srcStored.position[1], srcStored.position[2]);
+      source.quaternion.set(srcStored.quaternion[0], srcStored.quaternion[1], srcStored.quaternion[2], srcStored.quaternion[3]);
+      source.updateMatrixWorld(true);
+    }
+    const tgtStored =
+      storeState.parts.overridesById[req.targetId] || storeState.parts.initialTransformById[req.targetId];
+    if (tgtStored) {
+      target.position.set(tgtStored.position[0], tgtStored.position[1], tgtStored.position[2]);
+      target.quaternion.set(tgtStored.quaternion[0], tgtStored.quaternion[1], tgtStored.quaternion[2], tgtStored.quaternion[3]);
+      target.updateMatrixWorld(true);
+    }
+
     const beforePos = new THREE.Vector3();
     const beforeQuat = new THREE.Quaternion();
     source.getWorldPosition(beforePos);

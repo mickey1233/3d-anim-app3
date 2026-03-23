@@ -7,6 +7,7 @@ import { callMcpTool, extractToolErrorMessage } from '../../network/mcpToolsClie
 export function MatePanel() {
   const partOrder = useV2Store((s) => s.parts.order);
   const partById = useV2Store((s) => s.parts.byId);
+  const assemblyGroups = useV2Store((s) => s.assemblyGroups);
   const setPickMode = useV2Store((s) => s.setPickFaceMode);
   const clearMatePick = useV2Store((s) => s.clearMatePick);
   const clearMarkers = useV2Store((s) => s.clearMarkers);
@@ -17,6 +18,10 @@ export function MatePanel() {
   const partList = React.useMemo(
     () => partOrder.map((id) => partById[id]).filter(Boolean),
     [partOrder, partById]
+  );
+  const groupList = React.useMemo(
+    () => assemblyGroups.order.map((id) => assemblyGroups.byId[id]).filter(Boolean),
+    [assemblyGroups]
   );
   const [isApplying, setIsApplying] = React.useState(false);
   const [applyError, setApplyError] = React.useState<string | null>(null);
@@ -31,8 +36,12 @@ export function MatePanel() {
     if (!mateDraft.sourceId || !mateDraft.targetId) return;
     if (isApplying) return;
 
-    const sourceName = partById[mateDraft.sourceId]?.name || 'source';
-    const targetName = partById[mateDraft.targetId]?.name || 'target';
+    const sourceName = mateDraft.sourceGroupId
+      ? (assemblyGroups.byId[mateDraft.sourceGroupId]?.name ?? 'group')
+      : (partById[mateDraft.sourceId]?.name || 'source');
+    const targetName = mateDraft.targetGroupId
+      ? (assemblyGroups.byId[mateDraft.targetGroupId]?.name ?? 'group')
+      : (partById[mateDraft.targetId]?.name || 'target');
 
     setIsApplying(true);
     setApplyError(null);
@@ -40,6 +49,8 @@ export function MatePanel() {
       const result = await callMcpTool('action.mate_execute', {
         sourcePart: { partId: mateDraft.sourceId },
         targetPart: { partId: mateDraft.targetId },
+        ...(mateDraft.sourceGroupId ? { sourceGroupId: mateDraft.sourceGroupId } : {}),
+        ...(mateDraft.targetGroupId ? { targetGroupId: mateDraft.targetGroupId } : {}),
         sourceFace: mateDraft.sourceFace,
         targetFace: mateDraft.targetFace,
         sourceMethod: mateDraft.sourceMethod,
@@ -94,10 +105,17 @@ export function MatePanel() {
 
       <label className="text-[10px] text-[var(--text-secondary)]">Source Part</label>
       <select
-        value={mateDraft.sourceId}
+        value={mateDraft.sourceGroupId ? `__group__${mateDraft.sourceGroupId}` : mateDraft.sourceId}
         onChange={(e) => {
-          const next = e.target.value;
-          setMateDraft({ sourceId: next }, 'source');
+          const val = e.target.value;
+          if (val.startsWith('__group__')) {
+            const groupId = val.slice('__group__'.length);
+            const group = assemblyGroups.byId[groupId];
+            const firstMemberId = group?.partIds[0] ?? '';
+            setMateDraft({ sourceId: firstMemberId, sourceGroupId: groupId }, 'source');
+          } else {
+            setMateDraft({ sourceId: val, sourceGroupId: undefined }, 'source');
+          }
         }}
         data-testid="mate-source"
         className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
@@ -108,14 +126,30 @@ export function MatePanel() {
             {p.name}
           </option>
         ))}
+        {groupList.length > 0 && (
+          <optgroup label="── Groups ──">
+            {groupList.map((g) => (
+              <option key={g.id} value={`__group__${g.id}`}>
+                {g.name} (group)
+              </option>
+            ))}
+          </optgroup>
+        )}
       </select>
 
       <label className="text-[10px] text-[var(--text-secondary)]">Target Part</label>
       <select
-        value={mateDraft.targetId}
+        value={mateDraft.targetGroupId ? `__group__${mateDraft.targetGroupId}` : mateDraft.targetId}
         onChange={(e) => {
-          const next = e.target.value;
-          setMateDraft({ targetId: next }, 'target');
+          const val = e.target.value;
+          if (val.startsWith('__group__')) {
+            const groupId = val.slice('__group__'.length);
+            const group = assemblyGroups.byId[groupId];
+            const firstMemberId = group?.partIds[0] ?? '';
+            setMateDraft({ targetId: firstMemberId, targetGroupId: groupId }, 'target');
+          } else {
+            setMateDraft({ targetId: val, targetGroupId: undefined }, 'target');
+          }
         }}
         data-testid="mate-target"
         className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
@@ -126,6 +160,15 @@ export function MatePanel() {
             {p.name}
           </option>
         ))}
+        {groupList.length > 0 && (
+          <optgroup label="── Groups ──">
+            {groupList.map((g) => (
+              <option key={g.id} value={`__group__${g.id}`}>
+                {g.name} (group)
+              </option>
+            ))}
+          </optgroup>
+        )}
       </select>
 
       <div className="grid grid-cols-2 gap-2 mt-1">

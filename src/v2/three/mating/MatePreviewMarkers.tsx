@@ -12,7 +12,8 @@ type LocalAnchor = {
 };
 
 const PREVIEW_RESOLVE_DEBOUNCE_MS = 72;
-const MARKER_RADIUS = 0.0035;
+const MIN_MARKER_RADIUS = 0.002;
+const MARKER_RADIUS_FRACTION = 0.025; // 2.5% of the model's largest dimension
 
 function buildPartObjectMap(scene: THREE.Scene, partIds: string[]) {
   const wanted = new Set(partIds);
@@ -56,6 +57,24 @@ export function MatePreviewMarkers() {
     (partId: string) => objectByPartId.get(partId) ?? scene.getObjectByProperty('uuid', partId) ?? null,
     [objectByPartId]
   );
+
+  // Compute marker radius as a fraction of the model's bounding box diagonal,
+  // so markers are always visible regardless of model scale.
+  const [markerRadius, setMarkerRadius] = React.useState(MIN_MARKER_RADIUS);
+  React.useEffect(() => {
+    if (objectByPartId.size === 0) return;
+    const box = new THREE.Box3();
+    for (const obj of objectByPartId.values()) {
+      obj.updateWorldMatrix(true, true);
+      const b = new THREE.Box3().setFromObject(obj);
+      if (!b.isEmpty()) box.union(b);
+    }
+    if (box.isEmpty()) return;
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z);
+    setMarkerRadius(Math.max(MIN_MARKER_RADIUS, maxDim * MARKER_RADIUS_FRACTION));
+  }, [objectByPartId]);
 
   React.useEffect(() => {
     if (!isMateContext) {
@@ -260,13 +279,13 @@ export function MatePreviewMarkers() {
     <group>
       <group ref={sourceGroupRef} visible={false}>
         <mesh raycast={() => null} renderOrder={10}>
-          <sphereGeometry args={[MARKER_RADIUS, 8, 8]} />
+          <sphereGeometry args={[markerRadius, 8, 8]} />
           <meshBasicMaterial color="#22d3ee" transparent opacity={0.76} />
         </mesh>
       </group>
       <group ref={targetGroupRef} visible={false}>
         <mesh raycast={() => null} renderOrder={10}>
-          <sphereGeometry args={[MARKER_RADIUS, 8, 8]} />
+          <sphereGeometry args={[markerRadius, 8, 8]} />
           <meshBasicMaterial color="#f472b6" transparent opacity={0.76} />
         </mesh>
       </group>

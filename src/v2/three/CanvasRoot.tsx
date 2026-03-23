@@ -1,5 +1,33 @@
 import React from 'react';
+import * as THREE from 'three';
 import { Canvas } from '@react-three/fiber';
+
+type EBState = { error: string | null };
+class CanvasErrorBoundary extends React.Component<{ children: React.ReactNode }, EBState> {
+  state: EBState = { error: null };
+  static getDerivedStateFromError(e: Error): EBState {
+    return { error: e.message };
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="w-full h-full flex items-center justify-center bg-black/80">
+          <div className="text-center max-w-md px-6">
+            <div className="text-red-400 text-sm font-medium mb-2">3D Canvas Error</div>
+            <div className="text-white/60 text-xs break-all">{this.state.error}</div>
+            <button
+              className="mt-4 text-xs border border-white/20 rounded px-3 py-1 hover:bg-white/10"
+              onClick={() => this.setState({ error: null })}
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 import { Grid } from '@react-three/drei';
 import { ModelLoader } from './ModelLoader';
 import { OrbitCoordinator } from './interaction/OrbitCoordinator';
@@ -19,6 +47,7 @@ import { SlotFixture } from './fixtures/SlotFixture';
 import { NestedFixture } from './fixtures/NestedFixture';
 import { StepRunner } from './animation/StepRunner';
 import { SceneRegistryBridge } from './SceneRegistryBridge';
+import { LightingController } from './LightingController';
 
 const GIZMO_RAYCAST_PRIORITY_FLAG = '__v2TransformGizmoHandle';
 
@@ -56,8 +85,13 @@ export function CanvasRoot() {
 
   return (
     <div className="w-full h-full">
+      <CanvasErrorBoundary>
       <Canvas
         camera={{ position: [4, 4, 4], fov: 50 }}
+        gl={{
+          toneMapping: THREE.ACESFilmicToneMapping,
+          toneMappingExposure: 0.65,
+        }}
         onCreated={(state) => {
           const prevFilter = state.events.filter;
           state.events.filter = (intersections, eventState) => {
@@ -70,8 +104,7 @@ export function CanvasRoot() {
         }}
       >
         <SceneRegistryBridge />
-        <ambientLight intensity={0.6} />
-        <directionalLight position={[6, 8, 5]} intensity={1.2} castShadow />
+        <LightingController />
         <GeneratedBackground />
         <OrbitCoordinator />
         {shouldUseFixture ? (
@@ -115,6 +148,7 @@ export function CanvasRoot() {
           />
         )}
       </Canvas>
+      </CanvasErrorBoundary>
     </div>
   );
 }

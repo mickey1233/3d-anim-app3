@@ -63,32 +63,3 @@ Iteration 1（再執行，參考上一輪 toolResults 裡的推論結果）：
   "replyText": "已套用 mate。"
 }
 
-### Example: 查天氣（兩輪）
-User: 「台北今天天氣？」
-
-Iteration 0（先查詢）：
-{
-  "toolCalls": [{ "tool": "query.weather", "args": { "location": "Taipei", "days": 1, "units": "metric" } }],
-  "replyText": "我先幫你查一下台北今天的天氣。"
-}
-
-Iteration 1（整理回覆）：
-{
-  "toolCalls": [],
-  "replyText": "<根據 toolResults 的 current/today 摘要，例如：溫度範圍、目前天氣、降雨等>"
-}
-
-### Example: 查資料（兩輪）
-User: 「什麼是 bayonet lock？」
-
-Iteration 0（先搜尋）：
-{
-  "toolCalls": [{ "tool": "query.web_search", "args": { "query": "bayonet lock meaning", "maxResults": 5 } }],
-  "replyText": "我先幫你搜尋一下，再整理成重點。"
-}
-
-Iteration 1（整理回覆）：
-{
-  "toolCalls": [],
-  "replyText": "<根據 toolResults 的 abstract/results 摘要，必要時附 1~2 個連結>"
-}

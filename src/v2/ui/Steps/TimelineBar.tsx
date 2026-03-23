@@ -12,7 +12,7 @@ export function TimelineBar() {
     <div className="h-12 border-t border-white/10 bg-black/40 backdrop-blur-md flex items-center gap-2 px-3">
       <div className="text-[10px] uppercase text-[var(--text-secondary)]">Timeline</div>
       <div className="flex-1 min-w-0 flex gap-1 overflow-x-auto custom-scrollbar">
-        {steps.map((s) => (
+        {steps.map((s, idx) => (
           <button
             key={s.id}
             type="button"
@@ -33,7 +33,7 @@ export function TimelineBar() {
               setDragId(null);
             }}
             onClick={() => {
-              void callMcpTool('steps.select', { stepId: s.id });
+              void callMcpTool('steps.playback_start_at', { stepId: s.id });
             }}
             className={`px-2 py-1 rounded text-[10px] whitespace-nowrap border ${
               current === s.id
@@ -41,7 +41,7 @@ export function TimelineBar() {
                 : 'bg-black/30 border-white/10'
             }`}
           >
-            {s.label}
+            Step {idx + 1}
           </button>
         ))}
         {steps.length === 0 ? (

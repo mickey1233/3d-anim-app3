@@ -5,7 +5,10 @@
     "off": ["off", "hide", "隱藏", "隐藏", "關閉", "关闭", "關掉", "关掉", "關"]
   },
   "reset": {
-    "keywords": ["reset", "還原", "还原", "重置", "回復", "恢复"]
+    "keywords": ["reset", "還原", "还原", "重置", "回復", "恢复", "restore", "回到原位", "回到位置"]
+  },
+  "autoAssemble": {
+    "keywords": ["mate all", "auto assemble", "自動組裝", "全部組裝", "一鍵組裝", "autoassemble", "assemble all"]
   },
   "all": {
     "keywords": ["all", "全部", "全部零件", "所有"]

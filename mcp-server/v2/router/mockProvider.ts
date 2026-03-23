@@ -9,6 +9,7 @@ type MentionedPart = RouterContext['parts'][number] & {
   index: number;
   end: number;
   volume: number;
+  groupId?: string;
 };
 
 const containsAny = (text: string, keywords: string[]) => keywords.some((keyword) => text.includes(keyword));
@@ -52,6 +53,7 @@ type RouterKeywordPolicy = {
   chat?: { help?: unknown };
   model?: { info?: unknown };
   mate?: { keywords?: unknown };
+  autoAssemble?: { keywords?: unknown };
 };
 
 type RouterKeywordSets = {
@@ -68,6 +70,7 @@ type RouterKeywordSets = {
   chatHelp: string[];
   modelInfo: string[];
   mate: string[];
+  autoAssemble: string[];
 };
 
 const normalizeKeywordList = (value: unknown) => {
@@ -92,6 +95,7 @@ const EMPTY_KEYWORD_SETS: RouterKeywordSets = {
   chatHelp: [],
   modelInfo: [],
   mate: [],
+  autoAssemble: [],
 };
 
 const buildKeywordSets = (policy: RouterKeywordPolicy | null): RouterKeywordSets => {
@@ -107,6 +111,7 @@ const buildKeywordSets = (policy: RouterKeywordPolicy | null): RouterKeywordSets
   const chat = policy?.chat ?? {};
   const model = policy?.model ?? {};
   const mate = policy?.mate ?? {};
+  const autoAssemble = policy?.autoAssemble ?? {};
 
   return {
     grid: {
@@ -126,6 +131,7 @@ const buildKeywordSets = (policy: RouterKeywordPolicy | null): RouterKeywordSets
     chatHelp: normalizeKeywordList(chat.help),
     modelInfo: normalizeKeywordList(model.info),
     mate: normalizeKeywordList(mate.keywords),
+    autoAssemble: normalizeKeywordList((autoAssemble as any).keywords),
   };
 };
 
@@ -425,6 +431,43 @@ const collectMentionedParts = (text: string, parts: RouterContext['parts']): Men
   return found.sort((left, right) => left.index - right.index);
 };
 
+const collectMentionedGroups = (
+  text: string,
+  groups: NonNullable<RouterContext['groups']>,
+  parts: RouterContext['parts']
+): MentionedPart[] => {
+  const lower = normalizeText(text);
+  const tokenizedText = normalizeToken(text);
+  const found: MentionedPart[] = [];
+  const seen = new Set<string>();
+
+  for (const group of groups) {
+    if (!group.partIds.length) continue;
+    const name = normalizeText(group.name);
+    const nameToken = normalizeToken(group.name);
+    const index = lower.indexOf(name);
+    const tokenHit = tokenizedText.includes(nameToken);
+    if (index < 0 && !tokenHit) continue;
+    if (seen.has(group.id)) continue;
+    seen.add(group.id);
+
+    const firstPartId = group.partIds[0] as string;
+    const firstPart = parts.find((p) => p.id === firstPartId);
+    found.push({
+      id: firstPartId,
+      name: group.name,
+      ...(firstPart?.position ? { position: firstPart.position } : {}),
+      ...(firstPart?.bboxSize ? { bboxSize: firstPart.bboxSize } : {}),
+      index: index >= 0 ? index : Number.MAX_SAFE_INTEGER - found.length,
+      end: index >= 0 ? index + name.length : Number.MAX_SAFE_INTEGER - found.length + 1,
+      volume: volumeFromSize(firstPart?.bboxSize),
+      groupId: group.id,
+    });
+  }
+
+  return found.sort((left, right) => left.index - right.index);
+};
+
 const detectFaceFromSegment = (
   segment: string,
   nlu: MockProviderNluSets,
@@ -684,48 +727,7 @@ const extractSuggestionData = (result: unknown) => {
   return nestedData || nestedResult;
 };
 
-const extractLatestToolResult = (ctx: RouterContext, tool: string) => {
-  const toolResults = Array.isArray(ctx.toolResults) ? ctx.toolResults : [];
-  for (let index = toolResults.length - 1; index >= 0; index -= 1) {
-    const item = toolResults[index];
-    if (!item || item.tool !== tool) continue;
-    return item;
-  }
-  return null;
-};
 
-const summarizeWeatherReply = (result: RouterContext['toolResults'][number]) => {
-  if (!result?.ok) {
-    return `天氣查詢失敗：${result?.error || '暫時無法取得資料'}`;
-  }
-  const data = extractSuggestionData(result.result);
-  const weather = asObject(data);
-  const current = asObject(weather?.current);
-  const today = asObject(weather?.today);
-
-  const resolvedLocation = typeof weather?.resolvedLocation === 'string'
-    ? weather.resolvedLocation
-    : typeof weather?.requestedLocation === 'string'
-    ? weather.requestedLocation
-    : '指定地點';
-  const summary = typeof current?.summary === 'string' ? current.summary : '資料已更新';
-  const temperature = typeof current?.temperature === 'number' ? `${Number(current.temperature).toFixed(1)}°` : null;
-  const highLow =
-    typeof today?.temperatureMax === 'number' && typeof today?.temperatureMin === 'number'
-      ? `${Number(today.temperatureMin).toFixed(1)}° ~ ${Number(today.temperatureMax).toFixed(1)}°`
-      : null;
-  const precipitation =
-    typeof today?.precipitationSum === 'number' ? `降雨 ${Number(today.precipitationSum).toFixed(1)}mm` : null;
-
-  return [
-    `${resolvedLocation}：${summary}`,
-    temperature ? `目前 ${temperature}` : null,
-    highLow ? `今日 ${highLow}` : null,
-    precipitation,
-  ]
-    .filter(Boolean)
-    .join('，');
-};
 
 const extractMateSuggestionContext = (
   ctx: RouterContext,
@@ -1035,7 +1037,6 @@ const looksLikeGeneralQuestion = (text: string, keywords: RouterKeywordSets, nlu
   text.endsWith('？') ||
   containsAny(text, nlu.generalQuestionTokens);
 
-const WEATHER_KEYWORDS = ['天氣', '天气', 'weather', '氣溫', '气温', '溫度', '温度', '下雨', '降雨'];
 const PROVIDER_STATUS_KEYWORDS = [
   'mock',
   'ollama',
@@ -1049,23 +1050,6 @@ const PROVIDER_STATUS_KEYWORDS = [
   '你用',
 ];
 
-const extractWeatherLocation = (raw: string): string | null => {
-  const text = String(raw || '').replace(/[?？]/g, ' ').trim();
-  if (!text) return null;
-
-  const explicit = text.match(/(?:在|in)\s*([a-zA-Z\u4e00-\u9fff][a-zA-Z\u4e00-\u9fff\s\-]{1,31})/i);
-  if (explicit?.[1]) return explicit[1].trim();
-
-  const weatherIndex = text.search(/天氣|天气|weather|氣溫|气温|溫度|温度|下雨|降雨/i);
-  if (weatherIndex > 0) {
-    const candidate = text
-      .slice(0, weatherIndex)
-      .replace(/今天|今日|現在|现在|請問|请问|想知道|查一下/gi, '')
-      .trim();
-    if (candidate.length >= 2 && candidate.length <= 24) return candidate;
-  }
-  return null;
-};
 
 const buildProviderStatusReply = () => {
   const routerProvider = String(process.env.ROUTER_PROVIDER || 'mock').trim().toLowerCase();
@@ -1082,7 +1066,7 @@ const buildFallbackReply = (ctx: RouterContext) => {
     return '目前場景還沒有零件。先載入模型，再用「mate part1 and part2」或「切到 rotate 模式」。';
   }
   const sampleParts = ctx.parts.slice(0, 3).map((part) => part.name).join('、');
-  return `目前有 ${ctx.parts.length} 個零件（例如：${sampleParts}）。你可以說「mate A and B」、「select A」或「今天天氣（加地點）」。`;
+  return `目前有 ${ctx.parts.length} 個零件（例如：${sampleParts}）。你可以說「mate A and B」、「select A」或「add step 安裝」。`;
 };
 
 const buildStepHelpReply = () =>
@@ -1123,14 +1107,44 @@ export const MockRouterProvider: RouterProvider = {
     }
 
     if (containsAny(lower, keywords.stepCommand) && !containsAny(lower, keywords.question)) {
-      const match = nlu.stepCommandRegex ? text.match(nlu.stepCommandRegex) : null;
-      const label = (match?.[1] || 'New Step').trim().slice(0, 80);
+      // "delete step N" / "刪除 step N"
+      const deleteMatch = lower.match(/(?:delete|remove|刪除|移除)\s*(?:step|步驟|步)\s*(\d+)/i);
+      if (deleteMatch) {
+        const stepNum = parseInt(deleteMatch[1]!, 10);
+        const stepList = ctx.steps ?? [];
+        const target = stepList.find((s) => s.index + 1 === stepNum);
+        if (target) {
+          calls.push({ tool: 'steps.delete', args: { stepId: target.id }, confidence: 0.93 });
+          return { toolCalls: calls, replyText: `已刪除 Step ${stepNum}。` };
+        }
+        return { toolCalls: [], replyText: `找不到 Step ${stepNum}。目前共有 ${stepList.length} 個 step。` };
+      }
+
+      // "insert step after step N" / "在 step N 後面插入"
+      const insertMatch = lower.match(/(?:insert|add|新增|插入)\s*(?:step|步驟)?\s*(?:after|在|之後|後面)?\s*(?:step|步驟|步)?\s*(\d+)/i)
+        ?? lower.match(/(?:step|步驟|步)\s*(\d+)\s*(?:之後|後面|after)\s*(?:insert|add|新增|插入)/i);
+      if (insertMatch) {
+        const afterNum = parseInt(insertMatch[1]!, 10);
+        const stepList = ctx.steps ?? [];
+        const afterStep = stepList.find((s) => s.index + 1 === afterNum);
+        const label = `Step ${stepList.length + 1}`;
+        calls.push({
+          tool: 'steps.insert',
+          args: { afterStepId: afterStep?.id ?? null, label, select: true },
+          confidence: 0.9,
+        });
+        return { toolCalls: calls, replyText: `已在 Step ${afterNum} 後插入新 Step。` };
+      }
+
+      // plain "add step"
+      const stepList2 = ctx.steps ?? [];
+      const label = `Step ${stepList2.length + 1}`;
       calls.push({
         tool: 'steps.add',
         args: { label, select: true },
         confidence: 0.9,
       });
-      return { toolCalls: calls, replyText: `已新增 step：${label}` };
+      return { toolCalls: calls, replyText: `已新增 ${label}。` };
     }
 
     if (containsAny(lower, keywords.chatHelp)) {
@@ -1163,6 +1177,15 @@ export const MockRouterProvider: RouterProvider = {
       return { toolCalls: calls, replyText: '已幫你執行重做。' };
     }
 
+    const AUTO_ASSEMBLE_INLINE = ['mate all', 'assemble all', 'auto assemble', 'autoassemble', '自動組裝', '全部組裝', '一鍵組裝'];
+    if (
+      (keywords.autoAssemble.length > 0 && containsAny(lower, keywords.autoAssemble)) ||
+      containsAny(lower, AUTO_ASSEMBLE_INLINE)
+    ) {
+      calls.push({ tool: 'action.auto_assemble', args: {}, confidence: 0.92 });
+      return { toolCalls: calls, replyText: '正在自動組裝所有零件，請稍候…' };
+    }
+
     if (containsAny(lower, keywords.reset)) {
       const resetAll = containsAny(lower, keywords.all);
       if (resetAll) {
@@ -1170,14 +1193,19 @@ export const MockRouterProvider: RouterProvider = {
         return { toolCalls: calls, replyText: '已重置全部零件。' };
       }
 
+      // Detect reset mode: 'manual' if user says "restore" / "回到移動位置" / "回到手動"
+      const wantsManual = containsAny(lower, ['restore', '移動位置', '手動位置', '手動', 'manual']);
+      const mode = wantsManual ? 'manual' : 'initial';
+
       const part = findPart(lower, ctx.parts);
       if (part) {
         calls.push({
-          tool: 'action.reset_part',
-          args: { part: { partId: part.id } },
+          tool: 'action.reset_part_transform',
+          args: { part: { partId: part.id }, mode },
           confidence: 0.86,
         });
-        return { toolCalls: calls, replyText: `已重置 ${part.name}。` };
+        const modeLabel = wantsManual ? '移動位置' : '初始位置';
+        return { toolCalls: calls, replyText: `已重置 ${part.name} 到${modeLabel}。` };
       }
 
       calls.push({ tool: 'action.reset_all', args: {}, confidence: 0.6 });
@@ -1215,34 +1243,18 @@ export const MockRouterProvider: RouterProvider = {
       };
     }
 
-    if (containsAny(lower, WEATHER_KEYWORDS)) {
-      const latestWeather = extractLatestToolResult(ctx, 'query.weather');
-      if (latestWeather) {
-        return {
-          toolCalls: [],
-          replyText: summarizeWeatherReply(latestWeather),
-        };
-      }
-      const location = extractWeatherLocation(text);
-      if (!location) {
-        return {
-          toolCalls: [],
-          replyText: '要查天氣我需要地點，例如「台北今天天氣」或「weather in San Francisco」。',
-        };
-      }
-
-      calls.push({
-        tool: 'query.weather',
-        args: { location },
-        confidence: 0.88,
-      });
-      return {
-        toolCalls: calls,
-        replyText: `正在查詢 ${location} 的天氣資料。`,
-      };
-    }
-
-    const mentioned = collectMentionedParts(text, ctx.parts);
+    const mentionedParts = collectMentionedParts(text, ctx.parts);
+    const mentionedGroups = collectMentionedGroups(text, ctx.groups ?? [], ctx.parts);
+    const coveredByGroup = new Set(
+      mentionedGroups.flatMap((mg) => {
+        const grp = (ctx.groups ?? []).find((g) => g.id === mg.groupId);
+        return grp ? grp.partIds : [];
+      })
+    );
+    const mentioned = [
+      ...mentionedParts.filter((p) => !coveredByGroup.has(p.id)),
+      ...mentionedGroups,
+    ].sort((a, b) => a.index - b.index);
     const mateLike = containsAny(lower, keywords.mate) || (lower.includes(' and ') && mentioned.length >= 2);
     if (mateLike) {
       if (mentioned.length < 2) {
@@ -1335,9 +1347,20 @@ export const MockRouterProvider: RouterProvider = {
         target = vlmRefTarget;
       }
 
-      if (!explicitMode && vlmInferred?.mode) mode = vlmInferred.mode;
-      if (!explicitSourceFace && vlmInferred?.sourceFace) sourceFace = vlmInferred.sourceFace;
-      if (!explicitTargetFace && vlmInferred?.targetFace) targetFace = vlmInferred.targetFace;
+      // Geometry context from VLM infer result — rotation-invariant
+      const geometryCtx = mateVlmContext?.geometry;
+      // Geometry-computed mode is authoritative (accounts for actual quaternion mismatch)
+      if (!explicitMode) mode = geometryCtx?.suggestedMode ?? vlmInferred?.mode;
+      // For insert intent, the correct face pair is a property of the TARGET's cavity geometry
+      // (almost always bottom→top).  VLM visual inference is unreliable here because the source
+      // part may be far from, or rotated relative to, the target — making "which side faces where"
+      // visually ambiguous.  Use the geometry-precomputed rankingTop / expectedFromCenters instead.
+      const geoIntentIsInsert = geometryCtx?.intent === 'insert' || vlmInferred?.intent === 'insert';
+      const useGeoFace = geoIntentIsInsert && !explicitFace;
+      const geoFaceSrc = geometryCtx?.rankingTop?.sourceFace ?? geometryCtx?.expectedFromCenters?.sourceFace;
+      const geoFaceTgt = geometryCtx?.rankingTop?.targetFace ?? geometryCtx?.expectedFromCenters?.targetFace;
+      if (!explicitSourceFace) sourceFace = (useGeoFace && geoFaceSrc) ? geoFaceSrc : vlmInferred?.sourceFace;
+      if (!explicitTargetFace) targetFace = (useGeoFace && geoFaceTgt) ? geoFaceTgt : vlmInferred?.targetFace;
       const allowVlmMethodOverride = !explicitMethod && (!explicitFace || !explicitMode);
       if (allowVlmMethodOverride && vlmInferred?.sourceMethod) sourceMethod = vlmInferred.sourceMethod;
       if (allowVlmMethodOverride && vlmInferred?.targetMethod) targetMethod = vlmInferred.targetMethod;
@@ -1399,7 +1422,7 @@ export const MockRouterProvider: RouterProvider = {
         normalizeMateMethod(sourceMethod ?? (useSuggestedMethod ? rankingTop?.sourceMethod : undefined), 'planar_cluster');
       const resolvedTargetMethod =
         normalizeMateMethod(targetMethod ?? (useSuggestedMethod ? rankingTop?.targetMethod : undefined), 'planar_cluster');
-      const resolvedMode = mode ?? suggestionContext?.suggestedMode ?? 'translate';
+      const resolvedMode = mode ?? suggestionContext?.suggestedMode ?? 'both';
       const resolvedIntent = vlmInferred?.intent ?? suggestionContext?.intent;
       const inferredVia = vlmInferred?.origin ?? (hasMateVlmContext ? 'hybrid' : undefined);
       const inferredConfidence = typeof vlmInferred?.confidence === 'number' ? vlmInferred.confidence : undefined;
@@ -1420,18 +1443,33 @@ export const MockRouterProvider: RouterProvider = {
         arbitration: inferredArb,
       });
 
+      // Parse twist angle from natural language, e.g. "twist 90", "spin -45 tangent", "twist 180 x"
+      const twistMatch = text.match(
+        /\b(?:twist|spin)\s+(-?\d+(?:\.\d+)?)\s*(?:deg(?:rees?)?|°)?(?:\s+(?:around\s+)?(\w+))?/i
+      );
+      const twistDeg = twistMatch ? parseFloat(twistMatch[1]!) : undefined;
+      const twistAxisRaw = twistMatch?.[2]?.toLowerCase();
+      const VALID_TWIST_AXES = ['x', 'y', 'z', 'normal', 'tangent', 'bitangent'];
+      const twistAxis = VALID_TWIST_AXES.includes(twistAxisRaw ?? '') ? twistAxisRaw : 'normal';
+      const twistSpace = (twistAxis === 'x' || twistAxis === 'y' || twistAxis === 'z') ? 'world' : 'target_face';
+
       calls.push({
         tool: 'action.mate_execute',
         args: {
           sourcePart: { partId: source.id },
           targetPart: { partId: target.id },
+          ...(source.groupId ? { sourceGroupId: source.groupId } : {}),
+          ...(target.groupId ? { targetGroupId: target.groupId } : {}),
           sourceFace: resolvedSourceFace,
           targetFace: resolvedTargetFace,
           sourceMethod: resolvedSourceMethod,
           targetMethod: resolvedTargetMethod,
           mode: resolvedMode,
-          mateMode: resolvedMode === 'both' ? 'face_insert_arc' : 'face_flush',
-          pathPreference: resolvedMode === 'both' ? 'arc' : 'auto',
+          mateMode: resolvedIntent === 'insert' ? 'face_insert_arc' : 'face_flush',
+          pathPreference: resolvedIntent === 'insert' ? 'arc' : 'line',
+          ...(twistDeg !== undefined ? {
+            twist: { angleDeg: twistDeg, axis: twistAxis, axisSpace: twistSpace, constraint: 'free' }
+          } : {}),
           commit: true,
           pushHistory: true,
           stepLabel: `Mate ${source.name} to ${target.name}`,
@@ -1443,7 +1481,11 @@ export const MockRouterProvider: RouterProvider = {
         toolCalls: calls,
         replyText: `已解析：${source.name}(${resolvedSourceFace}) -> ${target.name}(${resolvedTargetFace})，method=${resolvedSourceMethod}/${resolvedTargetMethod}，mode=${resolvedMode}${
           resolvedIntent ? `，intent=${resolvedIntent}` : ''
-        }${inferredVia ? `，via=${inferredVia}` : ''}${inferredConfidence !== undefined ? `，conf=${inferredConfidence.toFixed(2)}` : ''}${
+        }${twistDeg !== undefined
+          ? `，twist=${twistDeg}°/${twistAxis}/${twistSpace}`
+          : (resolvedMode === 'both' || resolvedMode === 'twist')
+            ? `，twist=auto/normal/target_face`
+            : ''}${inferredVia ? `，via=${inferredVia}` : ''}${inferredConfidence !== undefined ? `，conf=${inferredConfidence.toFixed(2)}` : ''}${
           inferredConsensus !== undefined ? `，cons=${inferredConsensus.toFixed(2)}` : ''
         }${
           vlmDiagSelection && vlmDiagSelection !== 'none' ? `，vsel=${vlmDiagSelection}` : ''

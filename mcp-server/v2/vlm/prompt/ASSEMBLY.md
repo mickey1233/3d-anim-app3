@@ -7,10 +7,13 @@ This file is injected into the VLM/VLA prompt to reduce hardcoded logic in code 
 - **Intent** (`default|cover|insert`)
 - **Mode** (`translate|twist|both`) describing whether motion needs translation, rotation, or both.
 - **Faces** (`top/bottom/left/right/front/back`) for source and target.
-- **Methods** (`planar_cluster|geometry_aabb|object_aabb|obb_pca|picked`) to compute anchors/normals.
+- **Methods** (`planar_cluster|face_projection|geometry_aabb|object_aabb|obb_pca|picked`) to compute anchors/normals.
 
 ## Coordinate frame (important)
-- Face labels are interpreted in the **capture frame** (target-part frame), not fixed world axes.
+- Face labels follow the part's **LOCAL coordinate axes** (they rotate with the part):
+  - `top` = local +Y, `bottom` = local −Y
+  - `right` = local +X, `left` = local −X
+  - `front` = local +Z, `back` = local −Z
 - If the whole assembly is rotated/moved in the scene, face meaning should stay stable.
 - Prefer inferences that remain valid under global pose changes.
 
@@ -19,9 +22,29 @@ This file is injected into the VLM/VLA prompt to reduce hardcoded logic in code 
 - `intent=insert`: a plug/pin/key should end up **inside a socket/slot/hole** of the target (plug→socket, pin→hole, key→keyway).
 - `intent=default`: generic flush alignment / attach when cover/insert is not the dominant relation.
 
-- `mode=translate`: move only; orientation already correct.
+- `mode=translate`: move only; orientation already correct. Use only when source and target face normals are already aligned (both parts have the same world orientation).
 - `mode=twist`: rotate only (or rotation-dominant); translation is small.
-- `mode=both`: needs both rotation + translation (very common for cover/insert when normals are not aligned).
+- `mode=both`: needs both rotation + translation. **Required whenever the source has been rotated** relative to the target. Also common for cover/insert when normals are not aligned.
+
+**Critical rule**: If the metadata shows `hasRotationMismatch=true` or `rotationMismatchDeg > 5`, you MUST output `mode=both`. Never output `mode=translate` when the source part has been manually rotated (non-identity quaternion relative to target).
+
+## Twist skill — when and how to specify
+
+**When to use twist** (within `mode=both`):
+- Source face normal aligns to target, but the part ends up rotated around that axis at the wrong angle (e.g., screw holes don't line up, connector keys are misoriented).
+- Use twist to rotate around the mating face normal to correct the in-plane orientation.
+
+**Twist axis choices:**
+| axisSpace | axis | When to use |
+|-----------|------|-------------|
+| `target_face` | `normal` | Spin around the face normal (most common — corrects in-plane rotation) |
+| `target_face` | `tangent` | Spin around the horizontal axis of the face (tilts the part) |
+| `target_face` | `bitangent` | Spin around the depth axis of the face (tilts the other way) |
+| `world` | `x` / `y` / `z` | Spin around a world axis (use when the scene is axis-aligned and the rotation axis is obvious) |
+
+**Default twist behavior (no twist specified)**: The solver auto-computes minimal twist via `computeTwistFromTangents` to align face tangents. This handles most cases automatically.
+
+**Override twist via chat**: `"mate part1 base twist 90"` → 90° around face normal; `"mate part1 base spin 45 tangent"` → 45° around tangent; `"mate part1 base twist 180 x"` → 180° around world X.
 
 ## Common scenarios (examples)
 1) **Lid on base (cover)**: `intent=cover`, often `bottom -> top` (lid bottom to base top). Use `mode=translate` if normals are already aligned; otherwise `mode=both`.
@@ -37,9 +60,29 @@ This file is injected into the VLM/VLA prompt to reduce hardcoded logic in code 
 11) **Alignment pins / dowels**: `insert`, `mode=translate` if already oriented, else `both`; faces depend on the insertion axis (not always `bottom/top`).
 
 ## Method selection guidance
-- If a **slot / recess** exists, bbox can overestimate clearance. Avoid choosing `object_aabb` as the only method; consider `planar_cluster` or `obb_pca`.
+- `face_projection` — Selects the planar face cluster whose **center** is most extreme along the requested local axis (highest center.Y for "top", etc.). Unlike `planar_cluster` (which picks by normal alignment), `face_projection` picks by geometric position — the topmost/bottommost/etc. face group. Preferred for complex CAD parts with no large flat face aligned to an axis. Result position is similar to `geometry_aabb` but placed on an actual face surface.
+- If a **slot / recess** exists, bbox can overestimate clearance. Avoid choosing `object_aabb` as the only method; consider `planar_cluster`, `face_projection`, or `obb_pca`.
 - Prefer methods that describe the **actual contact surface** over methods dominated by external protrusions.
 - If the candidate list already contains an insert-friendly method pair, prefer it for `intent=insert` unless images strongly contradict.
+
+## Insert operations (critical)
+
+When `geometry.intent=insert`:
+- The source part goes INSIDE the target (plug into socket, PCB into housing, pin into hole).
+- The **target face** is the **opening of the cavity** — for upright parts this is almost always `top` (local +Y), the open side where you insert things.
+- The **source face** is the face that enters the cavity first — almost always `bottom` (local −Y), pointing toward the opening.
+- **Default insert pair: `source(bottom) → target(top)`**. Use this unless geometry candidates show a different axis.
+- Ignore visual appearance when the source is rotated — the correct face is determined by the cavity geometry, NOT by which side of the source visually faces toward the target in the scene images.
+
+When `geometry.intent=insert` AND `geometry.suggestedMode=both` (rotation mismatch):
+- The source part has been physically rotated. Its visual appearance is **misleading** — do NOT change the face selection based on rotation.
+- Use `geometry.rankingTop` (pre-computed from geometry) as your primary candidate selection.
+- `geometry.expectedFromCenters` gives the correct insert axis — trust it over your visual assessment.
+
+## Rotation metadata (authoritative — do not override with visual guess)
+- `sceneRelation.hasRotationMismatch`: if `true`, source and target have different world orientations. Face normals will NOT align via translation alone. **Always output `mode=both`** in this case.
+- `sceneRelation.rotationMismatchDeg`: angle in degrees between source and target world quaternions. >5° means rotation is needed. >15° means significant misalignment.
+- `geometry.suggestedMode`: the geometry system's mode recommendation, already accounting for rotation mismatch. Prefer this over your visual assessment for `mode`.
 
 ## Multi-view evidence guidance
 - Side views can be ambiguous. Prefer **Top** + **source_to_target / target_to_source** views for disambiguation.

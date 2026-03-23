@@ -1,3 +1,4 @@
+import type { Server as HttpServer } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { z } from 'zod';
 import { randomUUID } from 'crypto';
@@ -5,8 +6,9 @@ import { ClientRequestSchema, PROTOCOL_VERSION } from '../../shared/schema/index
 import type { ServerEvent, ServerResponse, TraceEntry, ToolResult } from '../../shared/schema/index.js';
 import { MCPToolRequestSchema } from '../../shared/schema/mcpToolsV3.js';
 import { routeAndExecute } from './router/router.js';
-import type { RouterContext, RouterToolResult } from './router/types.js';
+import type { RouterContext, RouterToolResult, RouteMeta } from './router/types.js';
 import { analyzeVlm } from './vlm/analyze.js';
+import { inferAssemblySequence } from './vlm/autoAssemble.js';
 import { queryWeather, queryWebSearch } from './web/queryTools.js';
 import { getServerStatus } from './status/serverStatus.js';
 
@@ -42,8 +44,12 @@ export class WsGatewayV2 {
   private wss: WebSocketServer;
   private pendingProxyRequests = new Map<string, PendingProxyRequest>();
 
-  constructor(port: number, host?: string) {
-    this.wss = new WebSocketServer(host ? { port, host } : { port });
+  constructor(portOrServer: number | HttpServer, host?: string) {
+    if (typeof portOrServer === 'number') {
+      this.wss = new WebSocketServer(host ? { port: portOrServer, host } : { port: portOrServer });
+    } else {
+      this.wss = new WebSocketServer({ server: portOrServer });
+    }
   }
 
   private sendResponse(
@@ -193,6 +199,7 @@ export class WsGatewayV2 {
               : [];
             const maxIterations = this.normalizeRouterIterations();
             let lastReplyText: string | undefined;
+            let routeMeta: RouteMeta | undefined;
             let iterationsUsed = 0;
             const routerStartedAt = Date.now();
             const iterationTimings: Array<{
@@ -214,6 +221,7 @@ export class WsGatewayV2 {
               });
               const routeMs = Math.max(0, Date.now() - routeStartedAt);
               lastReplyText = routed.replyText ?? lastReplyText;
+              if (iteration === 0 && routed.routeMeta) routeMeta = routed.routeMeta;
 
               if (routed.toolCalls.length === 0) break;
 
@@ -334,6 +342,7 @@ export class WsGatewayV2 {
                     totalMs: Math.max(0, Date.now() - routerStartedAt),
                     iterationTimings,
                   },
+                  ...(routeMeta ? { routeMeta } : {}),
                 },
               },
               undefined,
@@ -354,6 +363,15 @@ export class WsGatewayV2 {
             const parts = args.parts || [];
             const result = await analyzeVlm(images, parts, { mateContext: args.mateContext });
             this.sendResponse(ws, parsed.data.id, true, result);
+            return;
+          }
+
+          if (parsed.data.command === 'vlm_auto_assemble') {
+            const args = (parsed.data.args ?? {}) as { images?: any[]; parts?: any[] };
+            const images = args.images || [];
+            const parts = args.parts || [];
+            const steps = await inferAssemblySequence(images, parts);
+            this.sendResponse(ws, parsed.data.id, true, { steps });
             return;
           }
 

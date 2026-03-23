@@ -17,6 +17,7 @@ export type AnchorResult = {
 
 export const ANCHOR_METHOD_OPTIONS: { id: AnchorMethodId; label: string }[] = [
   { id: 'planar_cluster', label: 'Planar Cluster' },
+  { id: 'face_projection', label: 'Face Projection' },
   { id: 'geometry_aabb', label: 'Geometry AABB' },
   { id: 'object_aabb', label: 'Object AABB' },
   { id: 'obb_pca', label: 'OBB (PCA)' },
@@ -55,6 +56,162 @@ function stableTangentFromNormal(normal: THREE.Vector3) {
   return new THREE.Vector3().crossVectors(up, n).normalize();
 }
 
+// Cache for group anchor results to avoid re-computing every frame.
+const groupAnchorCache = new WeakMap<THREE.Object3D, Map<string, AnchorResult>>();
+
+/**
+ * Planar-cluster for multi-primitive Group parts.
+ * Iterates every triangle across all child Meshes (in Group-local space),
+ * keeps only triangles whose computed normal aligns with the requested face
+ * direction (dot > NORMAL_THRESH), then picks the most extreme cluster and
+ * returns its centroid — same semantics as resolvePlanarCluster on a single Mesh.
+ */
+function resolveGroupPlanarCluster(group: THREE.Object3D, faceId: FaceId): AnchorResult | null {
+  const cached = groupAnchorCache.get(group)?.get(faceId);
+  if (cached) return cloneAnchorResult(cached);
+
+  // Use FACE_DIR directly in group-local space — same semantic as resolvePlanarCluster
+  // for single meshes. "bottom" = the face whose LOCAL normal is (0,-1,0), i.e. the
+  // geometric bottom in the part's own design coordinate system, not whichever face
+  // happens to point down in world space. This prevents ancestor rotations (e.g. the
+  // R_x(90°) on a spark_ scale node) from deflecting the search direction and causing
+  // no faces to be found.
+  const dir = (FACE_DIR[faceId] ?? new THREE.Vector3(0, 1, 0)).clone().normalize();
+  group.updateWorldMatrix(true, true);
+  const groupWorldInv = new THREE.Matrix4().copy(group.matrixWorld).invert();
+
+  const NORMAL_THRESH = 0.7; // cos(~45°) — face must roughly face the requested direction
+
+  // FaceData now includes triangle area so we can weight clusters by surface area.
+  type FaceData = { center: THREE.Vector3; normal: THREE.Vector3; area: number };
+  const alignedFaces: FaceData[] = [];
+  const va = new THREE.Vector3();
+  const vb = new THREE.Vector3();
+  const vc = new THREE.Vector3();
+  const edge1 = new THREE.Vector3();
+  const edge2 = new THREE.Vector3();
+  const faceNormal = new THREE.Vector3();
+  const faceCenter = new THREE.Vector3();
+
+  group.traverse((child) => {
+    if (!(child as THREE.Mesh).isMesh) return;
+    const mesh = child as THREE.Mesh;
+    const geom = mesh.geometry;
+    const pos = geom?.attributes?.position;
+    if (!pos) return;
+
+    mesh.updateWorldMatrix(false, false);
+    const toGroupLocal = new THREE.Matrix4().copy(groupWorldInv).multiply(mesh.matrixWorld);
+
+    const readVert = (i: number, out: THREE.Vector3) =>
+      out.fromBufferAttribute(pos as THREE.BufferAttribute, i).applyMatrix4(toGroupLocal);
+
+    const processTri = (ai: number, bi: number, ci: number) => {
+      readVert(ai, va); readVert(bi, vb); readVert(ci, vc);
+      edge1.subVectors(vb, va);
+      edge2.subVectors(vc, va);
+      faceNormal.crossVectors(edge1, edge2);
+      if (faceNormal.lengthSq() < 1e-12) return; // degenerate
+      const triArea = faceNormal.length() * 0.5;
+      faceNormal.normalize();
+      if (faceNormal.dot(dir) < NORMAL_THRESH) return; // not aligned
+      faceCenter.addVectors(va, vb).add(vc).divideScalar(3);
+      alignedFaces.push({ center: faceCenter.clone(), normal: faceNormal.clone(), area: triArea });
+    };
+
+    const idx = geom.index;
+    if (idx) {
+      for (let i = 0; i < idx.count; i += 3) processTri(idx.array[i], idx.array[i + 1], idx.array[i + 2]);
+    } else {
+      for (let i = 0; i < pos.count; i += 3) processTri(i, i + 1, i + 2);
+    }
+  });
+
+  if (alignedFaces.length === 0) return null;
+
+  // Compute projection range for plane-clustering tolerance.
+  let maxProj = -Infinity;
+  let minProj = Infinity;
+  for (const f of alignedFaces) {
+    const p = f.center.dot(dir);
+    if (p > maxProj) maxProj = p;
+    if (p < minProj) minProj = p;
+  }
+
+  // Group aligned faces into plane clusters by proximity along dir.
+  // Use a tighter epsilon than the old extreme-cluster threshold — we want to
+  // separate the exterior rim (high Y) from the interior floor (lower Y) on hollow
+  // chassis bodies, which the old "cluster within 5% of extreme" approach merged.
+  const projRange = maxProj - minProj;
+  const modelScale = Math.max(Math.abs(maxProj), Math.abs(minProj), 1.0);
+  const planeGap = Math.max(projRange * 0.015, modelScale * 3e-4);
+
+  type PlaneCluster = { sumCenter: THREE.Vector3; totalArea: number; count: number; proj: number };
+  const planeClusters: PlaneCluster[] = [];
+  // Sort by projection so nearby faces are adjacent for O(n) clustering.
+  alignedFaces.sort((a, b) => a.center.dot(dir) - b.center.dot(dir));
+  for (const f of alignedFaces) {
+    const proj = f.center.dot(dir);
+    const last = planeClusters[planeClusters.length - 1];
+    if (last && Math.abs(proj - last.proj) <= planeGap) {
+      last.sumCenter.addScaledVector(f.center, f.area);
+      last.totalArea += f.area;
+      last.count += 1;
+      // Update running mean projection
+      last.proj += (proj - last.proj) / last.count;
+    } else {
+      planeClusters.push({
+        sumCenter: f.center.clone().multiplyScalar(f.area),
+        totalArea: f.area,
+        count: 1,
+        proj,
+      });
+    }
+  }
+
+  // Pick the plane cluster with the MOST total surface area — this is consistent with
+  // getFaceClusterByDirection (used by the single-mesh resolvePlanarCluster) which also
+  // uses area as the tiebreaker.  For a hollow chassis the INTERIOR FLOOR has more area
+  // than the thin exterior rim at the top, so the interior face is correctly selected
+  // instead of the exterior face that geometry_aabb would give.
+  planeClusters.sort((a, b) => b.totalArea - a.totalArea);
+  const best = planeClusters[0];
+  const center = best.totalArea > 0
+    ? best.sumCenter.clone().divideScalar(best.totalArea)   // area-weighted centroid
+    : best.sumCenter.clone().divideScalar(best.count);
+
+  if (import.meta.env?.DEV) {
+    console.debug('[planar_cluster:group]', {
+      group: group.name || group.uuid.slice(0, 8),
+      faceId,
+      alignedFaceCount: alignedFaces.length,
+      planeClusters: planeClusters.map(c => ({ proj: c.proj.toFixed(4), area: c.totalArea.toFixed(4), count: c.count })),
+      selectedProj: best.proj.toFixed(4),
+      selectedArea: best.totalArea.toFixed(4),
+      maxProj: maxProj.toFixed(4),
+      minProj: minProj.toFixed(4),
+      centerLocal: `(${center.x.toFixed(4)}, ${center.y.toFixed(4)}, ${center.z.toFixed(4)})`,
+      normalUsed: `dir=(${dir.x.toFixed(3)},${dir.y.toFixed(3)},${dir.z.toFixed(3)})`,
+    });
+  }
+
+  // Use the requested face direction as the normal, not the averaged geometry normal.
+  // The averaged normal can be tilted when complex multi-primitive geometry includes
+  // off-axis faces (e.g. curved walls, chamfers) in the cluster, causing an unwanted
+  // rotation in face_flush mode.  The direction is already filtered to NORMAL_THRESH
+  // (0.7), so all faces in the cluster are already roughly aligned with dir.
+  const result: AnchorResult = {
+    centerLocal: center,
+    normalLocal: dir.clone(),
+    tangentLocal: stableTangentFromNormal(dir),
+    method: 'planar_cluster',
+  };
+
+  if (!groupAnchorCache.has(group)) groupAnchorCache.set(group, new Map());
+  groupAnchorCache.get(group)!.set(faceId, cloneAnchorResult(result));
+  return result;
+}
+
 function cloneAnchorResult(result: AnchorResult): AnchorResult {
   return {
     ...result,
@@ -86,10 +243,23 @@ function getCachedGeometryAnchor(
   return resolved;
 }
 
-function geometryCacheKey(method: AnchorMethodId, faceId: FaceId, geometry: THREE.BufferGeometry) {
+/** Quantised world-rotation suffix so cached anchors are invalidated when the
+ *  object rotates. Resolution ~0.01 rad keeps cache churn low. */
+function rotationCacheKey(obj: THREE.Object3D): string {
+  const q = new THREE.Quaternion();
+  obj.getWorldQuaternion(q);
+  return `${q.x.toFixed(2)},${q.y.toFixed(2)},${q.z.toFixed(2)},${q.w.toFixed(2)}`;
+}
+
+function geometryCacheKey(
+  method: AnchorMethodId,
+  faceId: FaceId,
+  geometry: THREE.BufferGeometry,
+  rotKey = ''
+) {
   const posVersion = (geometry.attributes.position as any)?.version ?? 0;
   const indexVersion = geometry.index?.version ?? -1;
-  return `${method}:${faceId}:${posVersion}:${indexVersion}`;
+  return `${method}:${faceId}:${posVersion}:${indexVersion}:${rotKey}`;
 }
 
 function getFaceClusterByDirection(geometry: THREE.BufferGeometry, direction: THREE.Vector3): FaceCluster | null {
@@ -112,7 +282,14 @@ function getFaceClusterByDirection(geometry: THREE.BufferGeometry, direction: TH
 
 function resolvePlanarCluster(mesh: THREE.Mesh, faceId: FaceId): AnchorResult | null {
   const geom = mesh.geometry as THREE.BufferGeometry;
-  const cluster = getFaceClusterByDirection(geom, FACE_DIR[faceId]);
+  // Use FACE_DIR directly in mesh-local space. faceId='bottom' means the face
+  // whose LOCAL normal is (0,-1,0) — i.e. the geometric bottom of the part as
+  // designed — not "whichever face happens to point down in world space right now".
+  // Transforming FACE_DIR by meshWorldInv would change the selected face when the
+  // part is tilted by the user, picking the wrong face (e.g. back face instead of
+  // bottom face) and producing a bad mate rotation.
+  const dirLocal = (FACE_DIR[faceId] ?? new THREE.Vector3(0, 1, 0)).clone().normalize();
+  const cluster = getFaceClusterByDirection(geom, dirLocal);
   if (!cluster) return null;
   return {
     centerLocal: cluster.center.clone(),
@@ -131,9 +308,11 @@ function resolveGeometryAabb(mesh: THREE.Mesh, faceId: FaceId): AnchorResult | n
   const center = box.getCenter(new THREE.Vector3());
   const size = box.getSize(new THREE.Vector3());
   const dir = FACE_DIR[faceId].clone();
-  const offset = new THREE.Vector3(dir.x * size.x * 0.5, dir.y * size.y * 0.5, dir.z * size.z * 0.5);
-  const faceCenter = center.clone().add(offset);
-  const normal = dir.clone().normalize();
+  const extent = Math.abs(dir.x) * size.x * 0.5
+    + Math.abs(dir.y) * size.y * 0.5
+    + Math.abs(dir.z) * size.z * 0.5;
+  const faceCenter = center.clone().addScaledVector(dir, extent);
+  const normal = dir.clone();
   return {
     centerLocal: faceCenter,
     normalLocal: normal,
@@ -167,7 +346,10 @@ function resolveExtremeVertices(mesh: THREE.Mesh, faceId: FaceId): AnchorResult 
   const geom = mesh.geometry as THREE.BufferGeometry;
   const vertices = getVertices(geom);
   if (vertices.length === 0) return null;
-  const dir = FACE_DIR[faceId].clone().normalize();
+  // Use FACE_DIR directly in mesh-local space (same reason as resolvePlanarCluster).
+  const dir = (FACE_DIR[faceId] ?? new THREE.Vector3(0, 1, 0))
+    .clone()
+    .normalize();
   let maxDot = -Infinity;
   vertices.forEach((v) => {
     const d = v.dot(dir);
@@ -189,6 +371,33 @@ function resolveExtremeVertices(mesh: THREE.Mesh, faceId: FaceId): AnchorResult 
     tangentLocal: stableTangentFromNormal(dir),
     method: 'extreme_vertices',
     debug: { count },
+  };
+}
+
+function resolveFaceProjection(mesh: THREE.Mesh, faceId: FaceId): AnchorResult | null {
+  const geom = mesh.geometry as THREE.BufferGeometry;
+  const clusters = clusterPlanarFaces(geom);
+  if (clusters.length === 0) return null;
+  // Use FACE_DIR directly in mesh-local space (same reason as resolvePlanarCluster).
+  const dir = (FACE_DIR[faceId] ?? new THREE.Vector3(0, 1, 0))
+    .clone()
+    .normalize();
+  let best: FaceCluster | null = null;
+  let bestScore = -Infinity;
+  for (const cluster of clusters) {
+    const score = cluster.center.dot(dir);
+    if (score > bestScore || (score === bestScore && best !== null && cluster.area > best.area)) {
+      bestScore = score;
+      best = cluster;
+    }
+  }
+  if (!best) return null;
+  return {
+    centerLocal: best.center.clone(),
+    normalLocal: best.normal.clone().normalize(),
+    tangentLocal: best.tangent.clone().normalize(),
+    method: 'face_projection',
+    debug: { area: best.area, projectionScore: bestScore },
   };
 }
 
@@ -366,6 +575,30 @@ export function resolveAnchor({
   pick?: FaceAnchor;
   fallback?: AnchorMethodId[];
 }): AnchorResult | null {
+  // Always ensure matrixWorld is current before any world↔local direction conversions.
+  object.updateWorldMatrix(true, true);
+
+  // If object is a Group (multi-primitive part: no direct geometry), redirect
+  // geometry-based methods to resolveGroupPlanarCluster which merges all child
+  // vertices into the Group's local space before computing the anchor.
+  if (!(object as THREE.Mesh).geometry) {
+    const requestedMethod = method;
+    if (pick) {
+      return { ...resolvePicked(pick), requestedMethod, fallbackUsed: method !== 'picked' };
+    }
+    if (method === 'object_aabb') {
+      const aabb = resolveObjectAabb(object, faceId);
+      return aabb ? { ...aabb, requestedMethod, fallbackUsed: false } : null;
+    }
+    // For all geometry-based methods (planar_cluster, geometry_aabb, obb_pca, auto…)
+    // use the merged-vertex planar-cluster approach, then fall back to object_aabb.
+    const groupResult = resolveGroupPlanarCluster(object, faceId)
+      ?? resolveObjectAabb(object, faceId);
+    return groupResult
+      ? { ...groupResult, requestedMethod, fallbackUsed: groupResult.method !== method }
+      : null;
+  }
+
   const mesh = object as THREE.Mesh;
   const requestedMethod = method;
   if (method === 'extreme_vertices') {
@@ -377,29 +610,40 @@ export function resolveAnchor({
     switch (m) {
       case 'picked':
         return pick ? resolvePicked(pick) : null;
-      case 'planar_cluster':
+      case 'planar_cluster': {
         if (!geometry) return null;
         return getCachedGeometryAnchor(
           geometry,
-          geometryCacheKey('planar_cluster', faceId, geometry),
+          geometryCacheKey('planar_cluster', faceId, geometry, rotationCacheKey(mesh)),
           () => resolvePlanarCluster(mesh, faceId)
         );
-      case 'geometry_aabb':
+      }
+      case 'face_projection': {
+        if (!geometry) return null;
+        return getCachedGeometryAnchor(
+          geometry,
+          geometryCacheKey('face_projection', faceId, geometry, rotationCacheKey(mesh)),
+          () => resolveFaceProjection(mesh, faceId)
+        );
+      }
+      case 'geometry_aabb': {
         if (!geometry) return null;
         return getCachedGeometryAnchor(
           geometry,
           geometryCacheKey('geometry_aabb', faceId, geometry),
           () => resolveGeometryAabb(mesh, faceId)
         );
+      }
       case 'object_aabb':
         return resolveObjectAabb(object, faceId);
-      case 'extreme_vertices':
+      case 'extreme_vertices': {
         if (!geometry) return null;
         return getCachedGeometryAnchor(
           geometry,
           geometryCacheKey('extreme_vertices', faceId, geometry),
           () => resolveExtremeVertices(mesh, faceId)
         );
+      }
       case 'obb_pca':
         if (!geometry) return null;
         return getCachedGeometryAnchor(
@@ -407,7 +651,7 @@ export function resolveAnchor({
           geometryCacheKey('obb_pca', faceId, geometry),
           () => resolveObbPca(mesh, faceId)
         );
-      case 'auto':
+      case 'auto': {
         if (pick) return resolvePicked(pick);
         if (!geometry) return resolveObjectAabb(object, faceId);
         return (
@@ -422,6 +666,7 @@ export function resolveAnchor({
             () => resolvePlanarCluster(mesh, faceId)
           )
         );
+      }
       default:
         return null;
     }
