@@ -1,8 +1,5 @@
 import type { ToolCall } from '../../../shared/schema/index.js';
 import { AgentRouterProvider } from './agentProvider.js';
-import { CodexRouterProvider } from './codexProvider.js';
-import { MockRouterProvider } from './mockProvider.js';
-import { SmartRouterProvider } from './smartProvider.js';
 import type { RouterContext, RouterProvider, RouteMeta } from './types.js';
 
 export type RouterResult = {
@@ -12,12 +9,10 @@ export type RouterResult = {
 };
 
 const getProvider = (): RouterProvider => {
-  const provider = process.env.ROUTER_PROVIDER || 'mock';
-  if (provider === 'mock') return MockRouterProvider;
+  const provider = process.env.ROUTER_PROVIDER || 'agent';
   if (provider === 'agent') return AgentRouterProvider;
-  if (provider === 'codex' || provider === 'openai') return CodexRouterProvider;
-  if (provider === 'smart') return SmartRouterProvider;
-  return MockRouterProvider;
+  // Default to agent for all cases
+  return AgentRouterProvider;
 };
 
 export async function routeAndExecute(text: string, ctx: RouterContext): Promise<RouterResult> {

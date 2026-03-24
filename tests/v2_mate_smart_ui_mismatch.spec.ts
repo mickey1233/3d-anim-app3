@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test';
 test.describe('v2 mate smart vs UI parity (shelf fixture)', () => {
   test('smart mate matches UI auto/auto', async ({ page }) => {
     test.setTimeout(120_000);
-    await page.goto('http://127.0.0.1:5173/?v=2&fixture=shelf', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5274/?v=2&fixture=shelf', { waitUntil: 'domcontentloaded' });
 
     await page.waitForFunction(() => !!(window as any).__V2_STORE__?.getState);
     await page.waitForFunction(() => {

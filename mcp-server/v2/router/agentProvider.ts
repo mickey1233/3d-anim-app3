@@ -1,322 +1,236 @@
-import type { ToolCall } from '../../../shared/schema/index.js';
-import { MCPToolRequestSchema } from '../../../shared/schema/mcpToolsV3.js';
+/**
+ * agentProvider.ts — RouterProvider implementation backed by a real LLM agent.
+ *
+ * The LLM receives:
+ *   - A system prompt built from agent-prompts/ markdown documents
+ *   - A structured user context block (text + scene state)
+ *
+ * Env vars:
+ *   AGENT_LLM_MOCK_PATH  = path to JSON mock response file (for testing)
+ */
+
+import { readFile } from 'fs/promises';
 import { z } from 'zod';
+import type { RouterContext, RouterProvider, RouterRoute } from './types.js';
+import { buildSystemPrompt } from './promptLoader.js';
+import { callAgentLlm } from './agentLlm.js';
+import { mapPartReferenceToId } from './llmAssist.js';
 
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+// ---------------------------------------------------------------------------
+// Validation schema for agent responses
+// ---------------------------------------------------------------------------
 
-import { MockRouterProvider } from './mockProvider.js';
-import type { RouterContext, RouterProvider } from './types.js';
-
-type LlmProvider = 'auto' | 'ollama' | 'gemini';
-
-const DEFAULT_TIMEOUT_MS = Number(process.env.ROUTER_LLM_TIMEOUT_MS || 3200);
-const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
-const OLLAMA_MODEL = process.env.ROUTER_LLM_MODEL || process.env.OLLAMA_MODEL || 'qwen3:30b';
-const GEMINI_MODEL = process.env.GEMINI_MODEL || process.env.ROUTER_LLM_MODEL || 'gemini-1.5-flash';
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-
-const DEFAULT_AGENT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'agent');
-const MAX_TOOL_CALLS = Math.max(1, Math.min(12, Number(process.env.ROUTER_AGENT_MAX_TOOL_CALLS || 6)));
-
-const AgentToolCallSchema = z.object({
+const RawToolCallSchema = z.object({
   tool: z.string().min(1),
-  args: z.record(z.string(), z.unknown()).optional(),
-  confidence: z.number().min(0).max(1).optional(),
-  explain: z.string().optional(),
+  args: z.record(z.string(), z.unknown()).default({}),
 });
 
-const AgentRouteSchema = z.object({
-  toolCalls: z.array(AgentToolCallSchema).default([]),
-  replyText: z.string().optional(),
+const AgentResponseSchema = z.object({
+  replyText: z.string(),
+  toolCalls: z.array(RawToolCallSchema).default([]),
 });
 
-function withTimeout(timeoutMs: number) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  return { controller, timeout };
-}
+type ValidatedResponse = z.infer<typeof AgentResponseSchema>;
 
-let lastOllamaHealthCheckAt = 0;
-let lastOllamaHealth = false;
+// ---------------------------------------------------------------------------
+// Mock response loader (for tests)
+// ---------------------------------------------------------------------------
 
-function normalizeOllamaModelName(name: unknown) {
-  if (typeof name !== 'string') return '';
-  return name.trim().toLowerCase();
-}
-
-function isOllamaModelAvailable(model: string, tags: string[]) {
-  const requested = normalizeOllamaModelName(model);
-  if (!requested) return false;
-  const normalizedTags = tags.map(normalizeOllamaModelName).filter(Boolean);
-  if (requested.includes(':')) return normalizedTags.includes(requested);
-  return normalizedTags.some((name) => name === requested || name.startsWith(`${requested}:`));
-}
-
-async function checkOllamaReachable() {
-  const now = Date.now();
-  if (now - lastOllamaHealthCheckAt < 30_000) return lastOllamaHealth;
-  lastOllamaHealthCheckAt = now;
-  const { controller, timeout } = withTimeout(Math.min(DEFAULT_TIMEOUT_MS, 900));
-  try {
-    const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`, { signal: controller.signal });
-    if (!res.ok) {
-      lastOllamaHealth = false;
-      return false;
-    }
-    const payload = await res.json().catch(() => null);
-    const names = Array.isArray(payload?.models)
-      ? (payload.models as any[])
-          .map((model: any) => (typeof model?.name === 'string' ? model.name : null))
-          .filter(Boolean)
-      : [];
-    lastOllamaHealth = isOllamaModelAvailable(OLLAMA_MODEL, names);
-    return lastOllamaHealth;
-  } catch {
-    lastOllamaHealth = false;
-    return false;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-function extractJsonObject(raw: string) {
-  const text = raw.trim();
-  try {
-    return JSON.parse(text);
-  } catch {
-    const start = text.indexOf('{');
-    const end = text.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      const slice = text.slice(start, end + 1);
-      try {
-        return JSON.parse(slice);
-      } catch {
-        return null;
-      }
-    }
-    return null;
-  }
-}
-
-async function callOllamaJson(prompt: string) {
-  if (!(await checkOllamaReachable())) return null;
-  const { controller, timeout } = withTimeout(DEFAULT_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: controller.signal,
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        stream: false,
-        format: 'json',
-        options: { temperature: 0.15 },
-        messages: [
-          { role: 'system', content: 'You are a strict JSON routing agent. Output JSON only.' },
-          { role: 'user', content: prompt },
-        ],
-      }),
-    });
-    if (!response.ok) return null;
-    const payload = await response.json();
-    const content = String(payload?.message?.content || '').trim();
-    if (!content) return null;
-    return extractJsonObject(content);
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function callGeminiJson(prompt: string) {
-  if (!GEMINI_API_KEY) return null;
-  const { GoogleGenerativeAI } = await import('@google/generative-ai');
-  const client = new GoogleGenerativeAI(GEMINI_API_KEY);
-  const model = client.getGenerativeModel({ model: GEMINI_MODEL });
-  const { controller, timeout } = withTimeout(DEFAULT_TIMEOUT_MS);
-  try {
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.15,
-        responseMimeType: 'application/json',
-      },
-      signal: controller.signal as any,
-    });
-    const text = result.response.text();
-    if (!text) return null;
-    return extractJsonObject(text);
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-async function callLlmJson(prompt: string) {
-  const provider = (process.env.ROUTER_LLM_PROVIDER || 'auto') as LlmProvider;
-  if (provider === 'ollama') return callOllamaJson(prompt);
-  if (provider === 'gemini') return callGeminiJson(prompt);
-  if (GEMINI_API_KEY) {
-    const gemini = await callGeminiJson(prompt);
-    if (gemini) return gemini;
-  }
-  return callOllamaJson(prompt);
-}
-
-function listMarkdownFiles(rootDir: string, relativeDir = ''): string[] {
-  const dir = path.join(rootDir, relativeDir);
-  let entries: fs.Dirent[] = [];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-
-  const out: string[] = [];
-  for (const entry of entries) {
-    if (entry.name.startsWith('.')) continue;
-    const nextRel = path.join(relativeDir, entry.name);
-    if (entry.isDirectory()) {
-      out.push(...listMarkdownFiles(rootDir, nextRel));
-    } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
-      out.push(nextRel);
-    }
-  }
-  return out;
-}
-
-let cachedAgentDocs: { dir: string; key: string; content: string } | null = null;
-
-function loadAgentDocs() {
-  const dir = process.env.ROUTER_AGENT_DIR || DEFAULT_AGENT_DIR;
-  const files = listMarkdownFiles(dir).sort((a, b) => a.localeCompare(b));
-  const keyParts: string[] = [];
-  for (const rel of files) {
-    try {
-      const stat = fs.statSync(path.join(dir, rel));
-      keyParts.push(`${rel}:${stat.mtimeMs}`);
-    } catch {
-      keyParts.push(`${rel}:0`);
-    }
-  }
-  const key = keyParts.join('|');
-  if (cachedAgentDocs && cachedAgentDocs.dir === dir && cachedAgentDocs.key === key) return cachedAgentDocs.content;
-
-  const blocks: string[] = [];
-  for (const rel of files) {
-    try {
-      const full = path.join(dir, rel);
-      const content = fs.readFileSync(full, 'utf8').trim();
-      if (!content) continue;
-      blocks.push(`## ${rel}\n${content}`);
-    } catch {
-      // ignore individual file errors
-    }
-  }
-  const combined = blocks.join('\n\n').trim();
-  cachedAgentDocs = { dir, key, content: combined };
-  return combined;
-}
-
-const summarizeContext = (ctx: RouterContext) => {
-  const summary: RouterContext = {
-    parts: ctx.parts.slice(0, 32),
-    ...(ctx.groups && ctx.groups.length > 0 ? { groups: ctx.groups.slice(0, 16) } : {}),
-    cadFileName: ctx.cadFileName ?? null,
-    stepCount: ctx.stepCount,
-    currentStepId: ctx.currentStepId ?? null,
-    selectionPartId: ctx.selectionPartId ?? null,
-    interactionMode: ctx.interactionMode,
-    iteration: ctx.iteration ?? 0,
-    toolResults: Array.isArray(ctx.toolResults) ? ctx.toolResults.slice(-10) : [],
-  };
-  return summary;
+type MockEntry = {
+  replyText: string;
+  toolCalls: Array<{ tool: string; args: Record<string, unknown> }>;
 };
 
-function buildPrompt(text: string, ctx: RouterContext) {
-  const docs = loadAgentDocs();
-  const ctxJson = JSON.stringify(summarizeContext(ctx), null, 2);
-  return [
-    docs ? `${docs}\n` : '',
-    '---',
-    'Runtime context (JSON):',
-    ctxJson,
-    '---',
-    `User text: ${text}`,
-    '',
-    'Return JSON only, with this shape:',
-    '{"toolCalls":[{"tool":"<mcp tool name>","args":{...}}],"replyText":"<optional user-facing reply>"}',
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
+type MockFile = Record<string, MockEntry>;
 
-function sanitizeToolCalls(calls: Array<z.infer<typeof AgentToolCallSchema>>): ToolCall[] {
-  const out: ToolCall[] = [];
-  for (const call of calls) {
-    const parsed = MCPToolRequestSchema.safeParse({
-      tool: call.tool,
-      args: call.args ?? {},
-    });
-    if (!parsed.success) continue;
-    out.push({
-      tool: parsed.data.tool,
-      args: parsed.data.args ?? {},
-      ...(typeof call.confidence === 'number' ? { confidence: call.confidence } : {}),
-      ...(typeof call.explain === 'string' && call.explain.trim() ? { explain: call.explain.trim().slice(0, 220) } : {}),
-    });
-    if (out.length >= MAX_TOOL_CALLS) break;
+let mockCache: MockFile | null = null;
+
+async function loadMockFile(mockPath: string): Promise<MockFile> {
+  if (mockCache) return mockCache;
+  try {
+    const raw = await readFile(mockPath, 'utf-8');
+    mockCache = JSON.parse(raw) as MockFile;
+    return mockCache;
+  } catch (err) {
+    console.error('[agentProvider] Failed to load mock file:', mockPath, err);
+    return {};
   }
-  return out;
 }
 
-const isPlanningToolCall = (call: ToolCall) => call.tool === 'view.capture_image' || call.tool.startsWith('query.');
-
-export const AgentRouterProvider: RouterProvider = {
-  async route(text: string, ctx: RouterContext) {
-    if (process.env.ROUTER_LLM_ENABLE === '0') return MockRouterProvider.route(text, ctx);
-
-    const prompt = buildPrompt(text, ctx);
-    const raw = await callLlmJson(prompt);
-    if (!raw || typeof raw !== 'object') return MockRouterProvider.route(text, ctx);
-
-    const parsed = AgentRouteSchema.safeParse(raw);
-    if (!parsed.success) return MockRouterProvider.route(text, ctx);
-
-    const replyText = parsed.data.replyText?.trim() || undefined;
-    let toolCalls = sanitizeToolCalls(parsed.data.toolCalls);
-
-    const hasPlanningCalls = toolCalls.some((call) => isPlanningToolCall(call));
-    const hasNonPlanningCalls = toolCalls.some((call) => !isPlanningToolCall(call));
-    if (hasPlanningCalls && hasNonPlanningCalls) {
-      toolCalls = toolCalls.filter((call) => isPlanningToolCall(call));
+async function getMockResponse(text: string, mockPath: string): Promise<RouterRoute | null> {
+  const mock = await loadMockFile(mockPath);
+  const lower = text.toLowerCase();
+  // Use longest-key-match to avoid short keys shadowing longer specific keys
+  let bestKey: string | null = null;
+  let bestEntry: MockEntry | null = null;
+  for (const [key, value] of Object.entries(mock)) {
+    if (lower.includes(key.toLowerCase())) {
+      if (bestKey === null || key.length > bestKey.length) {
+        bestKey = key;
+        bestEntry = value;
+      }
     }
+  }
+  if (!bestEntry) return null;
+  return {
+    replyText: bestEntry.replyText,
+    toolCalls: bestEntry.toolCalls.map((tc) => ({
+      tool: tc.tool,
+      args: tc.args,
+    })),
+  };
+}
 
-    if (toolCalls.length === 0 && !replyText) return MockRouterProvider.route(text, ctx);
+// ---------------------------------------------------------------------------
+// Part reference resolution
+// ---------------------------------------------------------------------------
 
-    // Post-process: inject sourceGroupId/targetGroupId when part belongs to a group
-    if (ctx.groups && ctx.groups.length > 0) {
-      for (const call of toolCalls) {
-        if (call.tool === 'action.mate_execute' || call.tool === 'action.smart_mate_execute') {
-          const args = call.args as Record<string, unknown>;
-          const srcId = (args.sourcePart as any)?.partId as string | undefined;
-          const tgtId = (args.targetPart as any)?.partId as string | undefined;
-          if (srcId && !args.sourceGroupId) {
-            const grp = ctx.groups.find((g) => g.partIds.includes(srcId));
-            if (grp) args.sourceGroupId = grp.id;
-          }
-          if (tgtId && !args.targetGroupId) {
-            const grp = ctx.groups.find((g) => g.partIds.includes(tgtId));
-            if (grp) args.targetGroupId = grp.id;
+function resolvePartRefs(
+  toolCalls: ValidatedResponse['toolCalls'],
+  parts: RouterContext['parts']
+): ValidatedResponse['toolCalls'] {
+  return toolCalls.map((tc) => {
+    const args = { ...tc.args };
+    for (const key of ['sourcePart', 'targetPart', 'part'] as const) {
+      const ref = args[key];
+      if (!ref || typeof ref !== 'object') continue;
+      const refObj = ref as Record<string, unknown>;
+      // If partId is present and valid, keep it
+      if (typeof refObj.partId === 'string' && refObj.partId.length > 0) {
+        const exact = parts.find((p) => p.id === refObj.partId);
+        if (exact) continue;
+      }
+      // Try to resolve by partName or the partId as a name/fuzzy match
+      const nameRef = typeof refObj.partName === 'string' ? refObj.partName : (refObj.partId as string | undefined);
+      if (nameRef) {
+        const resolvedId = mapPartReferenceToId(nameRef, { parts } as RouterContext);
+        if (resolvedId) {
+          args[key] = { partId: resolvedId };
+        }
+      }
+    }
+    // Also handle selection.set nested part ref
+    if (tc.tool === 'selection.set' && args.selection && typeof args.selection === 'object') {
+      const sel = args.selection as Record<string, unknown>;
+      if (sel.part && typeof sel.part === 'object') {
+        const partRef = sel.part as Record<string, unknown>;
+        const nameRef = typeof partRef.partName === 'string' ? partRef.partName : (partRef.partId as string | undefined);
+        if (nameRef) {
+          const resolvedId = mapPartReferenceToId(nameRef, { parts } as RouterContext);
+          if (resolvedId) {
+            args.selection = { ...sel, part: { partId: resolvedId } };
           }
         }
       }
     }
+    return { ...tc, args };
+  });
+}
 
-    return { toolCalls, replyText };
+// ---------------------------------------------------------------------------
+// Context message builder
+// ---------------------------------------------------------------------------
+
+function buildContextMessage(text: string, ctx: RouterContext): string {
+  const partsJson = ctx.parts.slice(0, 32).map((p) => ({
+    id: p.id,
+    name: p.name,
+    ...(p.position ? { position: p.position.map((v) => Number(v.toFixed(4))) } : {}),
+    ...(p.bboxSize ? { bboxSize: p.bboxSize.map((v) => Number(v.toFixed(4))) } : {}),
+  }));
+
+  const context = {
+    userText: text,
+    sceneContext: {
+      cadFileName: ctx.cadFileName ?? null,
+      partCount: ctx.parts.length,
+      parts: partsJson,
+      stepCount: ctx.stepCount ?? 0,
+      currentStepId: ctx.currentStepId ?? null,
+      selectionPartId: ctx.selectionPartId ?? null,
+      interactionMode: ctx.interactionMode ?? null,
+      iteration: ctx.iteration ?? 1,
+      ...(ctx.vlmMateCapture
+        ? { vlmMateCapture: ctx.vlmMateCapture }
+        : {}),
+      ...(ctx.toolResults && ctx.toolResults.length > 0
+        ? { recentToolResults: ctx.toolResults.slice(-3) }
+        : {}),
+    },
+  };
+
+  return JSON.stringify(context, null, 2);
+}
+
+// ---------------------------------------------------------------------------
+// AgentRouterProvider
+// ---------------------------------------------------------------------------
+
+export const AgentRouterProvider: RouterProvider = {
+  async route(text: string, ctx: RouterContext): Promise<RouterRoute> {
+    if (!text.trim()) {
+      return { toolCalls: [], replyText: '請先輸入你想做的事。' };
+    }
+
+    // Mock mode for tests
+    const mockPath = process.env.AGENT_LLM_MOCK_PATH;
+    if (mockPath) {
+      const mockResult = await getMockResponse(text, mockPath);
+      if (mockResult) {
+        // Still resolve partName → partId even in mock mode
+        return {
+          ...mockResult,
+          toolCalls: resolvePartRefs(
+            mockResult.toolCalls.map((tc) => ({ ...tc, args: tc.args as Record<string, unknown> })),
+            ctx.parts
+          ),
+        };
+      }
+      // No mock entry found — return a graceful fallback
+      return {
+        toolCalls: [],
+        replyText: '（測試模式）找不到對應的 mock 回應。',
+      };
+    }
+
+    // Load system prompt (cached after first call)
+    let systemPrompt: string;
+    try {
+      systemPrompt = await buildSystemPrompt();
+    } catch (err) {
+      console.error('[agentProvider] Failed to build system prompt:', err);
+      return { toolCalls: [], replyText: '系統提示載入失敗，請稍後再試。' };
+    }
+
+    // Build user message
+    const userMessage = buildContextMessage(text, ctx);
+
+    // Call LLM
+    let raw: { replyText: string; toolCalls: unknown[] } | null;
+    try {
+      raw = await callAgentLlm(systemPrompt, userMessage);
+    } catch (err) {
+      console.error('[agentProvider] LLM call failed:', err);
+      return { toolCalls: [], replyText: '推論失敗，請再試一次。' };
+    }
+
+    if (!raw) {
+      return { toolCalls: [], replyText: '推論失敗，請再試一次。' };
+    }
+
+    // Validate response schema
+    const parsed = AgentResponseSchema.safeParse(raw);
+    if (!parsed.success) {
+      console.error('[agentProvider] Response schema validation failed:', parsed.error.message);
+      return { toolCalls: [], replyText: '回應格式錯誤，請再試一次。' };
+    }
+
+    // Resolve partName → partId
+    const resolvedToolCalls = resolvePartRefs(parsed.data.toolCalls, ctx.parts);
+
+    return {
+      toolCalls: resolvedToolCalls,
+      replyText: parsed.data.replyText,
+    };
   },
 };

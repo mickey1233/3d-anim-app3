@@ -17,7 +17,7 @@ This repo is undergoing a **full v2 rebuild** focused on a product-grade 3D CAD 
 
 ### Legacy (v1)
 Legacy UI remains accessible for comparison:
-`http://localhost:5173/?legacy=1`
+`http://localhost:5274/?legacy=1`
 
 ## Setup & Run
 
@@ -30,13 +30,13 @@ Legacy UI remains accessible for comparison:
    ```bash
    npm run dev
    ```
-   Access at `http://localhost:5173` (v2 default).
+   Access at `http://localhost:5274` (v2 default).
 
 3. **Run v2 WS Gateway (backend)**:
    ```bash
    npx tsx mcp-server/v2/index.ts
    ```
-   Default port: `ws://localhost:3011`
+   Default port: `ws://localhost:3112`
    Default router provider: `mock` (`ROUTER_PROVIDER=mock`).
    Optional agent router provider: `agent` (`ROUTER_PROVIDER=agent`).
 
@@ -108,7 +108,7 @@ Legacy UI remains accessible for comparison:
 ## Testing
 
 ### Manual v2 Smoke
-1. Open `http://localhost:5173`
+1. Open `http://localhost:5274`
 2. Select a part in the left panel
 3. Use **Mate** panel to align Top/Bottom
 4. Add a step and verify timeline updates
@@ -127,7 +127,7 @@ npx playwright test
 - Automated Plan→PRD→Implementation→Testing pipeline (only pauses for Plan/PRD approval): `docs/DEVFLOW.md`
 - CLI: `npm run devflow -- "your requirement"` (or `./devflow "your requirement"`)
 - API server: `npm run devflow:server`
-- Web UI: start `npm run devflow:server` then open `http://127.0.0.1:4170/`
+- Web UI: start `npm run devflow:server` then open `http://127.0.0.1:4271/`
 
 ## Project Structure (v2)
 - `src/v2/app`: AppShell / layout

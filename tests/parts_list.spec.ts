@@ -12,7 +12,7 @@ async function openLegacyAnimationPanel(page: Page) {
 
 test.describe('UI: Parts list', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('http://127.0.0.1:5173/?legacy=1', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5274', { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => !!(window as any).__APP_STORE__?.getState);
   });
 

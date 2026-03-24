@@ -14,7 +14,7 @@ test.describe('Picking Debug Test', () => {
   test.beforeEach(async ({ page }) => {
     // Enable console logs to terminal
     page.on('console', msg => console.log('PAGE LOG:', msg.text()));
-    await page.goto('http://127.0.0.1:5173/?legacy=1', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://localhost:5274');
   });
 
   test('should select part on click', async ({ page }) => {

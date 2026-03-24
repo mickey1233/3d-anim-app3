@@ -240,7 +240,7 @@ Two-phase NL understanding pipeline:
 | T12 | Select part → reset part |
 
 - **Test pattern**: Store-first via `window.__APP_STORE__` (exposed in DEV mode).
-- **Base URL**: `http://127.0.0.1:5173/?legacy=1` (loads v1 app for testing).
+- **Base URL**: `http://127.0.0.1:5274/?legacy=1` (loads v1 app for testing).
 - All 12 tests pass (~34s total).
 
 ---

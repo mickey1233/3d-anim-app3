@@ -4,7 +4,7 @@ test.describe('v2 responsive panel', () => {
   test('right panel scrolls to bottom on small viewport', async ({ page }) => {
     test.setTimeout(90_000);
     await page.setViewportSize({ width: 1366, height: 768 });
-    await page.goto('http://127.0.0.1:5173/?v=2', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5274/?v=2', { waitUntil: 'domcontentloaded' });
 
     await page.waitForFunction(() => !!(window as any).__V2_STORE__?.getState);
     await page.waitForSelector('[data-testid="panel-right-scroll"]');

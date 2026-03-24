@@ -12,8 +12,8 @@ A 3D CAD assembly & animation studio with an MCP (Model Context Protocol) backen
 
 ```bash
 # Dev servers (both required for full functionality)
-npm run dev                          # Frontend on :5173
-npx tsx mcp-server/v2/index.ts       # MCP WebSocket server on :3011
+npm run dev                          # Frontend on :5274
+npx tsx mcp-server/v2/index.ts       # MCP WebSocket server on :3112
 ./start.sh                           # Both together (frontend bg, backend fg)
 
 # Build
@@ -29,10 +29,10 @@ ollama ps
 
 # Devflow (tri-agent automation)
 npm run devflow -- "requirement"     # CLI
-npm run devflow:server               # Web UI on :4170
+npm run devflow:server               # Web UI on :4271
 ```
 
-**URLs:** Default is v2 at `http://localhost:5173`. Legacy v1 via `?legacy=1`. Fixtures via `?fixture=boxes`.
+**URLs:** Default is v2 at `http://localhost:5274`. Legacy v1 via `?legacy=1`. Fixtures via `?fixture=<id>` — available IDs: `boxes` (default), `side`, `lid`, `shelf`, `slot`, `nested`.
 
 ## Architecture
 
@@ -55,14 +55,13 @@ Most tools execute **in the browser** via the tool proxy pattern. The backend ro
 
 ### Key Directories
 
-- `src/v2/store/store.ts` — Single Zustand store (`V2State`). Scoped selectors pattern to avoid rerenders. Exposed as `window.__V2_STORE__` in dev for test access.
+- `src/v2/store/store.ts` — Single Zustand store (`V2State`). Top-level slices: `cadUrl`, `cadFileName`, `parts`, `selection`, `steps`, `playback`, `ui`, `interaction`, `markers`, `vlm`, `chat`, `view`, `connection`, `mateRequest`, `mateDraft`, `matePreview`. Scoped selectors pattern to avoid rerenders. Exposed as `window.__V2_STORE__` in dev for test access.
 - `src/v2/three/` — R3F scene: `CanvasRoot.tsx` (root), `ModelLoader.tsx` (GLTF loading), `SceneRegistry.ts` (global scene/camera/renderer refs accessed via `getV2Scene()` etc.), `mating/` (face clustering, anchor resolution, mate solver).
 - `src/v2/ui/` — React panels: Chat, CommandBar, MatePanel, PartsPanel, Steps, VLM.
 - `src/v2/network/` — `client.ts` (singleton WS client with auto-reconnect, 20s request timeout), `mcpToolExecutor.ts` (tool dispatch returning `ToolEnvelope<T>`).
-- `mcp-server/v2/` — `wsGateway.ts` (WS server + request routing), `router/router.ts` (intent router), `router/mockProvider.ts` (keyword-based NLP, default), `router/llmAssist.ts` (optional Gemini/Ollama).
-- `mcp-server/v2/router/agent/` — agent 模式的 prompts/skills/QA 設定（`ROUTER_PROVIDER=agent` 時使用）。
-- `mcp-server/v2/router/policy/` — mock router 的 keyword 與 NLU policy JSON。
-- `mcp-server/v2/vlm/` — VLM 分析管線，`structuredMate.ts` 負責多視角影像 → 結構化 JSON。
+- `mcp-server/v2/` — `wsGateway.ts` (WS server + request routing), `router/router.ts` (intent router), `router/agentProvider.ts` (LLM agent, default), `router/agentLlm.ts` (multi-model client), `router/promptLoader.ts` (loads `agent-prompts/`), `router/llmAssist.ts` (mapPartReferenceToId + inferMateWithLlm).
+- `agent-prompts/` — system prompt, tool reference, skills (mate/selection/grid/steps/mode/view/conversation), QA examples. Defines all routing logic — no hardcoded keywords.
+- `mcp-server/v2/vlm/` — VLM 分析管線，`structuredMate.ts` 負責多視角影像 → 結構化 JSON，`anchorVerify.ts` 驗證 anchor face。
 - `mcp-server/v2/status/` / `mcp-server/v2/web/` — server 狀態端點。
 - `shared/schema/` — Zod schemas shared between frontend and backend: `protocol.ts` (WS message types), `mcpToolsV3.ts` (all MCP tool schemas, ~1200 lines).
 - `tests/` — Playwright E2E tests, prefixed `v2_`. Tests access store via `window.__V2_STORE__` and use 120s timeouts.
@@ -73,20 +72,25 @@ Tools follow `namespace.action` naming: `selection.set`, `query.scene_state`, `a
 
 ### Mate System
 
-Anchor resolution methods: `auto`, `planar_cluster`, `geometry_aabb`, `object_aabb`, `extreme_vertices`, `obb_pca`, `picked`. Mate modes: `face_flush`, `face_insert_arc`, `edge_to_edge`, `axis_to_axis`. Supports twist (`{ axisSpace, axis, angleDeg }`) and arc paths (`{ height, lateralBias }`).
+Anchor resolution methods: `auto`, `planar_cluster`, `geometry_aabb`, `object_aabb`, `extreme_vertices`, `obb_pca`, `picked`. Mate modes (MCP schema): `face_flush`, `face_insert_arc`, `edge_to_edge`, `axis_to_axis`, `point_to_point`, `planar_slide`, `hinge_revolute`. Supports twist (`{ axisSpace, axis, angleDeg }`) and arc paths (`{ height, lateralBias }`).
+
+Parts are referenced in tool args as `PartRef`: `{ partId?: string } | { partName?: string }` — at least one field required. The executor fuzzy-matches by name when `partId` is absent.
 
 ### Router Providers
 
-Default is `mockProvider` (keyword matching + Levenshtein fuzzy part name matching). Set `ROUTER_LLM_ENABLE=1` with `ROUTER_LLM_PROVIDER=auto|ollama|gemini` for real LLM routing. For full agent routing (LLM decides tool calls), set `ROUTER_PROVIDER=agent`.
+Default is `agentProvider` — reads `agent-prompts/` markdown docs and delegates all routing to a real LLM. No hardcoded keywords. Provider selection:
+- `AGENT_LLM_PROVIDER=gemini` (default) — requires `GEMINI_API_KEY`
+- `AGENT_LLM_PROVIDER=ollama` — requires `OLLAMA_BASE_URL`
+- `AGENT_LLM_PROVIDER=claude` — requires `ANTHROPIC_API_KEY`
+- `AGENT_LLM_PROVIDER=openai` — requires `OPENAI_API_KEY`
+
+For tests: set `AGENT_LLM_MOCK_PATH=tests/fixtures/agent-mock-responses.json` on the MCP server to use mock JSON responses (longest-key substring match).
 
 Key env vars:
-- `ROUTER_LLM_ENABLE=1` / `ROUTER_LLM_PROVIDER=auto|ollama|gemini` / `ROUTER_LLM_MODEL`
-- `ROUTER_PROVIDER=agent` — switches to full agent loop (`mcp-server/v2/router/agent/`)
 - `ROUTER_WEB_ENABLE=1` — enables server-side web tools (weather + search)
 - `V2_VLM_PROVIDER=auto|ollama|gemini|mock|none` / `VLM_MATE_MODEL`
 - `OLLAMA_BASE_URL` / `OLLAMA_MODEL` — Ollama 連線 (預設 `http://127.0.0.1:11434`)
 - `GEMINI_API_KEY` / `GEMINI_MODEL`
-- `V2_ROUTER_KEYWORDS_PATH` / `V2_ROUTER_MOCK_POLICY_PATH` / `ROUTER_AGENT_DIR` — 覆寫 policy/prompt 檔案路徑
 
 ## Conventions
 
@@ -94,7 +98,7 @@ Key env vars:
 - **Zod for runtime validation** — all WS protocol messages and tool schemas validated with Zod.
 - **Test file naming** — `v2_<feature>.spec.ts` in snake_case.
 - **UI styling** — Tailwind utilities with glassmorphism pattern (`bg-black/60 backdrop-blur-md`).
-- **Tool results** — Always wrapped in `ToolEnvelope<T>` (`{ ok, data, warnings }` or `{ ok: false, error }`).
+- **Tool results** — Always wrapped in `ToolEnvelope<T>`. Success: `{ ok: true, sceneRevision: number, data: T, warnings, debug? }`. Failure: `{ ok: false, sceneRevision?, error: { code, message, recoverable, suggestedToolCalls }, warnings }`.
 - **Error codes** — `INVALID_ARGUMENT`, `NOT_FOUND`, `AMBIGUOUS_SELECTION`, `SCENE_OUT_OF_SYNC`, `SOLVER_FAILED`, etc.
 - **No path aliases** — imports use relative paths.
 - **strict TypeScript** — but `noUnusedLocals` and `noUnusedParameters` are disabled.

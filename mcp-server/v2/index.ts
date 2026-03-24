@@ -9,11 +9,11 @@ import { fileURLToPath } from 'node:url';
 import { WsGatewayV2 } from './wsGateway.js';
 import { routeAndExecute } from './router/router.js';
 
-const port = Number(process.env.V2_WS_PORT || 3011);
+const port = Number(process.env.V2_WS_PORT || 3112);
 const host = process.env.V2_WS_HOST || '127.0.0.1';
 
 // ── Codex startup check ───────────────────────────────────────────────────────
-const routerProvider = (process.env.ROUTER_PROVIDER || 'mock').toLowerCase();
+const routerProvider = (process.env.ROUTER_PROVIDER || 'agent').toLowerCase();
 if (routerProvider === 'codex' || routerProvider === 'openai') {
   const authFile = path.join(os.homedir(), '.codex', 'auth.json');
   let loggedIn = false;
@@ -28,7 +28,7 @@ if (routerProvider === 'codex' || routerProvider === 'openai') {
     console.log(`[Codex] ✓ Auth ready (mode=${authMode}) — ${authFile}`);
   } else {
     console.warn('[Codex] ✗ Not logged in! Run:  codex login');
-    console.warn('[Codex]   Falling back to mock provider until login is complete.');
+    console.warn('[Codex]   Falling back to agent provider until login is complete.');
   }
 }
 // ─────────────────────────────────────────────────────────────────────────────

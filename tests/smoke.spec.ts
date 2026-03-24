@@ -12,7 +12,7 @@ async function openLegacyAnimationPanel(page: Page) {
 
 test.describe('3D Animation App Smoke Test', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('http://127.0.0.1:5173/?legacy=1', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://localhost:5274');
   });
 
   test('should load app and demo model', async ({ page }) => {

@@ -6,10 +6,12 @@ import { ClientRequestSchema, PROTOCOL_VERSION } from '../../shared/schema/index
 import type { ServerEvent, ServerResponse, TraceEntry, ToolResult } from '../../shared/schema/index.js';
 import { MCPToolRequestSchema } from '../../shared/schema/mcpToolsV3.js';
 import { routeAndExecute } from './router/router.js';
-import type { RouterContext, RouterToolResult, RouteMeta } from './router/types.js';
+import type { RouterContext, RouterToolResult, RouteMeta, VlmMateCapture } from './router/types.js';
 import { analyzeVlm } from './vlm/analyze.js';
 import { inferAssemblySequence } from './vlm/autoAssemble.js';
 import { verifyAnchorFace, logAnchorVerifyFailure } from './vlm/anchorVerify.js';
+import { inferMateFromImages } from './vlm/mateInfer.js';
+import { inferMateParams } from './router/mateParamsInfer.js';
 import { queryWeather, queryWebSearch } from './web/queryTools.js';
 import { getServerStatus } from './status/serverStatus.js';
 
@@ -211,6 +213,45 @@ export class WsGatewayV2 {
               tools: Array<{ tool: string; ok: boolean; ms: number }>;
             }> = [];
 
+            // Pre-fetch VLM capture for mate commands on first iteration.
+            // Runs before routeAndExecute so the router can use VLM-inferred params.
+            let vlmMateCapture: VlmMateCapture | null = null;
+            const mateVlmEnabled =
+              process.env.MATE_VLM_ENABLE === '1' ||
+              Boolean(process.env.MATE_VLM_MOCK_RESPONSE);
+            if (mateVlmEnabled) {
+              const MATE_KW = ['mate', '對齊', '对齐', '組裝', '组装', '裝配', '装配', 'align', 'attach', 'fit'];
+              const lowerText = text.toLowerCase();
+              const hasMateKeyword = MATE_KW.some((k) => lowerText.includes(k));
+              const mentionedParts = baseCtx.parts.filter((p) =>
+                lowerText.includes(p.name.toLowerCase())
+              );
+              if (hasMateKeyword && mentionedParts.length >= 2) {
+                try {
+                  const captureResult = await this.requestToolExecutionViaProxy(
+                    ws,
+                    `${parsed.data.id}:vlm_capture`,
+                    {
+                      tool: 'vlm.capture_for_mate',
+                      args: {
+                        sourcePart: { partId: mentionedParts[0]!.id },
+                        targetPart: { partId: mentionedParts[1]!.id },
+                        userText: text,
+                        maxWidthPx: 512,
+                        maxHeightPx: 384,
+                        confidenceThreshold: Number(process.env.MATE_VLM_CONFIDENCE || '0.75'),
+                      },
+                    }
+                  ) as any;
+                  if (captureResult?.ok && captureResult.data) {
+                    vlmMateCapture = captureResult.data as VlmMateCapture;
+                  }
+                } catch {
+                  // Silent failure — fall through to NLP inference
+                }
+              }
+            }
+
             for (let iteration = 0; iteration < maxIterations; iteration++) {
               iterationsUsed = iteration + 1;
               const iterationStartedAt = Date.now();
@@ -219,6 +260,7 @@ export class WsGatewayV2 {
                 ...baseCtx,
                 iteration,
                 toolResults: routerContextResults.slice(-ROUTER_MAX_TOOL_RESULTS_FOR_CONTEXT),
+                ...(vlmMateCapture !== null ? { vlmMateCapture } : {}),
               });
               const routeMs = Math.max(0, Date.now() - routeStartedAt);
               lastReplyText = routed.replyText ?? lastReplyText;
@@ -403,6 +445,46 @@ export class WsGatewayV2 {
             const parts = args.parts || [];
             const steps = await inferAssemblySequence(images, parts);
             this.sendResponse(ws, parsed.data.id, true, { steps });
+            return;
+          }
+
+          if (parsed.data.command === 'vlm_mate_analyze') {
+            const args = (parsed.data.args ?? {}) as {
+              images?: { angle: string; dataUrl: string }[];
+              sceneState?: {
+                parts: { id: string; name: string; position: [number, number, number] }[];
+                sourcePart: { id: string; name: string };
+                targetPart: { id: string; name: string };
+                userText: string;
+              };
+            };
+            const inference = await inferMateFromImages(
+              args.images ?? [],
+              args.sceneState ?? {
+                parts: [],
+                sourcePart: { id: '', name: '' },
+                targetPart: { id: '', name: '' },
+                userText: '',
+              }
+            );
+            this.sendResponse(ws, parsed.data.id, true, { inference });
+            return;
+          }
+
+          if (parsed.data.command === 'agent.infer_mate_params') {
+            const mateArgs = (parsed.data.args ?? {}) as {
+              userText?: string;
+              sourcePart?: { id: string; name: string };
+              targetPart?: { id: string; name: string };
+              geometryHint?: Record<string, unknown>;
+            };
+            const inference = await inferMateParams({
+              userText: mateArgs.userText ?? '',
+              sourcePart: mateArgs.sourcePart ?? { id: '', name: '' },
+              targetPart: mateArgs.targetPart ?? { id: '', name: '' },
+              geometryHint: mateArgs.geometryHint as any,
+            });
+            this.sendResponse(ws, parsed.data.id, true, { inference });
             return;
           }
 

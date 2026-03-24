@@ -1,7 +1,7 @@
 /**
  * Phase 6 — End-to-End Tests for the LLM+MCP 3D Assembly System.
  *
- * Tests run against the V1 (legacy) app with the dev server at 127.0.0.1:5173.
+ * Tests run against the V1 (legacy) app with the dev server at 127.0.0.1:5274.
  * All interactions go through the Zustand store (window.__APP_STORE__) and
  * the geometry engine (window.__GEOMETRY__) exposed in DEV mode.
  *
@@ -10,7 +10,7 @@
 
 import { test, expect } from '@playwright/test';
 
-const BASE_URL = 'http://127.0.0.1:5173/?legacy=1';
+const BASE_URL = 'http://127.0.0.1:5274/?legacy=1';
 
 /** Wait for the V1 store and parts to be loaded. */
 async function waitForApp(page: any) {

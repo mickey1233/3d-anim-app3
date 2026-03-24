@@ -50,7 +50,6 @@ export function TransformGizmo() {
     const helper = typeof ctrl.getHelper === 'function' ? ctrl.getHelper() : null;
     markGizmoObjects(ctrl, true);
     markGizmoObjects(helper, true);
-
     const handleDragging = (event: any) => {
       const dragging = !!event.value;
       setDragging(dragging);

@@ -8,6 +8,21 @@ export type RouterToolResult = {
   iteration?: number;
 };
 
+export type VlmMateCapture = {
+  vlmInference: {
+    mode: string;
+    intent: string;
+    method?: string;
+    sourceFace?: string;
+    targetFace?: string;
+    sourcePart: string;
+    targetPart: string;
+    confidence: number;
+    reasoning?: string;
+  } | null;
+  meetsThreshold: boolean;
+};
+
 export type RouterContext = {
   parts: {
     id: string;
@@ -28,6 +43,8 @@ export type RouterContext = {
   interactionMode?: 'select' | 'move' | 'rotate' | 'mate';
   toolResults?: RouterToolResult[];
   iteration?: number;
+  /** Injected by wsGateway when MATE_VLM_ENABLE=1: result of vlm.capture_for_mate. */
+  vlmMateCapture?: VlmMateCapture | null;
 };
 
 /** Optional metadata attached by smartProvider to describe which layer handled the request. */
@@ -52,4 +69,12 @@ export type RouterRoute = {
 
 export type RouterProvider = {
   route: (text: string, ctx: RouterContext) => Promise<RouterRoute>;
+};
+
+export type AgentLlmConfig = {
+  provider: 'gemini' | 'ollama' | 'claude' | 'openai';
+  model?: string;
+  timeoutMs?: number;
+  apiKey?: string;
+  baseUrl?: string;
 };

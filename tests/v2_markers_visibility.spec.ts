@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('v2 mate markers visibility', () => {
   test('does not show Source/Target markers on initial non-mate context', async ({ page }) => {
-    await page.goto('http://127.0.0.1:5173/?v=2&fixture=boxes', { waitUntil: 'domcontentloaded' });
+    await page.goto('http://127.0.0.1:5274/?v=2&fixture=boxes', { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => !!(window as any).__V2_STORE__?.getState);
     await page.waitForFunction(() => {
       const state = (window as any).__V2_STORE__?.getState?.();

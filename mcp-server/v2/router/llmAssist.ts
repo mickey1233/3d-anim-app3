@@ -183,7 +183,7 @@ async function callLlmJson(prompt: string) {
   return callOllamaJson(prompt);
 }
 
-function mapPartReferenceToId(ref: string | undefined, ctx: RouterContext) {
+export function mapPartReferenceToId(ref: string | undefined, ctx: RouterContext) {
   if (!ref) return null;
   const normalizedRef = normalizeToken(ref);
   if (!normalizedRef) return null;
