@@ -2,6 +2,21 @@
 
 This file is injected into the VLM/VLA prompt to reduce hardcoded logic in code and to improve reasoning across different assembly scenarios.
 
+## Spark Product Assembly Rules (highest priority — overrides generic rules below)
+
+**All parts in this Spark assembly ALWAYS insert/cover along the LOCAL Y-axis (vertical).**
+
+- Default face pair: `source_face=bottom`, `target_face=top`
+- Exception: only deviate from bottom→top if the geometry candidate list has ZERO viable vertical pair
+- When you see screw holes or snap pins, they are on the BOTTOM face of one part and the TOP face of the other
+- Role semantics: cap / lid / cover / connector / plug = **source** (the part that moves); base / body / housing / chassis / frame = **target** (fixed part)
+- If you cannot determine roles visually, default to: the smaller/lighter-looking part is source
+
+**Two-step reasoning (fill "reasoning" field before selecting candidate):**
+1. Describe each part in ≤5 words (e.g., "spark plug cap", "engine block port")
+2. State which covers/inserts into which and why
+3. Then select the geometry candidate with bottom→top faces (or closest vertical pair)
+
 ## What you must infer
 - **Relationship** between the two parts (cover / insert / flush / side attach / screw-like / hinge-like).
 - **Intent** (`default|cover|insert`)

@@ -462,34 +462,21 @@ function buildMateTransform(
     const rotationNormal = new THREE.Quaternion().setFromUnitVectors(sourceFacing, targetFacing);
     const normalAxisAngle = quaternionToAxisAngle(rotationNormal);
     normalRotation = { axisWorld: normalAxisAngle.axis, angleDeg: normalAxisAngle.angleDeg };
-    const rotatedTangent = sourceTangent.clone().applyQuaternion(rotationNormal);
 
-    // When normals are already aligned (< 1°) and no explicit twistSpec was given,
-    // skip tangent-based twist entirely.  computeClusterTangent picks the dominant
-    // edge direction from a histogram which is non-deterministic for square/symmetric
-    // parts — two identical flat plates can produce (1,0,0) on one and (0,0,1) on the
-    // other, resulting in a spurious 90° twist that incorrectly rotates the source part.
-    const normsAligned = !twistSpec && normalAxisAngle.angleDeg < 1;
-    const twist =
-      normsAligned
-        ? { quat: new THREE.Quaternion(), axisWorld: targetFacing.clone().normalize(), angleDeg: 0, source: 'tangent' as const }
-        : twistSpec
-          ? computeTwistFromSpec(twistSpec, sourceFrame, targetFrame, rotationNormal)
-          : computeTwistFromTangents(rotatedTangent, targetTangent, targetFacing);
-
-    // When no explicit twistSpec is given, rectangular parts have 4-fold symmetry
-    // so we snap the auto-computed twist to the nearest 90° increment.
-    // This eliminates noise from mesh triangulation and PCA direction ambiguity.
-    let twistAngleDeg = twist.angleDeg;
-    if (!twistSpec && !normsAligned) {
-      twistAngleDeg = Math.round(twistAngleDeg / 90) * 90;
+    if (twistSpec) {
+      // Explicit twist from user or router — always apply it exactly as specified.
+      const twist = computeTwistFromSpec(twistSpec, sourceFrame, targetFrame, rotationNormal);
+      rotation = twist.quat.clone().multiply(rotationNormal);
+      twistRotation = { axisWorld: twist.axisWorld, angleDeg: twist.angleDeg, source: 'spec' };
+    } else {
+      // No explicit twist: skip auto-twist from computeClusterTangent entirely.
+      // computeClusterTangent is non-deterministic for symmetric geometry — two identical
+      // flat plates often produce different dominant tangents ((1,0,0) vs (0,0,1)) due to
+      // mesh triangulation, yielding a spurious 90° rotation even when parts have the same
+      // world orientation.  Users who need in-plane rotation must specify twistSpec explicitly.
+      rotation = rotationNormal.clone();
+      twistRotation = { axisWorld: normalAxisAngle.axis, angleDeg: 0, source: 'tangent' };
     }
-    const twistQuat = (twistSpec && !normsAligned)
-      ? twist.quat
-      : new THREE.Quaternion().setFromAxisAngle(twist.axisWorld, THREE.MathUtils.degToRad(twistAngleDeg));
-
-    rotation = twistQuat.clone().multiply(rotationNormal);
-    twistRotation = { axisWorld: twist.axisWorld, angleDeg: twistAngleDeg, source: twist.source };
   }
 
   const sourceWorldPos = new THREE.Vector3();

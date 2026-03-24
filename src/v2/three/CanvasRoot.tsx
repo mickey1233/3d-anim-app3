@@ -48,6 +48,7 @@ import { NestedFixture } from './fixtures/NestedFixture';
 import { StepRunner } from './animation/StepRunner';
 import { SceneRegistryBridge } from './SceneRegistryBridge';
 import { LightingController } from './LightingController';
+import { AnchorVerifier } from './mating/AnchorVerifier';
 
 const GIZMO_RAYCAST_PRIORITY_FLAG = '__v2TransformGizmoHandle';
 
@@ -84,6 +85,7 @@ export function CanvasRoot() {
   const fixture = fixtureId || 'boxes';
 
   return (
+    <>
     <div className="w-full h-full">
       <CanvasErrorBoundary>
       <Canvas
@@ -150,5 +152,7 @@ export function CanvasRoot() {
       </Canvas>
       </CanvasErrorBoundary>
     </div>
+    <AnchorVerifier />
+    </>
   );
 }

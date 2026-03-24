@@ -9,6 +9,7 @@ import { routeAndExecute } from './router/router.js';
 import type { RouterContext, RouterToolResult, RouteMeta } from './router/types.js';
 import { analyzeVlm } from './vlm/analyze.js';
 import { inferAssemblySequence } from './vlm/autoAssemble.js';
+import { verifyAnchorFace, logAnchorVerifyFailure } from './vlm/anchorVerify.js';
 import { queryWeather, queryWebSearch } from './web/queryTools.js';
 import { getServerStatus } from './status/serverStatus.js';
 
@@ -362,6 +363,36 @@ export class WsGatewayV2 {
             const images = args.images || [];
             const parts = args.parts || [];
             const result = await analyzeVlm(images, parts, { mateContext: args.mateContext });
+            this.sendResponse(ws, parsed.data.id, true, result);
+            return;
+          }
+
+          if (parsed.data.command === 'anchor_verify') {
+            const args = (parsed.data.args ?? {}) as {
+              imageBase64?: string;
+              mime?: string;
+              faceId?: string;
+              partName?: string;
+              logFailure?: boolean;
+              triedMethods?: string[];
+              vlmReasons?: Record<string, string>;
+            };
+            if (args.logFailure) {
+              logAnchorVerifyFailure({
+                partName: args.partName || 'unknown',
+                faceId: args.faceId || 'unknown',
+                triedMethods: args.triedMethods || [],
+                vlmReasons: args.vlmReasons || {},
+              });
+              this.sendResponse(ws, parsed.data.id, true, { logged: true });
+              return;
+            }
+            const result = await verifyAnchorFace(
+              args.imageBase64 || '',
+              args.mime || 'image/jpeg',
+              args.faceId || 'top',
+              args.partName || 'part',
+            );
             this.sendResponse(ws, parsed.data.id, true, result);
             return;
           }

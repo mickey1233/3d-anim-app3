@@ -12,6 +12,7 @@ import { v2Client } from './client';
 import { getV2Camera, getV2ObjectByPartId, getV2Renderer, getV2Scene, getV2ViewportPx } from '../three/SceneRegistry';
 import { resolveAnchor } from '../three/mating/anchorMethods';
 import { solveMateTopBottom, applyMateTransform } from '../three/mating/solver';
+import { clusterPlanarFaces } from '../three/mating/faceClustering';
 
 type ToolErrorCode =
   | 'INVALID_ARGUMENT'
@@ -2119,6 +2120,32 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       if ((sourceFace === 'front' && targetFace === 'back') || (sourceFace === 'back' && targetFace === 'front')) return 'z';
       return 'mixed';
     };
+    const getDominantFacesForVlm = (obj: THREE.Object3D, worldQuat: THREE.Quaternion, topN = 3) => {
+      const allClusters: ReturnType<typeof clusterPlanarFaces> = [];
+      obj.traverse((child) => {
+        if (child instanceof THREE.Mesh && child.geometry) {
+          allClusters.push(...clusterPlanarFaces(child.geometry));
+        }
+      });
+      allClusters.sort((a, b) => b.area - a.area);
+      const totalArea = allClusters.reduce((s, c) => s + c.area, 0) || 1;
+      const upWorld = new THREE.Vector3(0, 1, 0);
+      return allClusters.slice(0, topN).map((c) => {
+        const normalWorld = c.normal.clone().applyQuaternion(worldQuat);
+        const yDot = normalWorld.dot(upWorld);
+        const face =
+          yDot > 0.7 ? 'top' :
+          yDot < -0.7 ? 'bottom' :
+          Math.abs(normalWorld.x) > Math.abs(normalWorld.z)
+            ? (normalWorld.x > 0 ? 'right' : 'left')
+            : (normalWorld.z > 0 ? 'front' : 'back');
+        return {
+          face,
+          areaRatio: Number((c.area / totalArea).toFixed(4)),
+          normalWorld: normalWorld.toArray().map((v) => Number(v.toFixed(4))),
+        };
+      });
+    };
     const overlap1d = (aMin: number, aMax: number, bMin: number, bMax: number) => {
       const overlap = Math.max(0, Math.min(aMax, bMax) - Math.max(aMin, bMin));
       const base = Math.max(1e-6, Math.min(aMax - aMin, bMax - bMin));
@@ -2201,6 +2228,19 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           semanticScore -= 0.04;
         }
       }
+      if (geometryIntent === 'default') {
+        // Spark domain rule: ALL assemblies use Y-axis — always prefer vertical pairs
+        const verticalBias = parseFloat(import.meta.env.VITE_ASSEMBLY_VERTICAL_BIAS ?? '0.20');
+        if (verticalPair) {
+          semanticScore += verticalBias;
+          tags.push('default_vertical_bias');
+          if (row.sourceFace === 'bottom' && row.targetFace === 'top') {
+            semanticScore += 0.08; // strongest preference: bottom→top
+            tags.push('bottom_to_top_preferred');
+          }
+        }
+        if (lateralPair) semanticScore -= 0.10; // penalize lateral when intent is default
+      }
       if (
         preferredSourceFace &&
         preferredTargetFace &&
@@ -2275,6 +2315,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           semanticScore: candidate.semanticScore,
           tags: candidate.tags,
         })),
+        sourceDominantFaces: getDominantFacesForVlm(sourceObject, sourceWorldQuat),
+        targetDominantFaces: getDominantFacesForVlm(targetObject, targetWorldQuat),
       },
       sceneRelation: {
         sourceCenter: capture.sourceCenter,
@@ -3688,6 +3730,69 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       }
     }
 
+    // When a targetGroupId is provided, compute a targetOffset that shifts the anchor
+    // from the representative part to the LARGEST group member's AABB face.
+    // Using the largest member (rather than combined AABB) avoids the "floating part"
+    // problem: when group members are at different Y positions (e.g., part1 floating
+    // above base before assembly), combined AABB.maxY = part1.maxY which is wrong.
+    // The largest member is typically the chassis/base whose exterior face is the true
+    // mating surface.
+    let computedTargetOffset: [number, number, number] | undefined = input.targetOffset;
+    if (input.targetGroupId) {
+      const grpStore = currentStore();
+      const allMemberIds = grpStore.getGroupParts(input.targetGroupId as string);
+      const sceneRef = getV2Scene();
+      if (sceneRef && allMemberIds.length > 1) {
+        const targetObjRef = sceneRef.getObjectByProperty('uuid', target.partId) ?? null;
+        if (targetObjRef) {
+          targetObjRef.updateWorldMatrix(true, true);
+
+          // Find the largest member by bbox volume (most likely the chassis/base body)
+          let largestMemberBox: THREE.Box3 | null = null;
+          let largestVolume = -1;
+          for (const mId of allMemberIds) {
+            const mObj = sceneRef.getObjectByProperty('uuid', mId);
+            if (mObj) {
+              mObj.updateWorldMatrix(true, true);
+              const mBox = new THREE.Box3().setFromObject(mObj);
+              if (!mBox.isEmpty()) {
+                const sz = mBox.getSize(new THREE.Vector3());
+                const vol = sz.x * sz.y * sz.z;
+                if (vol > largestVolume) { largestVolume = vol; largestMemberBox = mBox; }
+              }
+            }
+          }
+
+          const repBox = new THREE.Box3().setFromObject(targetObjRef);
+          if (largestMemberBox && !repBox.isEmpty()) {
+            const tgtFaceId: string = input.targetFace ?? 'top';
+            const getAabbFaceCenterTgt = (box: THREE.Box3, fId: string): THREE.Vector3 => {
+              const c = box.getCenter(new THREE.Vector3());
+              switch (fId) {
+                case 'top':    return new THREE.Vector3(c.x, box.max.y, c.z);
+                case 'bottom': return new THREE.Vector3(c.x, box.min.y, c.z);
+                case 'left':   return new THREE.Vector3(box.min.x, c.y, c.z);
+                case 'right':  return new THREE.Vector3(box.max.x, c.y, c.z);
+                case 'front':  return new THREE.Vector3(c.x, c.y, box.max.z);
+                case 'back':   return new THREE.Vector3(c.x, c.y, box.min.z);
+                default:       return c;
+              }
+            };
+            const repAnchorWorld = getAabbFaceCenterTgt(repBox, tgtFaceId);
+            const largestAnchorWorld = getAabbFaceCenterTgt(largestMemberBox, tgtFaceId);
+            const worldDelta = largestAnchorWorld.clone().sub(repAnchorWorld);
+            if (worldDelta.lengthSq() > 1e-10) {
+              const mat3 = new THREE.Matrix3().setFromMatrix4(targetObjRef.matrixWorld);
+              const localDelta = worldDelta.clone().applyMatrix3(mat3.clone().invert());
+              const existing = computedTargetOffset ? new THREE.Vector3(...computedTargetOffset) : new THREE.Vector3();
+              const final = existing.add(localDelta);
+              computedTargetOffset = [final.x, final.y, final.z];
+            }
+          }
+        }
+      }
+    }
+
     const generated = await runTool('action.generate_transform_plan' as MCPToolName, {
       operation,
       source: {
@@ -3703,7 +3808,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         method: normalizeAnchorMethod(input.targetMethod, 'planar_cluster'),
       },
       sourceOffset: computedSourceOffset,
-      targetOffset: input.targetOffset,
+      targetOffset: computedTargetOffset,
       mateMode,
       pathPreference,
       durationMs: input.durationMs ?? 900,

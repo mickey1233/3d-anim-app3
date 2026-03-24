@@ -4,6 +4,7 @@ import { answerGeneralQuestionWithLlm, inferMateWithLlm } from './llmAssist.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import levenshtein from 'fast-levenshtein';
 
 type MentionedPart = RouterContext['parts'][number] & {
   index: number;
@@ -447,20 +448,38 @@ const collectMentionedGroups = (
     const nameToken = normalizeToken(group.name);
     const index = lower.indexOf(name);
     const tokenHit = tokenizedText.includes(nameToken);
-    if (index < 0 && !tokenHit) continue;
+    let fuzzyIndex = -1;
+    if (index < 0 && !tokenHit && nameToken.length >= 3) {
+      // Fuzzy fallback: match any word in the text against the group name token
+      const words = lower.match(/[a-z0-9\u4e00-\u9fff]+/g) ?? [];
+      const maxEdits = Math.max(1, Math.floor(nameToken.length * 0.35));
+      for (const word of words) {
+        if (levenshtein.get(word, nameToken) <= maxEdits) {
+          fuzzyIndex = lower.indexOf(word);
+          break;
+        }
+      }
+    }
+    if (index < 0 && !tokenHit && fuzzyIndex < 0) continue;
     if (seen.has(group.id)) continue;
     seen.add(group.id);
 
     const firstPartId = group.partIds[0] as string;
     const firstPart = parts.find((p) => p.id === firstPartId);
+    // Use combined volume of ALL group members so that a group containing a large chassis
+    // part correctly reflects its true size (not just the first/representative member).
+    const combinedVolume = group.partIds.reduce((sum, pid) => {
+      const p = parts.find((part) => part.id === pid);
+      return sum + volumeFromSize(p?.bboxSize);
+    }, 0);
     found.push({
       id: firstPartId,
       name: group.name,
       ...(firstPart?.position ? { position: firstPart.position } : {}),
       ...(firstPart?.bboxSize ? { bboxSize: firstPart.bboxSize } : {}),
-      index: index >= 0 ? index : Number.MAX_SAFE_INTEGER - found.length,
-      end: index >= 0 ? index + name.length : Number.MAX_SAFE_INTEGER - found.length + 1,
-      volume: volumeFromSize(firstPart?.bboxSize),
+      index: index >= 0 ? index : fuzzyIndex >= 0 ? fuzzyIndex : Number.MAX_SAFE_INTEGER - found.length,
+      end: index >= 0 ? index + name.length : fuzzyIndex >= 0 ? fuzzyIndex + name.length : Number.MAX_SAFE_INTEGER - found.length + 1,
+      volume: combinedVolume,
       groupId: group.id,
     });
   }
@@ -507,8 +526,8 @@ const detectFaceNear = (
   nlu: MockProviderNluSets
 ): MateFaceId | null => {
   const lower = normalizeText(text);
-  const before = lower.slice(Math.max(0, partIndex - 24), partIndex);
-  const after = lower.slice(partEnd, Math.min(lower.length, partEnd + 24));
+  const before = lower.slice(Math.max(0, partIndex - 60), partIndex);
+  const after = lower.slice(partEnd, Math.min(lower.length, partEnd + 60));
   const directAfter = detectFaceFromSegment(after, nlu, 'first');
   if (directAfter) return directAfter;
   const directBefore = detectFaceFromSegment(before, nlu, 'last');
@@ -520,6 +539,84 @@ const detectFaceNear = (
       if (lower.includes(`${name} ${alias}`) || lower.includes(`${alias} ${name}`)) return item.face;
     }
   }
+  return null;
+};
+
+/**
+ * Detect explicit per-part face assignments from patterns like:
+ *   "part2 is bottom"  "part1 is top"
+ *   "part2's bottom"   "bottom of part2"
+ *   "part2: bottom"    "part2=bottom"
+ * Returns a map of partId → MateFaceId.
+ */
+const detectExplicitPartFaceBindings = (
+  text: string,
+  parts: Array<{ id: string; name: string }>,
+  nlu: MockProviderNluSets
+): Map<string, MateFaceId> => {
+  const lower = normalizeText(text);
+  const result = new Map<string, MateFaceId>();
+  for (const part of parts) {
+    const partToken = normalizeText(part.name);
+    const partPos = lower.indexOf(partToken);
+    if (partPos < 0) continue;
+    // Search all occurrences of this part name and check surrounding windows
+    let searchFrom = 0;
+    while (searchFrom < lower.length) {
+      const pos = lower.indexOf(partToken, searchFrom);
+      if (pos < 0) break;
+      const end = pos + partToken.length;
+      // Check a 40-char window after part name for face keyword
+      const after = lower.slice(end, Math.min(lower.length, end + 40));
+      // Pattern: "{part} is {face}", "{part}: {face}", "{part} = {face}", "{part}'s {face}"
+      for (const item of nlu.faces) {
+        for (const alias of item.aliases) {
+          if (!alias.trim()) continue;
+          const patterns = [` is ${alias}`, `: ${alias}`, `=${alias}`, `'s ${alias}`, ` ${alias} face`];
+          // Use startsWith ONLY — prevents "part1" matching "part2 is bottom" in the window
+          if (patterns.some((p) => after.startsWith(p))) {
+            result.set(part.id, item.face);
+            break;
+          }
+        }
+        if (result.has(part.id)) break;
+      }
+      if (result.has(part.id)) break;
+      searchFrom = end;
+    }
+  }
+  return result;
+};
+
+/**
+ * When user says "i want bottom and top" (ordered, without per-part binding),
+ * find two face keywords in text order after the last part mention and return
+ * [sourceFace, targetFace].
+ */
+const detectOrderedFacePair = (
+  text: string,
+  lastPartEnd: number,
+  nlu: MockProviderNluSets
+): [MateFaceId, MateFaceId] | null => {
+  const lower = normalizeText(text);
+  // Only scan the portion after the last part mention
+  const tail = lower.slice(lastPartEnd);
+  const found: Array<{ face: MateFaceId; index: number }> = [];
+  for (const item of nlu.faces) {
+    for (const alias of item.aliases) {
+      if (!alias.trim()) continue;
+      const idx = tail.indexOf(alias);
+      if (idx >= 0) found.push({ face: item.face, index: idx });
+    }
+  }
+  // Sort by position, deduplicate by face, take first two distinct
+  found.sort((a, b) => a.index - b.index);
+  const unique: Array<{ face: MateFaceId; index: number }> = [];
+  for (const entry of found) {
+    if (!unique.some((u) => u.face === entry.face)) unique.push(entry);
+    if (unique.length === 2) break;
+  }
+  if (unique.length === 2) return [unique[0]!.face, unique[1]!.face];
   return null;
 };
 
@@ -977,20 +1074,51 @@ const inferSourceTarget = (text: string, mentioned: MentionedPart[], nlu: MockPr
     }
   }
 
+  // targetNameKeywords ("base", "chassis", "frame" etc.) run unconditionally — these
+  // parts are always structural targets regardless of whether a placement verb is present.
+  if (!explicitDirection) {
+    const targetNameKeywords = nlu.sourceTarget.targetNameKeywords;
+    const firstLooksLikeTarget = targetNameKeywords.some((kw) => first.name.toLowerCase().includes(kw));
+    const secondLooksLikeTarget = targetNameKeywords.some((kw) => second.name.toLowerCase().includes(kw));
+    if (firstLooksLikeTarget !== secondLooksLikeTarget) {
+      target = firstLooksLikeTarget ? first : second;
+      source = target.id === first.id ? second : first;
+      explicitDirection = true; // prevents VLM from overriding this structural decision
+    }
+  }
+
+  // Volume-based swap only when a placement verb is present and direction not yet decided
   if (!explicitDirection && !sourceFromKeyword && !targetFromKeyword) {
     const placementKeywords = nlu.sourceTarget.placementKeywords;
     const hasPlacementVerb = containsAny(lower, placementKeywords);
     if (hasPlacementVerb) {
-      const targetNameKeywords = nlu.sourceTarget.targetNameKeywords;
-      const firstLooksLikeTarget = targetNameKeywords.some((kw) => first.name.toLowerCase().includes(kw));
-      const secondLooksLikeTarget = targetNameKeywords.some((kw) => second.name.toLowerCase().includes(kw));
-      if (firstLooksLikeTarget !== secondLooksLikeTarget) {
-        target = firstLooksLikeTarget ? first : second;
-        source = target.id === first.id ? second : first;
-      } else if (Math.max(first.volume, second.volume) / Math.min(first.volume, second.volume) >= 1.4) {
+      if (Math.max(first.volume, second.volume) / Math.min(first.volume, second.volume) >= 1.4) {
         target = first.volume >= second.volume ? first : second;
         source = target.id === first.id ? second : first;
       }
+    }
+  }
+
+  // For group-vs-group mates without explicit direction: the smaller group is typically
+  // the lid/cover that moves (source), and the larger group is the chassis that stays (target).
+  if (!explicitDirection && first.groupId && second.groupId) {
+    const ratio = first.volume > 0 && second.volume > 0
+      ? Math.max(first.volume, second.volume) / Math.min(first.volume, second.volume)
+      : 1;
+    if (ratio >= 1.4) {
+      target = first.volume >= second.volume ? first : second;
+      source = target.id === first.id ? second : first;
+    }
+  }
+
+  // When no rule set an explicit direction, canonicalize by ID (alphabetical).
+  // This ensures "mate A B" and "mate B A" always produce the same source/target pair
+  // so downstream VLM override (if any) sees a stable, reproducible assignment.
+  if (!explicitDirection) {
+    if (source.id.localeCompare(target.id) > 0) {
+      const tmp = source;
+      source = target;
+      target = tmp;
     }
   }
 
@@ -1275,8 +1403,32 @@ export const MockRouterProvider: RouterProvider = {
       let source = inferred.source;
       let target = inferred.target;
       let mode = detectExplicitMateMode(text, nlu) ?? undefined;
-      const detectedSourceFace = detectFaceNear(text, inferred.source.name, inferred.source.index, inferred.source.end, nlu);
-      const detectedTargetFace = detectFaceNear(text, inferred.target.name, inferred.target.index, inferred.target.end, nlu);
+      // Priority 1: Explicit per-part bindings "X is FACE" — highest confidence
+      const explicitBindings = detectExplicitPartFaceBindings(text, [source, target], nlu);
+
+      // Priority 2: Ordered face pair "i want bottom and top" — runs BEFORE proximity
+      // to prevent proximity from stealing the first face keyword for BOTH parts.
+      const lastPartEnd = Math.max(inferred.source.end, inferred.target.end);
+      const orderedPair =
+        !explicitBindings.has(source.id) && !explicitBindings.has(target.id)
+          ? detectOrderedFacePair(text, lastPartEnd, nlu)
+          : null;
+
+      // Priority 3: Proximity detection — only when no ordered pair
+      let detectedSourceFace: MateFaceId | null = null;
+      let detectedTargetFace: MateFaceId | null = null;
+      if (orderedPair) {
+        detectedSourceFace = orderedPair[0];
+        detectedTargetFace = orderedPair[1];
+      } else {
+        detectedSourceFace = detectFaceNear(text, inferred.source.name, inferred.source.index, inferred.source.end, nlu);
+        detectedTargetFace = detectFaceNear(text, inferred.target.name, inferred.target.index, inferred.target.end, nlu);
+      }
+
+      // Apply explicit bindings last — they always win over ordered/proximity
+      if (explicitBindings.has(source.id)) detectedSourceFace = explicitBindings.get(source.id) ?? detectedSourceFace;
+      if (explicitBindings.has(target.id)) detectedTargetFace = explicitBindings.get(target.id) ?? detectedTargetFace;
+
       let sourceFace = detectedSourceFace || undefined;
       let targetFace = detectedTargetFace || undefined;
       const methodMentioned = hasAnchorMethodMention(text, nlu);
@@ -1297,11 +1449,15 @@ export const MockRouterProvider: RouterProvider = {
       const hasMateSuggestionContext = Boolean(extractMateSuggestionContext(ctx, source.id, target.id));
 
       if (!hasMateVlmContext) {
+        // Canonical ordering for VLM hint: ensures "mate A and B" and "mate B and A"
+        // always send the same pair ordering to VLM, so VLM's visual assessment is stable.
+        const vlmHintSource = source.id.localeCompare(target.id) <= 0 ? source : target;
+        const vlmHintTarget = vlmHintSource.id === source.id ? target : source;
         calls.push({
           tool: 'query.mate_vlm_infer',
           args: {
-            sourcePart: { partId: source.id },
-            targetPart: { partId: target.id },
+            sourcePart: { partId: vlmHintSource.id },
+            targetPart: { partId: vlmHintTarget.id },
             instruction: text,
             ...(sourceFace ? { preferredSourceFace: sourceFace } : {}),
             ...(targetFace ? { preferredTargetFace: targetFace } : {}),
@@ -1335,9 +1491,14 @@ export const MockRouterProvider: RouterProvider = {
       const vlmRefSource = mapVlmPartRefToMentioned(mateVlmContext?.vlm?.sourcePartRef);
       const vlmRefTarget = mapVlmPartRefToMentioned(mateVlmContext?.vlm?.targetPartRef);
       const vlmRefConfidence = Number(mateVlmContext?.vlm?.confidence ?? 0);
+      // VLM is always allowed to override source/target when it is confident —
+      // the user expects "mate x and y" and "mate y and x" to produce the same
+      // result (whichever part actually moves is a semantic decision, not a
+      // text-order decision).  The old shouldAllowLlmSourceTargetOverride gate
+      // only triggered on specific keywords ("install", "attach" …) and silently
+      // ignored VLM's assessment for plain "mate x and y" commands.
       if (
         !explicitDirection &&
-        shouldAllowLlmSourceTargetOverride(text, nlu) &&
         vlmRefConfidence >= 0.82 &&
         vlmRefSource &&
         vlmRefTarget &&
@@ -1361,6 +1522,9 @@ export const MockRouterProvider: RouterProvider = {
       const geoFaceTgt = geometryCtx?.rankingTop?.targetFace ?? geometryCtx?.expectedFromCenters?.targetFace;
       if (!explicitSourceFace) sourceFace = (useGeoFace && geoFaceSrc) ? geoFaceSrc : vlmInferred?.sourceFace;
       if (!explicitTargetFace) targetFace = (useGeoFace && geoFaceTgt) ? geoFaceTgt : vlmInferred?.targetFace;
+      // Spark Y-axis default: when no explicit face and VLM hasn't inferred one, default to bottom→top
+      if (!explicitSourceFace && !sourceFace) sourceFace = 'bottom';
+      if (!explicitTargetFace && !targetFace) targetFace = 'top';
       const allowVlmMethodOverride = !explicitMethod && (!explicitFace || !explicitMode);
       if (allowVlmMethodOverride && vlmInferred?.sourceMethod) sourceMethod = vlmInferred.sourceMethod;
       if (allowVlmMethodOverride && vlmInferred?.targetMethod) targetMethod = vlmInferred.targetMethod;
@@ -1370,7 +1534,6 @@ export const MockRouterProvider: RouterProvider = {
         if (llmInference) {
           if (
             !explicitDirection &&
-            shouldAllowLlmSourceTargetOverride(text, nlu) &&
             Number(llmInference.confidence ?? 0) >= 0.82
           ) {
             const sourceCandidate = mentioned.find((part) => part.id === llmInference.sourcePartId);

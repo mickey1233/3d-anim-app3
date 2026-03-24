@@ -58,6 +58,7 @@ function stableTangentFromNormal(normal: THREE.Vector3) {
 
 // Cache for group anchor results to avoid re-computing every frame.
 const groupAnchorCache = new WeakMap<THREE.Object3D, Map<string, AnchorResult>>();
+const groupFaceProjectionCache = new WeakMap<THREE.Object3D, Map<string, AnchorResult>>();
 
 /**
  * Planar-cluster for multi-primitive Group parts.
@@ -66,8 +67,14 @@ const groupAnchorCache = new WeakMap<THREE.Object3D, Map<string, AnchorResult>>(
  * direction (dot > NORMAL_THRESH), then picks the most extreme cluster and
  * returns its centroid — same semantics as resolvePlanarCluster on a single Mesh.
  */
-function resolveGroupPlanarCluster(group: THREE.Object3D, faceId: FaceId): AnchorResult | null {
-  const cached = groupAnchorCache.get(group)?.get(faceId);
+function resolveGroupPlanarClusterCore(
+  group: THREE.Object3D,
+  faceId: FaceId,
+  strategy: 'hybrid' | 'extremity',
+  cache: WeakMap<THREE.Object3D, Map<string, AnchorResult>>,
+  methodLabel: AnchorMethodId,
+): AnchorResult | null {
+  const cached = cache.get(group)?.get(faceId);
   if (cached) return cloneAnchorResult(cached);
 
   // Use FACE_DIR directly in group-local space — same semantic as resolvePlanarCluster
@@ -169,13 +176,22 @@ function resolveGroupPlanarCluster(group: THREE.Object3D, faceId: FaceId): Ancho
     }
   }
 
-  // Pick the plane cluster with the MOST total surface area — this is consistent with
-  // getFaceClusterByDirection (used by the single-mesh resolvePlanarCluster) which also
-  // uses area as the tiebreaker.  For a hollow chassis the INTERIOR FLOOR has more area
-  // than the thin exterior rim at the top, so the interior face is correctly selected
-  // instead of the exterior face that geometry_aabb would give.
-  planeClusters.sort((a, b) => b.totalArea - a.totalArea);
-  const best = planeClusters[0];
+  planeClusters.sort((a, b) => b.proj - a.proj);
+  const extremeCluster = planeClusters[0];
+  let best: typeof planeClusters[0];
+  if (strategy === 'extremity') {
+    // Pure extremity: always use the most extreme cluster — correct for solid/convex parts
+    // (caps, connectors) where the mating face is the outermost surface.
+    best = extremeCluster;
+  } else {
+    // Hybrid: extremity wins only when it has substantial area (≥15%).
+    // Thin exterior rims should not win over the large interior floor for hollow parts.
+    const totalAlignedArea = planeClusters.reduce((s, c) => s + c.totalArea, 0) || 1;
+    const extremeFraction = extremeCluster.totalArea / totalAlignedArea;
+    best = (extremeFraction >= 0.15)
+      ? extremeCluster
+      : planeClusters.reduce((b, c) => c.totalArea > b.totalArea ? c : b, planeClusters[0]);
+  }
   const center = best.totalArea > 0
     ? best.sumCenter.clone().divideScalar(best.totalArea)   // area-weighted centroid
     : best.sumCenter.clone().divideScalar(best.count);
@@ -184,6 +200,7 @@ function resolveGroupPlanarCluster(group: THREE.Object3D, faceId: FaceId): Ancho
     console.debug('[planar_cluster:group]', {
       group: group.name || group.uuid.slice(0, 8),
       faceId,
+      strategy,
       alignedFaceCount: alignedFaces.length,
       planeClusters: planeClusters.map(c => ({ proj: c.proj.toFixed(4), area: c.totalArea.toFixed(4), count: c.count })),
       selectedProj: best.proj.toFixed(4),
@@ -204,12 +221,20 @@ function resolveGroupPlanarCluster(group: THREE.Object3D, faceId: FaceId): Ancho
     centerLocal: center,
     normalLocal: dir.clone(),
     tangentLocal: stableTangentFromNormal(dir),
-    method: 'planar_cluster',
+    method: methodLabel,
   };
 
-  if (!groupAnchorCache.has(group)) groupAnchorCache.set(group, new Map());
-  groupAnchorCache.get(group)!.set(faceId, cloneAnchorResult(result));
+  if (!cache.has(group)) cache.set(group, new Map());
+  cache.get(group)!.set(faceId, cloneAnchorResult(result));
   return result;
+}
+
+function resolveGroupPlanarCluster(group: THREE.Object3D, faceId: FaceId): AnchorResult | null {
+  return resolveGroupPlanarClusterCore(group, faceId, 'hybrid', groupAnchorCache, 'planar_cluster');
+}
+
+function resolveGroupFaceProjection(group: THREE.Object3D, faceId: FaceId): AnchorResult | null {
+  return resolveGroupPlanarClusterCore(group, faceId, 'extremity', groupFaceProjectionCache, 'face_projection');
 }
 
 function cloneAnchorResult(result: AnchorResult): AnchorResult {
@@ -265,19 +290,28 @@ function geometryCacheKey(
 function getFaceClusterByDirection(geometry: THREE.BufferGeometry, direction: THREE.Vector3): FaceCluster | null {
   const clusters = clusterPlanarFaces(geometry);
   const dir = direction.clone().normalize();
-  let best: FaceCluster | null = null;
-  let bestScore = -Infinity;
-  let bestArea = -Infinity;
-  clusters.forEach((cluster) => {
-    const score = cluster.normal.dot(dir);
-    if (score > bestScore + 0.01 || (Math.abs(score - bestScore) <= 0.01 && cluster.area > bestArea)) {
-      best = cluster;
-      bestScore = score;
-      bestArea = cluster.area;
-    }
-  });
-  if (!best || bestScore < 0.1) return null;
-  return best;
+  // Filter to clusters roughly aligned with the requested direction
+  const aligned = clusters.filter(c => c.normal.dot(dir) >= 0.5);
+  if (aligned.length === 0) return null;
+
+  const totalArea = aligned.reduce((s, c) => s + c.area, 0) || 1;
+
+  // Find the most extreme cluster along the direction (e.g. highest center.Y for "top").
+  let extremeCluster = aligned[0];
+  let extremeProj = extremeCluster.center.dot(dir);
+  for (const c of aligned) {
+    const proj = c.center.dot(dir);
+    if (proj > extremeProj) { extremeCluster = c; extremeProj = proj; }
+  }
+
+  // Hybrid selection: prefer the most extreme cluster ONLY when it has substantial
+  // surface area (not a thin rim). For hollow parts (trays, chassis), the exterior
+  // top rim is the most extreme but has tiny area — the large interior floor is the
+  // actual mating face. Threshold: extreme cluster must be ≥15% of total aligned area.
+  if (extremeCluster.area / totalArea >= 0.15) return extremeCluster;
+
+  // Fall back to the largest-area cluster (interior floor of tray, main body face, etc.)
+  return aligned.reduce((best, c) => c.area > best.area ? c : best, aligned[0]);
 }
 
 function resolvePlanarCluster(mesh: THREE.Mesh, faceId: FaceId): AnchorResult | null {
@@ -562,6 +596,14 @@ function resolvePicked(pick: FaceAnchor): AnchorResult {
   };
 }
 
+/** Ordered list of methods to try during VLM-based anchor verification */
+export const ANCHOR_METHOD_VERIFY_ORDER: AnchorMethodId[] = [
+  'planar_cluster',
+  'face_projection',
+  'geometry_aabb',
+  'object_aabb',
+];
+
 export function resolveAnchor({
   object,
   faceId,
@@ -589,6 +631,11 @@ export function resolveAnchor({
     if (method === 'object_aabb') {
       const aabb = resolveObjectAabb(object, faceId);
       return aabb ? { ...aabb, requestedMethod, fallbackUsed: false } : null;
+    }
+    // face_projection for groups: use pure extremity (correct for solid/convex parts)
+    if (method === 'face_projection') {
+      const result = resolveGroupFaceProjection(object, faceId) ?? resolveObjectAabb(object, faceId);
+      return result ? { ...result, requestedMethod, fallbackUsed: result.method !== 'face_projection' } : null;
     }
     // For all geometry-based methods (planar_cluster, geometry_aabb, obb_pca, auto…)
     // use the merged-vertex planar-cluster approach, then fall back to object_aabb.
