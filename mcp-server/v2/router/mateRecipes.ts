@@ -22,6 +22,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RECIPES_FILE = path.resolve(__dirname, 'mate-recipes.json');
+const DEMONSTRATIONS_FILE = path.resolve(__dirname, 'mate-demonstrations.json');
 
 export type MateRecipe = {
   sourceName: string;
@@ -153,4 +154,107 @@ export async function getLearningContext(): Promise<string> {
 /** Clear in-memory cache (for hot-reload / testing). */
 export function clearRecipeCache(): void {
   cache = null;
+}
+
+// =============================================================================
+// DemonstrationRecord — Human demonstration storage for imitation learning
+// =============================================================================
+
+/**
+ * A human demonstration record capturing which assembly configuration
+ * the user chose, their explanation, and a scene snapshot for future learning.
+ *
+ * These demonstrations complement the exact-recipe system:
+ * - Recipes = exact part-pair cache (skip LLM)
+ * - Demonstrations = richer learning signal with scene context + explanations
+ */
+export type DemonstrationRecord = {
+  id: string;
+  timestamp: string;
+  sourcePartId: string;
+  sourcePartName: string;
+  targetPartId: string;
+  targetPartName: string;
+  /** ID of the MatingCandidate the user chose (optional — not always available) */
+  chosenCandidateId?: string;
+  /** User's explanation in their own words */
+  textExplanation?: string;
+  /** The wrong approach to avoid */
+  antiPattern?: string;
+  /** AI-generated generalizable rule */
+  generalizedRule?: string;
+  /** Scene snapshot at time of demonstration */
+  sceneSnapshot?: Record<
+    string,
+    { position: [number, number, number]; quaternion: [number, number, number, number] }
+  >;
+};
+
+type DemonstrationStore = DemonstrationRecord[];
+
+let demoCache: DemonstrationStore | null = null;
+
+async function loadDemoStore(): Promise<DemonstrationStore> {
+  if (demoCache !== null) return demoCache;
+  try {
+    const raw = await readFile(DEMONSTRATIONS_FILE, 'utf-8');
+    demoCache = JSON.parse(raw) as DemonstrationStore;
+    if (!Array.isArray(demoCache)) demoCache = [];
+  } catch {
+    demoCache = [];
+  }
+  return demoCache;
+}
+
+async function persistDemoStore(store: DemonstrationStore): Promise<void> {
+  demoCache = store;
+  await writeFile(DEMONSTRATIONS_FILE, JSON.stringify(store, null, 2), 'utf-8');
+}
+
+/**
+ * Save a new DemonstrationRecord. Deduplicates by id (overwrite if same id).
+ */
+export async function saveDemonstration(
+  record: DemonstrationRecord
+): Promise<DemonstrationRecord> {
+  const store = await loadDemoStore();
+  const idx = store.findIndex((d) => d.id === record.id);
+  if (idx >= 0) {
+    store[idx] = record;
+  } else {
+    store.push(record);
+  }
+  await persistDemoStore(store);
+  return record;
+}
+
+/**
+ * Return all saved demonstrations, newest first.
+ */
+export async function listDemonstrations(): Promise<DemonstrationRecord[]> {
+  const store = await loadDemoStore();
+  return [...store].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+}
+
+/**
+ * Find demonstrations for a specific part pair (order-independent).
+ */
+export async function findDemonstrations(
+  nameA: string,
+  nameB: string
+): Promise<DemonstrationRecord[]> {
+  const store = await loadDemoStore();
+  const upperA = nameA.toUpperCase();
+  const upperB = nameB.toUpperCase();
+  return store.filter((d) => {
+    const srcUpper = d.sourcePartName.toUpperCase();
+    const tgtUpper = d.targetPartName.toUpperCase();
+    return (srcUpper === upperA && tgtUpper === upperB) ||
+           (srcUpper === upperB && tgtUpper === upperA);
+  });
+}
+
+/** Clear demonstration cache (for hot-reload / testing). */
+export function clearDemoCache(): void {
+  demoCache = null;
 }

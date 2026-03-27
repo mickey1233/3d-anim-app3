@@ -1424,6 +1424,115 @@ export const MCPToolSchemas = {
     }),
     result: makeToolResultSchema(z.object({ saved: z.boolean(), message: z.string() })),
   },
+
+  // ---------------------------------------------------------------------------
+  // Feature-based assembly tools (v3 pipeline)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * query.extract_features — Extract assembly features from a single part.
+   * Runs the v3 feature extraction pipeline (planar faces, holes, pegs, slots)
+   * on the part's Three.js geometry and returns a list of AssemblyFeature records.
+   */
+  'query.extract_features': {
+    args: z.object({
+      part: PartRefSchema,
+    }),
+    result: makeToolResultSchema(z.object({
+      partId: z.string(),
+      features: z.array(z.object({
+        id: z.string(),
+        type: z.enum([
+          'planar_face', 'cylindrical_hole', 'blind_hole', 'slot',
+          'peg', 'tab', 'socket', 'rail', 'edge_notch', 'edge_connector', 'support_pad',
+        ]),
+        partId: z.string(),
+        pose: z.object({
+          localPosition: Vec3Schema,
+          localAxis: Vec3Schema,
+          localSecondaryAxis: Vec3Schema.optional(),
+          worldPosition: Vec3Schema.optional(),
+          worldAxis: Vec3Schema.optional(),
+        }),
+        dimensions: z.object({
+          diameter: z.number().optional(),
+          depth: z.number().nullable().optional(),
+          area: z.number().optional(),
+          length: z.number().optional(),
+          width: z.number().optional(),
+          thickness: z.number().optional(),
+          tolerance: z.number(),
+        }),
+        semanticRole: z.enum(['insert', 'receive', 'fasten', 'support', 'align', 'seal', 'unknown']),
+        supportFaceNormal: Vec3Schema.optional(),
+        confidence: z.number(),
+        label: z.string().optional(),
+        extractedBy: z.enum(['planar_cluster', 'circle_fit', 'peg_detect', 'slot_detect', 'manual', 'vlm_hint']),
+      })),
+      featureCount: z.number().int().nonnegative(),
+    })),
+  },
+
+  /**
+   * query.generate_candidates — Generate mating candidates between two parts.
+   * Extracts features from both parts and returns sorted MatingCandidate[] (best first).
+   */
+  'query.generate_candidates': {
+    args: z.object({
+      sourcePart: PartRefSchema,
+      targetPart: PartRefSchema,
+      maxCandidates: z.number().int().positive().max(20).optional().default(10),
+    }),
+    result: makeToolResultSchema(z.object({
+      sourcePartId: z.string(),
+      targetPartId: z.string(),
+      candidates: z.array(z.object({
+        id: z.string(),
+        sourcePartId: z.string(),
+        targetPartId: z.string(),
+        totalScore: z.number(),
+        description: z.string(),
+        diagnostics: z.array(z.string()),
+        scoreBreakdown: z.object({
+          featureCompatibility: z.number(),
+          dimensionFit: z.number(),
+          axisAlignment: z.number(),
+          faceSupportConsistency: z.number(),
+          collisionPenalty: z.number(),
+          insertionFeasibility: z.number(),
+          symmetryAmbiguityPenalty: z.number(),
+          recipePrior: z.number(),
+          vlmRerank: z.number().optional(),
+        }),
+        featurePairCount: z.number().int().nonnegative(),
+        primaryPairDescription: z.string().optional(),
+      })),
+      candidateCount: z.number().int().nonnegative(),
+    })),
+  },
+
+  /**
+   * mate.record_demonstration — Save a human demonstration for imitation learning.
+   * Records which candidate the human chose (or confirmed) along with their explanation.
+   */
+  'mate.record_demonstration': {
+    args: z.object({
+      sourcePartId: z.string(),
+      targetPartId: z.string(),
+      /** ID of the MatingCandidate the human chose/confirmed (optional) */
+      chosenCandidateId: z.string().optional(),
+      /** Human's explanation of why this assembly is correct */
+      textExplanation: z.string().optional(),
+      /** Wrong approach to avoid */
+      antiPattern: z.string().optional(),
+      /** AI-generated generalizable rule */
+      generalizedRule: z.string().optional(),
+    }),
+    result: makeToolResultSchema(z.object({
+      demonstrationId: z.string(),
+      saved: z.boolean(),
+    })),
+  },
 } as const;
 
 export type MCPToolRegistry = typeof MCPToolSchemas;
@@ -1488,6 +1597,9 @@ export const MCPToolNameSchema = z.enum([
   'interaction.gizmo_drag_update',
   'interaction.gizmo_drag_end',
   'mate.save_recipe',
+  'query.extract_features',
+  'query.generate_candidates',
+  'mate.record_demonstration',
 ]);
 
 const typedRequestSchemas = [
@@ -1549,6 +1661,9 @@ const typedRequestSchemas = [
   z.object({ tool: z.literal('interaction.gizmo_drag_update'), args: GizmoDragUpdateArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('interaction.gizmo_drag_end'), args: GizmoDragEndArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('mate.save_recipe'), args: z.object({ sourceName: z.string(), targetName: z.string(), sourceFace: z.enum(['top','bottom','left','right','front','back']), targetFace: z.enum(['top','bottom','left','right','front','back']), sourceMethod: z.string().optional(), targetMethod: z.string().optional(), note: z.string().optional(), whyDescription: z.string().optional(), pattern: z.string().optional(), antiPattern: z.string().optional(), geometrySignal: z.string().optional() }), meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('query.extract_features'), args: z.object({ part: PartRefSchema }), meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('query.generate_candidates'), args: z.object({ sourcePart: PartRefSchema, targetPart: PartRefSchema, maxCandidates: z.number().int().positive().max(20).optional().default(10) }), meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('mate.record_demonstration'), args: z.object({ sourcePartId: z.string(), targetPartId: z.string(), chosenCandidateId: z.string().optional(), textExplanation: z.string().optional(), antiPattern: z.string().optional(), generalizedRule: z.string().optional() }), meta: ToolMetaSchema.optional() }),
 ] as const;
 
 export const MCPToolRequestSchema = z.discriminatedUnion('tool', typedRequestSchemas);

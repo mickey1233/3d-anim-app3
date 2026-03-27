@@ -12,7 +12,7 @@ import { inferAssemblySequence } from './vlm/autoAssemble.js';
 import { verifyAnchorFace, logAnchorVerifyFailure } from './vlm/anchorVerify.js';
 import { inferMateFromImages } from './vlm/mateInfer.js';
 import { inferMateParams } from './router/mateParamsInfer.js';
-import { saveRecipe, deleteRecipe, listRecipes } from './router/mateRecipes.js';
+import { saveRecipe, deleteRecipe, listRecipes, saveDemonstration, listDemonstrations } from './router/mateRecipes.js';
 import { queryWeather, queryWebSearch } from './web/queryTools.js';
 import { getServerStatus } from './status/serverStatus.js';
 
@@ -564,6 +564,51 @@ export class WsGatewayV2 {
           if (parsed.data.command === 'agent.list_mate_recipes') {
             const recipes = await listRecipes();
             this.sendResponse(ws, parsed.data.id, true, { recipes });
+            return;
+          }
+
+          if (parsed.data.command === 'agent.save_demonstration') {
+            const args = (parsed.data.args ?? {}) as {
+              id?: string;
+              timestamp?: string;
+              sourcePartId?: string;
+              sourcePartName?: string;
+              targetPartId?: string;
+              targetPartName?: string;
+              chosenCandidateId?: string;
+              textExplanation?: string;
+              antiPattern?: string;
+              generalizedRule?: string;
+              sceneSnapshot?: Record<string, { position: [number,number,number]; quaternion: [number,number,number,number] }>;
+            };
+            if (!args.sourcePartId || !args.targetPartId) {
+              this.sendResponse(ws, parsed.data.id, false, undefined, {
+                message: 'save_demonstration requires sourcePartId and targetPartId',
+                code: 'INVALID_ARGUMENT',
+              });
+              return;
+            }
+            const record = await saveDemonstration({
+              id: args.id ?? crypto.randomUUID(),
+              timestamp: args.timestamp ?? new Date().toISOString(),
+              sourcePartId: args.sourcePartId,
+              sourcePartName: args.sourcePartName ?? args.sourcePartId,
+              targetPartId: args.targetPartId,
+              targetPartName: args.targetPartName ?? args.targetPartId,
+              chosenCandidateId: args.chosenCandidateId,
+              textExplanation: args.textExplanation,
+              antiPattern: args.antiPattern,
+              generalizedRule: args.generalizedRule,
+              sceneSnapshot: args.sceneSnapshot,
+            });
+            console.log(`[wsGateway] Saved demonstration: ${record.sourcePartName} → ${record.targetPartName} (${record.id})`);
+            this.sendResponse(ws, parsed.data.id, true, { saved: true, demonstrationId: record.id });
+            return;
+          }
+
+          if (parsed.data.command === 'agent.list_demonstrations') {
+            const demonstrations = await listDemonstrations();
+            this.sendResponse(ws, parsed.data.id, true, { demonstrations });
             return;
           }
 

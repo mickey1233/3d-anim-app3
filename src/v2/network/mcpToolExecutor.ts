@@ -15,6 +15,8 @@ import { captureMultiAngles, DEFAULT_ANGLES } from '../three/captureMultiAngle';
 import { resolveAnchor } from '../three/mating/anchorMethods';
 import { solveMateTopBottom, applyMateTransform } from '../three/mating/solver';
 import { clusterPlanarFaces } from '../three/mating/faceClustering';
+import { extractFeatures } from '../three/mating/featureExtractor';
+import { generateMatingCandidates } from '../three/mating/featureMatcher';
 
 type ToolErrorCode =
   | 'INVALID_ARGUMENT'
@@ -5153,6 +5155,180 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         ? `Saved mate recipe: ${input.sourceName} (${input.sourceFace}) ↔ ${input.targetName} (${input.targetFace})`
         : 'Failed to save recipe (server error)',
     }, { mutating: false });
+  }
+
+  // ── query.extract_features ─────────────────────────────────────────────────
+  if (tool === 'query.extract_features') {
+    const input = args as { part: PartRef };
+    const part = resolvePart(input.part);
+    const obj = getV2ObjectByPartId(part.partId);
+    if (!obj) {
+      throw new ToolExecutionError({
+        code: 'NOT_FOUND',
+        message: `Part '${part.partName}' (${part.partId}) not found in scene`,
+        suggestedToolCalls: [{ tool: 'query.scene_state', args: {} }],
+      });
+    }
+
+    // Update world matrix so feature extractor sees current transforms
+    const store = currentStore();
+    const partTransform = store.parts.overridesById[part.partId] || store.parts.initialTransformById[part.partId];
+    if (partTransform) {
+      obj.position.set(partTransform.position[0], partTransform.position[1], partTransform.position[2]);
+      obj.quaternion.set(partTransform.quaternion[0], partTransform.quaternion[1], partTransform.quaternion[2], partTransform.quaternion[3]);
+    }
+    obj.updateWorldMatrix(true, true);
+
+    const features = extractFeatures(obj, part.partId);
+
+    return ok({
+      partId: part.partId,
+      features,
+      featureCount: features.length,
+    }, { mutating: false, debug: { partName: part.partName } });
+  }
+
+  // ── query.generate_candidates ──────────────────────────────────────────────
+  if (tool === 'query.generate_candidates') {
+    const input = args as { sourcePart: PartRef; targetPart: PartRef; maxCandidates?: number };
+    const sourcePart = resolvePart(input.sourcePart);
+    const targetPart = resolvePart(input.targetPart);
+
+    const sourceObj = getV2ObjectByPartId(sourcePart.partId);
+    const targetObj = getV2ObjectByPartId(targetPart.partId);
+
+    if (!sourceObj) {
+      throw new ToolExecutionError({
+        code: 'NOT_FOUND',
+        message: `Source part '${sourcePart.partName}' not found in scene`,
+        suggestedToolCalls: [{ tool: 'query.scene_state', args: {} }],
+      });
+    }
+    if (!targetObj) {
+      throw new ToolExecutionError({
+        code: 'NOT_FOUND',
+        message: `Target part '${targetPart.partName}' not found in scene`,
+        suggestedToolCalls: [{ tool: 'query.scene_state', args: {} }],
+      });
+    }
+
+    // Sync transforms from store to Three.js objects
+    const store = currentStore();
+    const syncTransform = (obj: THREE.Object3D, partId: string) => {
+      const t = store.parts.overridesById[partId] || store.parts.initialTransformById[partId];
+      if (t) {
+        obj.position.set(t.position[0], t.position[1], t.position[2]);
+        obj.quaternion.set(t.quaternion[0], t.quaternion[1], t.quaternion[2], t.quaternion[3]);
+      }
+      obj.updateWorldMatrix(true, true);
+    };
+    syncTransform(sourceObj, sourcePart.partId);
+    syncTransform(targetObj, targetPart.partId);
+
+    const sourceFeatures = extractFeatures(sourceObj, sourcePart.partId);
+    const targetFeatures = extractFeatures(targetObj, targetPart.partId);
+
+    const maxCandidates = typeof input.maxCandidates === 'number' ? input.maxCandidates : 10;
+    const candidates = generateMatingCandidates(
+      sourceFeatures,
+      targetFeatures,
+      sourcePart.partId,
+      targetPart.partId,
+      { maxCandidates }
+    );
+
+    // Return a serialization-friendly summary (featurePairs contain full feature objects
+    // which could be large — summarize them instead of embedding).
+    const candidateSummaries = candidates.map(c => ({
+      id: c.id,
+      sourcePartId: c.sourcePartId,
+      targetPartId: c.targetPartId,
+      totalScore: c.totalScore,
+      description: c.description,
+      diagnostics: c.diagnostics,
+      scoreBreakdown: c.scoreBreakdown,
+      featurePairCount: c.featurePairs.length,
+      primaryPairDescription: c.featurePairs[0]
+        ? `${c.featurePairs[0].sourceFeature.type} ↔ ${c.featurePairs[0].targetFeature.type}`
+        : undefined,
+    }));
+
+    return ok({
+      sourcePartId: sourcePart.partId,
+      targetPartId: targetPart.partId,
+      candidates: candidateSummaries,
+      candidateCount: candidates.length,
+    }, {
+      mutating: false,
+      debug: {
+        sourceFeatureCount: sourceFeatures.length,
+        targetFeatureCount: targetFeatures.length,
+      },
+    });
+  }
+
+  // ── mate.record_demonstration ──────────────────────────────────────────────
+  if (tool === 'mate.record_demonstration') {
+    const input = args as {
+      sourcePartId: string;
+      targetPartId: string;
+      chosenCandidateId?: string;
+      textExplanation?: string;
+      antiPattern?: string;
+      generalizedRule?: string;
+    };
+
+    if (!input.sourcePartId || !input.targetPartId) {
+      throw new ToolExecutionError({
+        code: 'INVALID_ARGUMENT',
+        message: 'mate.record_demonstration requires sourcePartId and targetPartId',
+        suggestedToolCalls: [],
+      });
+    }
+
+    // Resolve part names for the demonstration record
+    const store = currentStore();
+    const srcPartData = store.parts.byId[input.sourcePartId];
+    const tgtPartData = store.parts.byId[input.targetPartId];
+    const sourcePartName = srcPartData?.name ?? input.sourcePartId;
+    const targetPartName = tgtPartData?.name ?? input.targetPartId;
+
+    // Build a scene snapshot for learning
+    const sceneSnapshot: Record<string, { position: [number, number, number]; quaternion: [number, number, number, number] }> = {};
+    for (const partId of store.parts.order) {
+      const t = store.parts.overridesById[partId] || store.parts.initialTransformById[partId];
+      if (t) {
+        sceneSnapshot[partId] = {
+          position: [t.position[0], t.position[1], t.position[2]],
+          quaternion: [t.quaternion[0], t.quaternion[1], t.quaternion[2], t.quaternion[3]],
+        };
+      }
+    }
+
+    const demonstrationId = crypto.randomUUID();
+    // Send the demonstration to the backend for storage
+    let saved = false;
+    try {
+      await v2Client.request('agent.save_demonstration', {
+        id: demonstrationId,
+        timestamp: new Date().toISOString(),
+        sourcePartId: input.sourcePartId,
+        sourcePartName,
+        targetPartId: input.targetPartId,
+        targetPartName,
+        chosenCandidateId: input.chosenCandidateId,
+        textExplanation: input.textExplanation,
+        antiPattern: input.antiPattern,
+        generalizedRule: input.generalizedRule,
+        sceneSnapshot,
+      });
+      saved = true;
+    } catch {
+      // Server unavailable — that's OK, demonstration is not critical
+      saved = false;
+    }
+
+    return ok({ demonstrationId, saved }, { mutating: false });
   }
 
   throw new ToolExecutionError({
