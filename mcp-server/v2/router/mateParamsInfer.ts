@@ -16,6 +16,7 @@ import { readFile } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { callAgentLlm } from './agentLlm.js';
+import { findRecipe, getLearningContext } from './mateRecipes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = path.resolve(__dirname, '../../../agent-prompts');
@@ -198,7 +199,30 @@ export async function inferMateParams(
     }
   }
 
-  const systemPrompt = await loadSkillPrompt();
+  // Recipe check — exact match from user-saved corrections overrides LLM entirely.
+  const recipe = await findRecipe(input.sourcePart.name, input.targetPart.name);
+  if (recipe) {
+    console.log(`[mateParamsInfer] Using saved recipe for ${input.sourcePart.name} ↔ ${input.targetPart.name}`);
+    return {
+      intent: 'default',
+      mode: 'translate',
+      sourceFace: recipe.sourceFace as any,
+      targetFace: recipe.targetFace as any,
+      sourceMethod: recipe.sourceMethod as any,
+      targetMethod: recipe.targetMethod as any,
+      confidence: 1.0,
+      reasoning: `Saved recipe: ${recipe.note ?? 'user-corrected assembly'}`,
+    };
+  }
+
+  const [systemPromptBase, learningContext] = await Promise.all([
+    loadSkillPrompt(),
+    getLearningContext(),
+  ]);
+  // Inject learned patterns before the skill docs so they take precedence
+  const systemPrompt = learningContext
+    ? `${learningContext}\n\n---\n\n${systemPromptBase}`
+    : systemPromptBase;
   const userMessage = buildUserMessage(input);
 
   // callAgentLlm expects { replyText, toolCalls } output — we hijack this by embedding

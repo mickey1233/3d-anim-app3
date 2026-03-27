@@ -31,6 +31,7 @@ All available tools in `namespace.action` format.
 | Tool | Required Args | Purpose |
 |------|--------------|---------|
 | `action.mate_execute` | `sourcePart: PartRef`, `targetPart: PartRef`, `sourceFace`, `targetFace`, `sourceMethod?`, `targetMethod?`, `mode`, `mateMode`, `commit?`, `pushHistory?`, `stepLabel?` | Execute a mate operation between two parts |
+| `mate.save_recipe` | `sourceName: string`, `targetName: string`, `sourceFace`, `targetFace`, `sourceMethod?`, `targetMethod?`, `note?` | Save a mate recipe so AI uses it automatically next time (learning from user correction) |
 | `action.reset_part` | `part: PartRef` | Reset a part to its original transform |
 | `action.reset_all` | — | Reset all parts to their original transforms |
 | `action.transform_part` | `part: PartRef`, `position?`, `rotation?` | Move or rotate a part |

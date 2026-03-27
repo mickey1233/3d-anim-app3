@@ -68,6 +68,77 @@ Do NOT emit `query.mate_vlm_infer`, `action.mate_execute`, or `query.mate_sugges
 
 ---
 
+## Remembering a Mate (Learning from User Correction)
+
+**Triggers**: `remember this mate`, `記住這個組裝`, `learn this`, `save this mate`, `記住`, `學習這個`, `讓ai學習`
+
+There are TWO levels of learning:
+
+### Level 1 — Exact match (same parts next time → skip LLM)
+### Level 2 — Generalizable pattern (similar situation next time → LLM applies the rule)
+
+**Both levels are saved together in a single `mate.save_recipe` call.**
+
+### Workflow
+
+**Step 1** — If the user has NOT already explained why: reply first asking for the reason.
+> "好的，我記住了 {sourceName} ({sourceFace}) → {targetName} ({targetFace}) 這個組裝方式。
+> 你能告訴我為什麼這樣組裝嗎？這樣下次遇到類似情況，我也能舉一反三。
+> 例如：「因為這兩個零件是並排的，不能疊在一起」"
+
+**Step 2** — Once you have both the face config AND the reason, call `mate.save_recipe` with ALL fields:
+
+```json
+{
+  "tool": "mate.save_recipe",
+  "args": {
+    "sourceName": "<source part name>",
+    "targetName": "<target part name>",
+    "sourceFace": "<face>",
+    "targetFace": "<face>",
+    "sourceMethod": "planar_cluster",
+    "targetMethod": "planar_cluster",
+    "whyDescription": "<user's explanation in their own words>",
+    "pattern": "<your English generalization of the rule, suitable for future LLM reasoning>",
+    "antiPattern": "<what NOT to do and why>",
+    "geometrySignal": "<geometry characteristics that identify this situation>"
+  }
+}
+```
+
+**Step 3** — Confirm:
+> "已學習完成！
+> ✓ 記住了 {sourceName} ↔ {targetName} 的精確組裝方式
+> ✓ 學習規則：{pattern}
+> 下次遇到類似情況，我會套用這個規則。"
+
+### How to generate the `pattern` field
+
+The `pattern` should generalize from the specific example to a broader rule:
+- Bad: "HOR_FAN_LEFT uses right face"
+- Good: "When two identical/similar parts are positioned side-by-side horizontally (same Y height, different X), connect at their facing lateral faces (right→left or left→right). Do NOT use top/bottom which stacks them vertically."
+
+Consider:
+- **Part type**: fan / screw / cover / connector / base — what is this type of part?
+- **Relative position**: same height and side-by-side? one clearly above the other? one inside the other?
+- **Assembly intent**: cover, insert, join side-by-side, stack
+- **Wrong assumption to avoid**: what did the AI assume incorrectly?
+
+### Example
+
+User corrects: HOR_FAN_LEFT (right) → HOR_FAN_RIGHT (left)
+User says: "因為這兩個風扇是左右並排的，不能疊在一起"
+
+Generated pattern:
+- `whyDescription`: "這兩個風扇是左右並排的，不能疊在一起"
+- `pattern`: "When two identical or similar parts (e.g. fans, modules) are positioned side-by-side horizontally (similar Y height, significant horizontal X offset), connect at their facing lateral faces (right→left or left→right). Do NOT use top/bottom which would stack them vertically."
+- `antiPattern`: "Do NOT use bottom→top for side-by-side parts — that stacks them on top of each other instead of joining them at their shared inner face."
+- `geometrySignal`: "same bbox dimensions, large dx (horizontal offset), near-zero dy (same height), parts are the same type"
+
+**Important**: `pattern` is injected into EVERY future mate inference prompt, even for unseen parts. Write it to be useful for reasoning about new situations.
+
+---
+
 ## mateMode ↔ mode Mapping (for reference only — VLM decides this)
 
 | `mode` | `mateMode` | `pathPreference` |

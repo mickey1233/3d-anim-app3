@@ -1404,6 +1404,26 @@ export const MCPToolSchemas = {
     args: GizmoDragEndArgsSchema,
     result: makeToolResultSchema(GizmoDragEndDataSchema),
   },
+  'mate.save_recipe': {
+    args: z.object({
+      sourceName: z.string(),
+      targetName: z.string(),
+      sourceFace: z.enum(['top', 'bottom', 'left', 'right', 'front', 'back']),
+      targetFace: z.enum(['top', 'bottom', 'left', 'right', 'front', 'back']),
+      sourceMethod: z.string().optional(),
+      targetMethod: z.string().optional(),
+      note: z.string().optional(),
+      /** User's explanation of WHY this assembly is correct (any language) */
+      whyDescription: z.string().optional(),
+      /** AI-generated generalizable rule derived from this example */
+      pattern: z.string().optional(),
+      /** Wrong approach to avoid */
+      antiPattern: z.string().optional(),
+      /** Geometry characteristics that identify this type of situation */
+      geometrySignal: z.string().optional(),
+    }),
+    result: makeToolResultSchema(z.object({ saved: z.boolean(), message: z.string() })),
+  },
 } as const;
 
 export type MCPToolRegistry = typeof MCPToolSchemas;
@@ -1467,6 +1487,7 @@ export const MCPToolNameSchema = z.enum([
   'interaction.gizmo_drag_begin',
   'interaction.gizmo_drag_update',
   'interaction.gizmo_drag_end',
+  'mate.save_recipe',
 ]);
 
 const typedRequestSchemas = [
@@ -1527,6 +1548,7 @@ const typedRequestSchemas = [
   z.object({ tool: z.literal('interaction.gizmo_drag_begin'), args: GizmoDragBeginArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('interaction.gizmo_drag_update'), args: GizmoDragUpdateArgsSchema, meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('interaction.gizmo_drag_end'), args: GizmoDragEndArgsSchema, meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('mate.save_recipe'), args: z.object({ sourceName: z.string(), targetName: z.string(), sourceFace: z.enum(['top','bottom','left','right','front','back']), targetFace: z.enum(['top','bottom','left','right','front','back']), sourceMethod: z.string().optional(), targetMethod: z.string().optional(), note: z.string().optional(), whyDescription: z.string().optional(), pattern: z.string().optional(), antiPattern: z.string().optional(), geometrySignal: z.string().optional() }), meta: ToolMetaSchema.optional() }),
 ] as const;
 
 export const MCPToolRequestSchema = z.discriminatedUnion('tool', typedRequestSchemas);

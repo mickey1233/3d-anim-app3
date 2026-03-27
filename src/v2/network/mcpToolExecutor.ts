@@ -456,6 +456,31 @@ async function callAgentForMateParams(params: {
   }
 }
 
+/**
+ * Save a mate recipe to the server so future mate calls for this part pair
+ * bypass LLM and use the saved faces/methods directly.
+ */
+async function saveMateRecipe(params: {
+  sourceName: string;
+  targetName: string;
+  sourceFace: string;
+  targetFace: string;
+  sourceMethod?: string;
+  targetMethod?: string;
+  note?: string;
+  whyDescription?: string;
+  pattern?: string;
+  antiPattern?: string;
+  geometrySignal?: string;
+}): Promise<boolean> {
+  try {
+    await v2Client.request('agent.save_mate_recipe', params);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function defaultModeForIntent(intent: MateIntentKind): MateExecMode {
   // insert typically needs rotation correction too (part may be rotated before insertion)
   if (intent === 'insert') return 'both';
@@ -5097,6 +5122,37 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       },
       { mutating: completedSteps.length > 0 }
     );
+  }
+
+  // ── mate.save_recipe ───────────────────────────────────────────────────────
+  if (tool === 'mate.save_recipe') {
+    const input = args as {
+      sourceName: string;
+      targetName: string;
+      sourceFace: string;
+      targetFace: string;
+      sourceMethod?: string;
+      targetMethod?: string;
+      note?: string;
+      whyDescription?: string;
+      pattern?: string;
+      antiPattern?: string;
+      geometrySignal?: string;
+    };
+    if (!input.sourceName || !input.targetName || !input.sourceFace || !input.targetFace) {
+      throw new ToolExecutionError({
+        code: 'INVALID_ARGUMENT',
+        message: 'mate.save_recipe requires sourceName, targetName, sourceFace, targetFace',
+        suggestedToolCalls: [],
+      });
+    }
+    const saved = await saveMateRecipe(input);
+    return ok({
+      saved,
+      message: saved
+        ? `Saved mate recipe: ${input.sourceName} (${input.sourceFace}) ↔ ${input.targetName} (${input.targetFace})`
+        : 'Failed to save recipe (server error)',
+    }, { mutating: false });
   }
 
   throw new ToolExecutionError({

@@ -12,6 +12,7 @@ import { inferAssemblySequence } from './vlm/autoAssemble.js';
 import { verifyAnchorFace, logAnchorVerifyFailure } from './vlm/anchorVerify.js';
 import { inferMateFromImages } from './vlm/mateInfer.js';
 import { inferMateParams } from './router/mateParamsInfer.js';
+import { saveRecipe, deleteRecipe, listRecipes } from './router/mateRecipes.js';
 import { queryWeather, queryWebSearch } from './web/queryTools.js';
 import { getServerStatus } from './status/serverStatus.js';
 
@@ -507,6 +508,62 @@ export class WsGatewayV2 {
               geometryHint: mateArgs.geometryHint as any,
             });
             this.sendResponse(ws, parsed.data.id, true, { inference });
+            return;
+          }
+
+          if (parsed.data.command === 'agent.save_mate_recipe') {
+            const args = (parsed.data.args ?? {}) as {
+              sourceName?: string;
+              targetName?: string;
+              sourceFace?: string;
+              targetFace?: string;
+              sourceMethod?: string;
+              targetMethod?: string;
+              note?: string;
+              whyDescription?: string;
+              pattern?: string;
+              antiPattern?: string;
+              geometrySignal?: string;
+            };
+            if (!args.sourceName || !args.targetName || !args.sourceFace || !args.targetFace) {
+              this.sendResponse(ws, parsed.data.id, false, undefined, {
+                message: 'save_mate_recipe requires sourceName, targetName, sourceFace, targetFace',
+                code: 'INVALID_ARGUMENT',
+              });
+              return;
+            }
+            const saved = await saveRecipe({
+              sourceName: args.sourceName,
+              targetName: args.targetName,
+              sourceFace: args.sourceFace,
+              targetFace: args.targetFace,
+              sourceMethod: args.sourceMethod ?? 'planar_cluster',
+              targetMethod: args.targetMethod ?? 'planar_cluster',
+              note: args.note,
+              whyDescription: args.whyDescription,
+              pattern: args.pattern,
+              antiPattern: args.antiPattern,
+              geometrySignal: args.geometrySignal,
+            });
+            console.log(`[wsGateway] Saved mate recipe: ${saved.sourceName} ↔ ${saved.targetName}`);
+            this.sendResponse(ws, parsed.data.id, true, { saved });
+            return;
+          }
+
+          if (parsed.data.command === 'agent.delete_mate_recipe') {
+            const args = (parsed.data.args ?? {}) as { sourceName?: string; targetName?: string };
+            if (!args.sourceName || !args.targetName) {
+              this.sendResponse(ws, parsed.data.id, false, undefined, { message: 'delete_mate_recipe requires sourceName and targetName', code: 'INVALID_ARGUMENT' });
+              return;
+            }
+            const deleted = await deleteRecipe(args.sourceName, args.targetName);
+            this.sendResponse(ws, parsed.data.id, true, { deleted });
+            return;
+          }
+
+          if (parsed.data.command === 'agent.list_mate_recipes') {
+            const recipes = await listRecipes();
+            this.sendResponse(ws, parsed.data.id, true, { recipes });
             return;
           }
 
