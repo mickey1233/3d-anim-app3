@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { MCPToolRequestSchema } from '../../../shared/schema/mcpToolsV3.js';
 import type { ToolCall } from '../../../shared/schema/index.js';
-import { MockRouterProvider } from './mockProvider.js';
+import { AgentRouterProvider } from './agentProvider.js';
 import type { RouterContext, RouterProvider } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -208,7 +208,7 @@ export const CodexRouterProvider: RouterProvider = {
 
     if (!raw) {
       console.warn('[codex] empty response — fallback to mock');
-      return MockRouterProvider.route(text, ctx);
+      return AgentRouterProvider.route(text, ctx);
     }
 
     const parsed = AgentRouteSchema.safeParse(extractJson(raw));
@@ -218,7 +218,7 @@ export const CodexRouterProvider: RouterProvider = {
       if (raw.length > 0 && !raw.startsWith('{')) {
         return { toolCalls: [], replyText: raw.slice(0, 500) };
       }
-      return MockRouterProvider.route(text, ctx);
+      return AgentRouterProvider.route(text, ctx);
     }
 
     const replyText = parsed.data.replyText?.trim() || undefined;
@@ -232,7 +232,7 @@ export const CodexRouterProvider: RouterProvider = {
     if (hasPlan && hasAction) toolCalls = toolCalls.filter(isPlanningCall);
 
     if (toolCalls.length === 0 && !replyText) {
-      return MockRouterProvider.route(text, ctx);
+      return AgentRouterProvider.route(text, ctx);
     }
 
     return { toolCalls, ...(replyText ? { replyText } : {}) };

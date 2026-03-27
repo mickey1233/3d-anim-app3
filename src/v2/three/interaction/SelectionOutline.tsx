@@ -2,7 +2,42 @@ import React, { useEffect, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { useFrame, useThree } from '@react-three/fiber';
 import { useV2Store } from '../../store/store';
-import { computeRootLocalBoundingBox, type RootLocalObb } from '../utils/bounds';
+
+// ---------------------------------------------------------------------------
+// Compute a trimmed percentile AABB in obj-local space.
+// Excludes the top/bottom `pct` fraction of vertex positions per axis, which
+// removes the thin mounting-face vertices (at Y≈0 in the Spark GLB) that
+// would otherwise make the bounding box extend far beyond the visible body.
+// Result is cached by partId (geometry doesn't change when the part moves).
+// ---------------------------------------------------------------------------
+function computeLocalPercentileBox(obj: THREE.Object3D, pct = 0.02): THREE.Box3 {
+  obj.updateWorldMatrix(true, true);
+  const objWorldInv = new THREE.Matrix4().copy(obj.matrixWorld).invert();
+  const xs: number[] = [], ys: number[] = [], zs: number[] = [];
+  const v = new THREE.Vector3();
+  obj.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.geometry) return;
+    const pos = mesh.geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+    if (!pos || pos.count === 0) return;
+    // Transform from mesh-local → obj-local
+    const meshToObj = new THREE.Matrix4().multiplyMatrices(objWorldInv, mesh.matrixWorld);
+    const stride = Math.max(1, Math.floor(pos.count / 400));
+    for (let i = 0; i < pos.count; i += stride) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(meshToObj);
+      xs.push(v.x); ys.push(v.y); zs.push(v.z);
+    }
+  });
+  if (xs.length === 0) return new THREE.Box3();
+  xs.sort((a, b) => a - b); ys.sort((a, b) => a - b); zs.sort((a, b) => a - b);
+  const n = xs.length;
+  const lo = Math.max(0, Math.round(n * pct));
+  const hi = Math.min(n - 1, Math.round(n * (1 - pct)));
+  return new THREE.Box3(
+    new THREE.Vector3(xs[lo], ys[lo], zs[lo]),
+    new THREE.Vector3(xs[hi], ys[hi], zs[hi]),
+  );
+}
 
 const EDGE_VERTEX_COUNT = 24;
 const POSITION_COMPONENTS = EDGE_VERTEX_COUNT * 3;
@@ -48,67 +83,20 @@ function writeBoxEdgesToPositionArray(box: THREE.Box3, array: Float32Array) {
   }
 }
 
-function writeObbEdgesToPositionArray(obb: RootLocalObb, array: Float32Array) {
-  const [axisX, axisY, axisZ] = obb.axes;
-  const half = obb.size.clone().multiplyScalar(0.5);
-  const center = obb.center;
-  const signs = [
-    new THREE.Vector3(-1, -1, -1),
-    new THREE.Vector3(1, -1, -1),
-    new THREE.Vector3(1, 1, -1),
-    new THREE.Vector3(-1, 1, -1),
-    new THREE.Vector3(-1, -1, 1),
-    new THREE.Vector3(1, -1, 1),
-    new THREE.Vector3(1, 1, 1),
-    new THREE.Vector3(-1, 1, 1),
-  ];
-  const corners = signs.map((sign) =>
-    center
-      .clone()
-      .add(axisX.clone().multiplyScalar(sign.x * half.x))
-      .add(axisY.clone().multiplyScalar(sign.y * half.y))
-      .add(axisZ.clone().multiplyScalar(sign.z * half.z))
-  );
-
-  let cursor = 0;
-  for (const [a, b] of EDGE_INDEXES) {
-    const p0 = corners[a];
-    const p1 = corners[b];
-    array[cursor++] = p0.x;
-    array[cursor++] = p0.y;
-    array[cursor++] = p0.z;
-    array[cursor++] = p1.x;
-    array[cursor++] = p1.y;
-    array[cursor++] = p1.z;
-  }
-}
-
-type OutlineShape = {
-  obb: RootLocalObb | null;
-  box: THREE.Box3 | null;
-};
-
 function SingleOutline({ partId, color = 0xffff00 }: { partId: string; color?: number }) {
   const { scene } = useThree();
   const targetRef = useRef<THREE.Object3D | null>(null);
-  const localShapeRef = useRef<OutlineShape | null>(null);
+  // Percentile AABB in obj-local space — computed once per partId, reused every frame.
+  const localBoxRef = useRef<THREE.Box3 | null>(null);
   const [helper, setHelper] = useState<THREE.LineSegments | null>(null);
 
   useEffect(() => {
     const obj = scene.getObjectByProperty('uuid', partId) || null;
     targetRef.current = obj;
-    localShapeRef.current = null;
+    localBoxRef.current = obj ? computeLocalPercentileBox(obj) : null;
   }, [scene, partId]);
 
   useEffect(() => {
-    if (!targetRef.current) {
-      setHelper(null);
-      return () => {};
-    }
-    targetRef.current.updateWorldMatrix(true, true);
-    const box = computeRootLocalBoundingBox(targetRef.current);
-    localShapeRef.current = { obb: null, box: box.isEmpty() ? null : box };
-
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(POSITION_COMPONENTS), 3));
     const material = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.95, depthTest: true });
@@ -122,16 +110,18 @@ function SingleOutline({ partId, color = 0xffff00 }: { partId: string; color?: n
   }, [partId, color]);
 
   useFrame(() => {
-    if (!helper || !targetRef.current || !localShapeRef.current) return;
-    targetRef.current.updateWorldMatrix(true, true);
-    const shape = localShapeRef.current;
-    if (!shape.obb && !shape.box) { helper.visible = false; return; }
+    if (!helper) return;
+    const obj = targetRef.current;
+    const localBox = localBoxRef.current;
+    if (!obj || !localBox || localBox.isEmpty()) { helper.visible = false; return; }
+    obj.updateWorldMatrix(true, true);
+    // Render the local-space box at the object's current world transform.
+    // This correctly handles rotation, scale, and movement without recomputing.
     const position = helper.geometry.getAttribute('position') as THREE.BufferAttribute;
-    if (shape.obb) writeObbEdgesToPositionArray(shape.obb, position.array as Float32Array);
-    else if (shape.box) writeBoxEdgesToPositionArray(shape.box, position.array as Float32Array);
+    writeBoxEdgesToPositionArray(localBox, position.array as Float32Array);
     position.needsUpdate = true;
     helper.geometry.computeBoundingSphere();
-    helper.matrix.copy(targetRef.current.matrixWorld);
+    helper.matrix.copy(obj.matrixWorld);
     helper.matrixWorldNeedsUpdate = true;
     helper.visible = true;
   });

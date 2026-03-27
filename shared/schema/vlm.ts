@@ -45,6 +45,8 @@ export const VlmMateInferenceSchema = VlmMateInferenceCandidateSchema.extend({
   selected_candidate_index: z.number().int().nonnegative().optional(),
   selected_candidate_key: z.string().optional(),
   abstain: z.boolean().optional(),
+  action_description: z.string().optional(),
+  reasoning: z.string().optional(),
   view_votes: z.array(VlmMateInferenceViewVoteSchema).default([]),
   alternatives: z.array(VlmMateInferenceCandidateSchema).default([]),
   diagnostics: VlmMateInferenceDiagnosticsSchema.optional(),

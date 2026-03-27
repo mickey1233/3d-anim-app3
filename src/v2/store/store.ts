@@ -83,11 +83,14 @@ export type VlmResult = {
 export type ServerStatus = {
   ts: number;
   router: { providerEnv: string; providerResolved: 'agent' | 'mock' | 'codex' | 'openai' | 'smart'; llmEnabled: boolean };
-  codex?: {
+  codex: {
     loggedIn: boolean;
     authMode: string;
+    apiKeyPresent: boolean;
+    model: string;
     cliAvailable: boolean;
     authFile: string;
+    smartCodexEnabled: boolean;
   };
   llm: {
     providerEnv: string;

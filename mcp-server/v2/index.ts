@@ -229,3 +229,22 @@ if (process.env.ROUTER_WARMUP_ON_BOOT !== '0') {
     }).catch(() => undefined);
   }, 50);
 }
+
+// Pre-warm the VLM model so it's loaded in GPU memory before the first mate request.
+// Without this, Ollama must evict the LLM model (up to 45 GB) and load the VLM model,
+// causing 30–60 s delay on the first VLM call.
+if (process.env.VLM_WARMUP_ON_BOOT !== '0') {
+  const vlmModel = process.env.VLM_MATE_MODEL || process.env.OLLAMA_MODEL || 'qwen3.5:27b';
+  const ollamaBase = (process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
+  setTimeout(() => {
+    fetch(`${ollamaBase}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: vlmModel, prompt: '', keep_alive: '10m', options: { num_ctx: 8192 } }),
+      signal: AbortSignal.timeout(60_000),
+    })
+      .then((r) => r.json())
+      .then(() => console.log(`[MCP v2] VLM warmup: ${vlmModel} loaded`))
+      .catch((e) => console.warn(`[MCP v2] VLM warmup failed: ${e?.message}`));
+  }, 2000);
+}

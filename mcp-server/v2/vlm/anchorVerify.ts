@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { Codex } from '@openai/codex-sdk';
 
@@ -49,30 +50,24 @@ function buildPrompt(faceId: string, partName: string): string {
   ].join('\n');
 }
 
-// Codex text-only prompt: no screenshot available, reason from part name + face metadata.
+// Codex vision prompt: includes the screenshot for accurate anchor placement verification.
 function buildCodexPrompt(faceId: string, partName: string): string {
   const faceDescriptions: Record<string, string> = {
-    top:    '+Y (upward)',
-    bottom: '-Y (downward)',
-    left:   '-X (leftward)',
-    right:  '+X (rightward)',
-    front:  '+Z (forward)',
-    back:   '-Z (backward)',
+    top:    'the topmost surface facing upward (+Y in local frame)',
+    bottom: 'the bottommost surface facing downward (-Y in local frame)',
+    left:   'the left side surface facing left (-X in local frame)',
+    right:  'the right side surface facing right (+X in local frame)',
+    front:  'the front surface facing forward (+Z in local frame)',
+    back:   'the back surface facing backward (-Z in local frame)',
   };
-  const dir = faceDescriptions[faceId] ?? faceId;
+  const desc = faceDescriptions[faceId] ?? `the "${faceId}" face`;
   return [
-    `Context: A CAD assembly tool selected the "${faceId}" face (${dir} direction in local frame)`,
-    `as the mating anchor for part "${partName}".`,
-    ``,
-    `Question: Based on the part name alone, is "${faceId}" a reasonable face selection for mating`,
-    `a part named "${partName}"? (e.g. a "cap" or "lid" typically mates on its bottom face,`,
-    `a "base" or "housing" on its top face, a "plug" on its bottom, etc.)`,
-    ``,
-    `Note: No visual screenshot is available — this is a text-only heuristic check.`,
-    `Keep confidence ≤ 0.55 since there is no visual confirmation.`,
+    `You are inspecting a 3D CAD part in a rendered scene screenshot.`,
+    `A colored sphere (cyan or pink dot) marks the selected anchor point on the part named "${partName}".`,
+    `Determine if the sphere is correctly placed on ${desc}.`,
     ``,
     `Reply with JSON only (no markdown, no code fences):`,
-    `{ "correct": true_or_false, "confidence": 0.0_to_0.55, "reason": "brief heuristic reason" }`,
+    `{ "correct": true_or_false, "confidence": 0.0_to_1.0, "reason": "short explanation" }`,
   ].join('\n');
 }
 
@@ -132,11 +127,13 @@ function getCodex(): Codex {
   return _codex;
 }
 
-// Codex fallback: text-only reasoning (no vision capability).
-// Used when Ollama is unavailable. Confidence is capped at 0.55 since
-// it cannot actually see the rendered anchor sphere in the viewport.
-async function callCodex(faceId: string, partName: string): Promise<AnchorVerifyResult | null> {
+// Codex fallback: vision-capable (codex-mini-latest is fine-tuned o4-mini, multimodal).
+// Writes image to a temp file so thread.run() can load it via local_image.
+async function callCodex(faceId: string, partName: string, imageBase64: string, mime: string): Promise<AnchorVerifyResult | null> {
+  const ext = mime.includes('png') ? 'png' : 'jpg';
+  const tmpFile = path.join(os.tmpdir(), `anchor-verify-${Date.now()}.${ext}`);
   try {
+    fs.writeFileSync(tmpFile, Buffer.from(imageBase64, 'base64'));
     const signal = AbortSignal.timeout(CODEX_TIMEOUT_MS);
     const thread = getCodex().startThread({
       ...(CODEX_MODEL ? { model: CODEX_MODEL } : {}),
@@ -145,21 +142,25 @@ async function callCodex(faceId: string, partName: string): Promise<AnchorVerify
       skipGitRepoCheck: true,
     });
     const prompt = buildCodexPrompt(faceId, partName);
-    const result = await thread.run(prompt, { signal });
+    const result = await thread.run(
+      [{ type: 'local_image', path: tmpFile }, { type: 'text', text: prompt }],
+      { signal },
+    );
     const text = result.finalResponse?.trim();
     if (!text) return null;
     const parsed = extractJson(text);
     if (!parsed) return null;
     return {
       correct: Boolean(parsed.correct),
-      // Cap at 0.55 — text-only heuristic, not visual confirmation
-      confidence: Math.min(0.55, Math.max(0, Number(parsed.confidence) || 0.3)),
-      reason: (String(parsed.reason || '').slice(0, 180) + ' [codex text-only]'),
+      confidence: Math.max(0, Math.min(1, Number(parsed.confidence) || 0.5)),
+      reason: String(parsed.reason || '').slice(0, 200),
       provider: 'codex',
     };
   } catch (err) {
     console.warn('[anchor-verify/codex] call failed:', err instanceof Error ? err.message : err);
     return null;
+  } finally {
+    try { fs.unlinkSync(tmpFile); } catch { /* ignore cleanup errors */ }
   }
 }
 
@@ -173,8 +174,8 @@ export async function verifyAnchorFace(
   // 1. Try Ollama vision (primary — can see the screenshot)
   const ollama = await callOllama(prompt, imageBase64, mime);
   if (ollama) return ollama;
-  // 2. Codex fallback (text-only heuristic — no vision, low confidence)
-  const codex = await callCodex(faceId, partName);
+  // 2. Codex fallback (codex-mini-latest — multimodal vision, same prompt + image)
+  const codex = await callCodex(faceId, partName, imageBase64, mime);
   if (codex) return codex;
   // 3. All unavailable — treat as correct so user is not blocked
   return { correct: true, confidence: 0, reason: 'vlm_unavailable', provider: 'none' };

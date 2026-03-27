@@ -13,11 +13,14 @@ export type ServerStatus = {
     providerResolved: RouterProviderName;
     llmEnabled: boolean;
   };
-  codex?: {
+  codex: {
     loggedIn: boolean;
     authMode: string;
+    apiKeyPresent: boolean;
+    model: string;
     cliAvailable: boolean;
     authFile: string;
+    smartCodexEnabled: boolean;
   };
   llm: {
     providerEnv: string;
@@ -122,6 +125,13 @@ function checkCodexStatus(): ServerStatus['codex'] {
       : !!(data?.OPENAI_API_KEY || data?.api_key || data?.tokens);
   } catch { /* auth.json missing or unreadable */ }
 
+  // Also consider logged in if OPENAI_API_KEY env var is set (API key auth)
+  const apiKeyPresent = !!(process.env.OPENAI_API_KEY || '').trim();
+  if (apiKeyPresent && !loggedIn) {
+    loggedIn = true;
+    authMode = 'api_key';
+  }
+
   // Check if codex CLI binary is available in PATH
   let cliAvailable = false;
   try {
@@ -129,7 +139,10 @@ function checkCodexStatus(): ServerStatus['codex'] {
     cliAvailable = true;
   } catch { /* codex not in PATH */ }
 
-  return { loggedIn, authMode, cliAvailable, authFile };
+  const smartCodexEnabled = process.env.SMART_CODEX_ENABLE === '1';
+  const model = (process.env.CODEX_MODEL || 'codex-mini-latest').trim();
+
+  return { loggedIn, authMode, apiKeyPresent, model, cliAvailable, authFile, smartCodexEnabled };
 }
 
 function resolveModelForProvider(params: {
@@ -212,8 +225,6 @@ export async function getServerStatus(): Promise<ServerStatus> {
     defaultGeminiModel: 'gemini-1.5-flash',
   });
 
-  const isCodexRouter = routerProviderResolved === 'codex' || routerProviderResolved === 'openai';
-
   return {
     ts: Date.now(),
     router: {
@@ -221,7 +232,7 @@ export async function getServerStatus(): Promise<ServerStatus> {
       providerResolved: routerProviderResolved,
       llmEnabled,
     },
-    ...(isCodexRouter ? { codex: checkCodexStatus() } : {}),
+    codex: checkCodexStatus(),
     llm: {
       providerEnv: String(process.env.ROUTER_LLM_PROVIDER || 'auto'),
       providerResolved: llmProviderResolved,

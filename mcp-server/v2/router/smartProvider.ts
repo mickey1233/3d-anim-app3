@@ -29,6 +29,40 @@ const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434'
 const OLLAMA_MODEL = process.env.ROUTER_LLM_MODEL || process.env.OLLAMA_MODEL || 'qwen3:30b';
 const CALL_TIMEOUT_MS = Number(process.env.SMART_CHITCHAT_TIMEOUT_MS || 20_000);
 
+// ---------------------------------------------------------------------------
+// Mate fast-path: resolve mate commands without LLM (instant, no timeout)
+// ---------------------------------------------------------------------------
+
+const MATE_KEYWORDS = ['mate', 'assemble', 'attach', 'connect', 'join', 'install', 'mount',
+  '組裝', '裝配', '對齊', '安裝', '配合', '接合', '組合'];
+
+function isMateCommand(text: string): boolean {
+  const lower = text.toLowerCase();
+  return MATE_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()));
+}
+
+function detectGeometryIntent(text: string): 'insert' | 'cover' | 'default' {
+  const lower = text.toLowerCase();
+  if (/insert|plug|插入|嵌入/.test(lower)) return 'insert';
+  if (/cover|cap|lid|蓋上|覆蓋/.test(lower)) return 'cover';
+  return 'default';
+}
+
+function extractMatePartRefs(
+  text: string,
+  parts: RouterContext['parts'],
+): { source: { id: string; name: string }; target: { id: string; name: string } } | null {
+  const lower = text.toLowerCase();
+  const found: { id: string; name: string; idx: number }[] = [];
+  for (const part of parts) {
+    const idx = lower.indexOf(part.name.toLowerCase());
+    if (idx >= 0) found.push({ id: part.id, name: part.name, idx });
+  }
+  if (found.length < 2) return null;
+  found.sort((a, b) => a.idx - b.idx);
+  return { source: found[0], target: found[1] };
+}
+
 function resolvedModelName(layer: 'fast-model' | 'codex' | 'docs'): string {
   if (layer === 'docs') return 'docs (no LLM)';
   if (layer === 'codex') return process.env.CODEX_MODEL || 'codex';
@@ -198,6 +232,29 @@ export const SmartRouterProvider: RouterProvider = {
         { toolCalls: [], replyText: '你好！有什麼我可以幫你的嗎？' },
         { ...baseMeta, route: 'fast-model', model: 'fallback', category: 'chitchat' }
       );
+    }
+
+    // ── Mate fast-path: no LLM needed — instant tool call generation ─────────
+    if (isMateCommand(text)) {
+      const mateRefs = extractMatePartRefs(text, ctx.parts);
+      if (mateRefs) {
+        const { source, target } = mateRefs;
+        const geometryIntent = detectGeometryIntent(text);
+        console.log(`[smart] mate fast-path: ${source.name} → ${target.name} intent=${geometryIntent}`);
+        return withMeta(
+          {
+            toolCalls: [{
+              tool: 'action.smart_mate_execute',
+              args: {
+                sourcePart: { partId: source.id },
+                targetPart: { partId: target.id },
+              },
+            }],
+            replyText: `正在組裝 ${source.name} → ${target.name}...`,
+          },
+          { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'mate-fast-path' }
+        );
+      }
     }
 
     // ── Layer 2: Agent (CAD docs + tool routing) ──────────────────────────────

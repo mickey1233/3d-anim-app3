@@ -1,5 +1,6 @@
 import type { ToolCall } from '../../../shared/schema/index.js';
 import { AgentRouterProvider } from './agentProvider.js';
+import { SmartRouterProvider } from './smartProvider.js';
 import type { RouterContext, RouterProvider, RouteMeta } from './types.js';
 
 export type RouterResult = {
@@ -9,9 +10,9 @@ export type RouterResult = {
 };
 
 const getProvider = (): RouterProvider => {
-  const provider = process.env.ROUTER_PROVIDER || 'agent';
+  const provider = (process.env.ROUTER_PROVIDER || 'agent').toLowerCase().trim();
+  if (provider === 'smart') return SmartRouterProvider;
   if (provider === 'agent') return AgentRouterProvider;
-  // Default to agent for all cases
   return AgentRouterProvider;
 };
 

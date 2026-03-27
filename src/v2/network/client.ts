@@ -39,7 +39,7 @@ function buildCandidateWsUrls(url: string) {
   }
 }
 
-export function connectV2Client(url = 'ws://localhost:3011') {
+export function connectV2Client(url = (import.meta.env.VITE_MCP_WS_URL as string | undefined) || 'ws://localhost:3011') {
   const candidates = buildCandidateWsUrls(url);
   const seq = ++connectAttemptSeq;
   clearConnectFallbackState();

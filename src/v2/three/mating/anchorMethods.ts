@@ -77,21 +77,23 @@ function resolveGroupPlanarClusterCore(
   const cached = cache.get(group)?.get(faceId);
   if (cached) return cloneAnchorResult(cached);
 
-  // Use FACE_DIR directly in group-local space — same semantic as resolvePlanarCluster
-  // for single meshes. "bottom" = the face whose LOCAL normal is (0,-1,0), i.e. the
-  // geometric bottom in the part's own design coordinate system, not whichever face
-  // happens to point down in world space. This prevents ancestor rotations (e.g. the
-  // R_x(90°) on a spark_ scale node) from deflecting the search direction and causing
-  // no faces to be found.
-  const dir = (FACE_DIR[faceId] ?? new THREE.Vector3(0, 1, 0)).clone().normalize();
   group.updateWorldMatrix(true, true);
   const groupWorldInv = new THREE.Matrix4().copy(group.matrixWorld).invert();
+
+  // Strategy: first try world-space FACE_DIR transformed to group-local. This correctly
+  // handles parts whose group has a non-identity rotation (e.g. a flipped part), so
+  // face=top always means "the face pointing up in world space".
+  // Fallback: use FACE_DIR directly in group-local (the part's own design coordinate
+  // system). This handles cases where ancestor-only rotations (e.g. R_x(90°) on a
+  // spark_ scale node) would cause the world-to-local direction to miss all faces.
+  const localFaceDir = (FACE_DIR[faceId] ?? new THREE.Vector3(0, 1, 0)).clone().normalize();
+  const worldToLocalDir = localFaceDir.clone().transformDirection(groupWorldInv).normalize();
 
   const NORMAL_THRESH = 0.7; // cos(~45°) — face must roughly face the requested direction
 
   // FaceData now includes triangle area so we can weight clusters by surface area.
   type FaceData = { center: THREE.Vector3; normal: THREE.Vector3; area: number };
-  const alignedFaces: FaceData[] = [];
+
   const va = new THREE.Vector3();
   const vb = new THREE.Vector3();
   const vc = new THREE.Vector3();
@@ -100,39 +102,51 @@ function resolveGroupPlanarClusterCore(
   const faceNormal = new THREE.Vector3();
   const faceCenter = new THREE.Vector3();
 
-  group.traverse((child) => {
-    if (!(child as THREE.Mesh).isMesh) return;
-    const mesh = child as THREE.Mesh;
-    const geom = mesh.geometry;
-    const pos = geom?.attributes?.position;
-    if (!pos) return;
+  const collectAlignedFaces = (dir: THREE.Vector3): FaceData[] => {
+    const faces: FaceData[] = [];
+    group.traverse((child) => {
+      if (!(child as THREE.Mesh).isMesh) return;
+      const mesh = child as THREE.Mesh;
+      const geom = mesh.geometry;
+      const pos = geom?.attributes?.position;
+      if (!pos) return;
 
-    mesh.updateWorldMatrix(false, false);
-    const toGroupLocal = new THREE.Matrix4().copy(groupWorldInv).multiply(mesh.matrixWorld);
+      mesh.updateWorldMatrix(false, false);
+      const toGroupLocal = new THREE.Matrix4().copy(groupWorldInv).multiply(mesh.matrixWorld);
 
-    const readVert = (i: number, out: THREE.Vector3) =>
-      out.fromBufferAttribute(pos as THREE.BufferAttribute, i).applyMatrix4(toGroupLocal);
+      const readVert = (i: number, out: THREE.Vector3) =>
+        out.fromBufferAttribute(pos as THREE.BufferAttribute, i).applyMatrix4(toGroupLocal);
 
-    const processTri = (ai: number, bi: number, ci: number) => {
-      readVert(ai, va); readVert(bi, vb); readVert(ci, vc);
-      edge1.subVectors(vb, va);
-      edge2.subVectors(vc, va);
-      faceNormal.crossVectors(edge1, edge2);
-      if (faceNormal.lengthSq() < 1e-12) return; // degenerate
-      const triArea = faceNormal.length() * 0.5;
-      faceNormal.normalize();
-      if (faceNormal.dot(dir) < NORMAL_THRESH) return; // not aligned
-      faceCenter.addVectors(va, vb).add(vc).divideScalar(3);
-      alignedFaces.push({ center: faceCenter.clone(), normal: faceNormal.clone(), area: triArea });
-    };
+      const processTri = (ai: number, bi: number, ci: number) => {
+        readVert(ai, va); readVert(bi, vb); readVert(ci, vc);
+        edge1.subVectors(vb, va);
+        edge2.subVectors(vc, va);
+        faceNormal.crossVectors(edge1, edge2);
+        if (faceNormal.lengthSq() < 1e-12) return;
+        const triArea = faceNormal.length() * 0.5;
+        faceNormal.normalize();
+        if (faceNormal.dot(dir) < NORMAL_THRESH) return;
+        faceCenter.addVectors(va, vb).add(vc).divideScalar(3);
+        faces.push({ center: faceCenter.clone(), normal: faceNormal.clone(), area: triArea });
+      };
 
-    const idx = geom.index;
-    if (idx) {
-      for (let i = 0; i < idx.count; i += 3) processTri(idx.array[i], idx.array[i + 1], idx.array[i + 2]);
-    } else {
-      for (let i = 0; i < pos.count; i += 3) processTri(i, i + 1, i + 2);
-    }
-  });
+      const idx = geom.index;
+      if (idx) {
+        for (let i = 0; i < idx.count; i += 3) processTri(idx.array[i], idx.array[i + 1], idx.array[i + 2]);
+      } else {
+        for (let i = 0; i < pos.count; i += 3) processTri(i, i + 1, i + 2);
+      }
+    });
+    return faces;
+  };
+
+  // Try world-space direction first; fall back to local-space direction.
+  let alignedFaces = collectAlignedFaces(worldToLocalDir);
+  let dir = worldToLocalDir;
+  if (alignedFaces.length === 0) {
+    alignedFaces = collectAlignedFaces(localFaceDir);
+    dir = localFaceDir;
+  }
 
   if (alignedFaces.length === 0) return null;
 
@@ -316,21 +330,43 @@ function getFaceClusterByDirection(geometry: THREE.BufferGeometry, direction: TH
 
 function resolvePlanarCluster(mesh: THREE.Mesh, faceId: FaceId): AnchorResult | null {
   const geom = mesh.geometry as THREE.BufferGeometry;
-  // Use FACE_DIR directly in mesh-local space. faceId='bottom' means the face
-  // whose LOCAL normal is (0,-1,0) — i.e. the geometric bottom of the part as
-  // designed — not "whichever face happens to point down in world space right now".
-  // Transforming FACE_DIR by meshWorldInv would change the selected face when the
-  // part is tilted by the user, picking the wrong face (e.g. back face instead of
-  // bottom face) and producing a bad mate rotation.
-  const dirLocal = (FACE_DIR[faceId] ?? new THREE.Vector3(0, 1, 0)).clone().normalize();
-  const cluster = getFaceClusterByDirection(geom, dirLocal);
-  if (!cluster) return null;
+  mesh.updateWorldMatrix(true, false);
+
+  // Select face cluster by ranking WORLD-SPACE position of cluster centers.
+  // For face='top': pick the cluster whose center is highest in world Y (and has a
+  // roughly upward world normal). This correctly handles meshes under rotated parent
+  // groups (e.g. the Spark GLB's R_x(90°) scale node) where local face normals are
+  // not aligned with world axes.
+  const worldFaceDir = (FACE_DIR[faceId] ?? new THREE.Vector3(0, 1, 0)).clone().normalize();
+  const meshWorldInv = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+  const clusters = clusterPlanarFaces(geom);
+  if (clusters.length === 0) return null;
+
+  let bestCluster: FaceCluster | null = null;
+  let bestScore = -Infinity;
+  for (const c of clusters) {
+    // Transform center and normal to world space.
+    const worldNormal = c.normal.clone().transformDirection(mesh.matrixWorld).normalize();
+    const normalDot = worldNormal.dot(worldFaceDir);
+    if (normalDot < 0.4) continue; // face must roughly face the world direction
+
+    const worldCenter = c.center.clone().applyMatrix4(mesh.matrixWorld);
+    // Score = world position along face direction (extremity), weighted by normal alignment and area.
+    const score = worldCenter.dot(worldFaceDir) + normalDot * 0.1;
+    if (score > bestScore) { bestScore = score; bestCluster = c; }
+  }
+
+  if (!bestCluster) return null;
+
+  // normalLocal: use the world face direction back-transformed to mesh-local, so the
+  // mate solver always gets the canonical face direction regardless of cluster tilt.
+  const normalLocal = worldFaceDir.clone().transformDirection(meshWorldInv).normalize();
   return {
-    centerLocal: cluster.center.clone(),
-    normalLocal: cluster.normal.clone().normalize(),
-    tangentLocal: cluster.tangent.clone().normalize(),
+    centerLocal: bestCluster.center.clone(),
+    normalLocal,
+    tangentLocal: stableTangentFromNormal(normalLocal),
     method: 'planar_cluster',
-    debug: { area: cluster.area },
+    debug: { area: bestCluster.area },
   };
 }
 

@@ -526,6 +526,7 @@ function buildMatePrompt(params: { images: VlmImage[]; parts: VlmPart[]; mateCon
     '  "abstain": boolean,',
     '  "confidence": number(0..1),',
     '  "reason": string,',
+    '  "action_description": "REQUIRED: one short Chinese sentence describing the assembly action (e.g. 將蓋子蓋上底座, 把插頭插入插槽)",',
     '  "reasoning": string (Phase 1 semantic identification — describe each part and assembly axis),',
     '  "view_votes": [{ "view_name": string, "candidate_index": number?, "candidate_key": string?, "confidence": number?, "reason": string? }],',
     '  "alternatives": [same shape as candidate-level fields]',
@@ -581,7 +582,7 @@ async function callOllamaVlmJson(prompt: string, images: VlmImage[]) {
         model: OLLAMA_MODEL,
         stream: false,
         format: 'json',
-        options: { temperature: 0.1 },
+        options: { temperature: 0.1, num_ctx: 8192, num_predict: 1024, think: false },
         messages: [
           {
             role: 'system',

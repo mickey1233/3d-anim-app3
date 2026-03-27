@@ -47,47 +47,31 @@ Any of these in any language: `mate`, `組裝`, `裝配`, `對齊`, `align`, `at
 - insert intent → source: `extreme_vertices`, target: `planar_cluster`
 - cover/default → both: `planar_cluster` (or `auto`)
 
-### 6. Two-pass strategy
-- **No geometry hint AND no explicit faces**: emit `query.mate_suggestions` first (iteration 1)
-- **Has geometryHint OR explicit faces**: emit `action.mate_execute` directly
+### 6. ALWAYS use smart mate execute — NEVER skip this step
+
+**For ALL mate commands, ALWAYS emit `action.smart_mate_execute` as the first and only tool call.**
+This handles VLM analysis + execution in one step automatically.
+Do NOT emit `query.mate_vlm_infer`, `action.mate_execute`, or `query.mate_suggestions` directly.
+
+```json
+{
+  "tool": "action.smart_mate_execute",
+  "args": {
+    "sourcePart": { "partId": "<id of source part>" },
+    "targetPart": { "partId": "<id of target part>" }
+  }
+}
+```
+
+- If user specified explicit faces (e.g. "bottom to top"), add `"sourceFace": "bottom", "targetFace": "top"` to args.
+- If user specified a mode (e.g. "with rotation"), add `"mode": "both"` to args.
 
 ---
 
-## mateMode ↔ mode Mapping
+## mateMode ↔ mode Mapping (for reference only — VLM decides this)
 
 | `mode` | `mateMode` | `pathPreference` |
 |--------|-----------|-----------------|
 | `translate` | `face_flush` | `auto` |
 | `both` | `face_insert_arc` | `arc` |
 | `twist` | `face_flush` | `auto` (+ twist config) |
-
----
-
-## VLM Override
-
-If context contains `vlmMateCapture.meetsThreshold === true`, prefer those values
-for face/method/mode unless the user explicitly specified different ones.
-
-VLM confidence ≥ 0.75 → use VLM params
-VLM confidence < 0.75 → use geometry/LLM params
-
----
-
-## action.mate_execute Args Template
-
-```json
-{
-  "sourcePart": { "partId": "..." },
-  "targetPart": { "partId": "..." },
-  "sourceFace": "bottom",
-  "targetFace": "top",
-  "sourceMethod": "auto",
-  "targetMethod": "auto",
-  "mode": "translate",
-  "mateMode": "face_flush",
-  "pathPreference": "auto",
-  "commit": true,
-  "pushHistory": true,
-  "stepLabel": "Mate <source> to <target>"
-}
-```

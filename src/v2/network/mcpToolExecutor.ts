@@ -286,6 +286,35 @@ function computeRootLocalBoundingBox(object: THREE.Object3D) {
   return box;
 }
 
+// Compute a percentile-trimmed AABB in world space.
+// Excludes the top/bottom `pct` fraction of vertex positions per axis, which removes
+// thin mounting-face vertices (at Y≈0 in Spark GLBs) that inflate the bounding box.
+function computeWorldPercentileBox(obj: THREE.Object3D, pct = 0.02): THREE.Box3 {
+  obj.updateWorldMatrix(true, true);
+  const xs: number[] = [], ys: number[] = [], zs: number[] = [];
+  const v = new THREE.Vector3();
+  obj.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!(mesh as unknown as { isMesh?: boolean }).isMesh || !mesh.geometry) return;
+    const pos = mesh.geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+    if (!pos || pos.count === 0) return;
+    const stride = Math.max(1, Math.floor(pos.count / 400));
+    for (let i = 0; i < pos.count; i += stride) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+      xs.push(v.x); ys.push(v.y); zs.push(v.z);
+    }
+  });
+  if (xs.length === 0) return new THREE.Box3();
+  xs.sort((a, b) => a - b); ys.sort((a, b) => a - b); zs.sort((a, b) => a - b);
+  const n = xs.length;
+  const lo = Math.max(0, Math.round(n * pct));
+  const hi = Math.min(n - 1, Math.round(n * (1 - pct)));
+  return new THREE.Box3(
+    new THREE.Vector3(xs[lo], ys[lo], zs[lo]),
+    new THREE.Vector3(xs[hi], ys[hi], zs[hi]),
+  );
+}
+
 function getIntrinsicSizeFromObject(object: THREE.Object3D) {
   const localBox = computeRootLocalBoundingBox(object);
   if (!localBox.isEmpty()) return localBox.getSize(new THREE.Vector3());
@@ -2478,7 +2507,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         })),
         parts: partsCtx,
         mateContext,
-      });
+      }, { timeoutMs: 130_000 });
       vlmResult = res?.result || res;
     } catch (error: any) {
       vlmError = error?.message || 'vlm_analyze failed';
@@ -2622,6 +2651,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           intent: asIntent(rawMate.intent),
           confidence: vlmConfidence,
           reason: asShortString(rawMate.reason),
+          actionDescription: asShortString(rawMate.action_description),
         }
       : undefined;
 
@@ -2886,6 +2916,9 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           arbitration,
           ...((vlmCandidate?.reason || arbitration.length)
             ? { reason: [vlmCandidate?.reason, arbitration.join('|')].filter(Boolean).join(' ; ').slice(0, 180) }
+            : {}),
+          ...(vlmCandidate?.actionDescription
+            ? { actionDescription: vlmCandidate.actionDescription }
             : {}),
         },
         notes,
@@ -3823,11 +3856,11 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             const mObj = sceneRef.getObjectByProperty('uuid', mId);
             if (mObj) {
               mObj.updateWorldMatrix(true, true);
-              const mBox = new THREE.Box3().setFromObject(mObj);
+              const mBox = computeWorldPercentileBox(mObj);
               if (!mBox.isEmpty()) combinedBox.union(mBox);
             }
           }
-          const part1Box = new THREE.Box3().setFromObject(sourceObjRef);
+          const part1Box = computeWorldPercentileBox(sourceObjRef);
           if (!combinedBox.isEmpty() && !part1Box.isEmpty()) {
             const faceId: string = input.sourceFace ?? 'bottom';
             const getAabbFaceCenter = (box: THREE.Box3, fId: string): THREE.Vector3 => {
@@ -3881,7 +3914,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             const mObj = sceneRef.getObjectByProperty('uuid', mId);
             if (mObj) {
               mObj.updateWorldMatrix(true, true);
-              const mBox = new THREE.Box3().setFromObject(mObj);
+              const mBox = computeWorldPercentileBox(mObj);
               if (!mBox.isEmpty()) {
                 const sz = mBox.getSize(new THREE.Vector3());
                 const vol = sz.x * sz.y * sz.z;
@@ -3890,7 +3923,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             }
           }
 
-          const repBox = new THREE.Box3().setFromObject(targetObjRef);
+          const repBox = computeWorldPercentileBox(targetObjRef);
           if (largestMemberBox && !repBox.isEmpty()) {
             const tgtFaceId: string = input.targetFace ?? 'top';
             const getAabbFaceCenterTgt = (box: THREE.Box3, fId: string): THREE.Vector3 => {
@@ -4086,7 +4119,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         targetMethod: explicitTargetMethod ?? 'planar_cluster',
         ...(explicitMode ? { preferredMode: explicitMode } : {}),
         maxPairs: 12,
-        maxViews: 4,
+        maxViews: 6,
         maxWidthPx: 640,
         maxHeightPx: 480,
         format: 'jpeg',
@@ -4095,6 +4128,9 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       inferred = inferredData?.inferred ?? null;
       inferOrigin = typeof inferred?.origin === 'string' ? inferred.origin : null;
       inferConfidence = typeof inferred?.confidence === 'number' ? inferred.confidence : null;
+      if (typeof inferred?.actionDescription === 'string') {
+        (inferred as any).actionDescription = inferred.actionDescription;
+      }
     } catch {
       inferred = null;
     }
@@ -4266,6 +4302,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           mateMode,
           pathPreference,
         },
+        ...(typeof inferred?.actionDescription === 'string' ? { actionDescription: inferred.actionDescription } : {}),
         plan: executedData.plan,
         preview: executedData.preview,
         committed: executedData.committed,

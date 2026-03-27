@@ -35,7 +35,7 @@ type PendingProxyRequest = {
   reject: (error: Error) => void;
 };
 
-const TOOL_PROXY_TIMEOUT_MS = 20_000;
+const TOOL_PROXY_TIMEOUT_MS = Number(process.env.TOOL_PROXY_TIMEOUT_MS || 120_000);
 const ROUTER_MAX_ITERATIONS = Number(process.env.ROUTER_MAX_ITERATIONS || 3);
 const ROUTER_MAX_TOOL_RESULTS_FOR_CONTEXT = Number(process.env.ROUTER_MAX_TOOL_RESULTS_FOR_CONTEXT || 8);
 const ROUTER_RESULT_MAX_DEPTH = 4;
@@ -362,7 +362,29 @@ export class WsGatewayV2 {
 
             const successCount = allToolResults.filter((result) => result.ok).length;
             const failCount = allToolResults.length - successCount;
+
+            // Build a richer reply for smart_mate_execute results
+            const smartMateResult = allToolResults.find(
+              (r) => r.tool === 'action.smart_mate_execute' && r.ok
+            ) as any;
+            const smartMateReply = smartMateResult
+              ? (() => {
+                  const d = smartMateResult.result?.data ?? smartMateResult.result;
+                  const src = d?.source?.partName ?? d?.source?.partId ?? '?';
+                  const tgt = d?.target?.partName ?? d?.target?.partId ?? '?';
+                  const sf = d?.chosen?.sourceFace ?? '?';
+                  const tf = d?.chosen?.targetFace ?? '?';
+                  const mode = d?.chosen?.mode ?? '?';
+                  const sm = d?.chosen?.sourceMethod ?? '?';
+                  const tm = d?.chosen?.targetMethod ?? '?';
+                  const desc = typeof d?.actionDescription === 'string' ? d.actionDescription : null;
+                  const base = `✓ 已組裝 ${src}(${sf}, ${sm}) → ${tgt}(${tf}, ${tm})，mode: ${mode}`;
+                  return desc ? `${desc}\n${base}` : base;
+                })()
+              : null;
+
             const replyText =
+              smartMateReply ??
               lastReplyText ??
               (allToolResults.length === 0
                 ? '我還不確定要執行哪個功能。'

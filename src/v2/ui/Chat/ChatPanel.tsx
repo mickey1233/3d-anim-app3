@@ -98,7 +98,7 @@ export function ChatPanel() {
       setSending(true);
       setPendingTick(0);
       setPendingSince(Date.now());
-      const res: any = await v2Client.request('router_execute', { text, context: ctx }, { timeoutMs: 30_000 });
+      const res: any = await v2Client.request('router_execute', { text, context: ctx }, { timeoutMs: 120_000 });
       const reportedMs = Number(res?.meta?.timings?.totalMs);
       const measuredMs = Math.round(performance.now() - startedAt);
       setLastLatencyMs(Number.isFinite(reportedMs) ? Math.max(0, Math.floor(reportedMs)) : measuredMs);
@@ -185,15 +185,27 @@ export function ChatPanel() {
     return { text: model ? `LLM: ${provider}/${model}` : `LLM: ${provider}`, ok: true };
   }, [serverStatus]);
 
+  const codexBadge = React.useMemo(() => {
+    const codex = serverStatus?.codex;
+    if (!codex) return null;
+    if (codex.loggedIn) return { text: `Codex SDK ✓ (${codex.authMode})`, ok: true };
+    if (codex.apiKeyPresent) return { text: 'Codex SDK ✓ (api_key)', ok: true };
+    return { text: 'Codex SDK ✗', ok: false };
+  }, [serverStatus]);
+
   const statusLines = React.useMemo(() => {
     if (!serverStatus) return [];
     const codex = serverStatus.codex;
     const lines: { label: string; value: string; warn?: boolean }[] = [];
     lines.push({ label: 'Router', value: `${serverStatus.router?.providerResolved || '?'} (env=${serverStatus.router?.providerEnv || 'n/a'})` });
     if (codex) {
-      lines.push({ label: 'Codex', value: codex.loggedIn ? `✓ logged in (${codex.authMode})` : '✗ not logged in', warn: !codex.loggedIn });
+      const loggedIn = codex.loggedIn || codex.apiKeyPresent;
+      lines.push({ label: 'Codex SDK', value: loggedIn ? `✓ logged in (${codex.authMode})` : '✗ not logged in', warn: !loggedIn });
+      lines.push({ label: 'Codex model', value: codex.model || 'codex-mini-latest' });
+      lines.push({ label: 'Codex anchor verify', value: 'enabled (fallback after Ollama)' });
+      lines.push({ label: 'Smart Codex', value: codex.smartCodexEnabled ? 'enabled (Layer 3)' : 'disabled', warn: !codex.smartCodexEnabled });
       lines.push({ label: 'Codex CLI', value: codex.cliAvailable ? 'available' : 'not found in PATH', warn: !codex.cliAvailable });
-      if (!codex.loggedIn) lines.push({ label: '→', value: 'run: codex login', warn: true });
+      if (!loggedIn) lines.push({ label: '→', value: 'set OPENAI_API_KEY or run: codex login', warn: true });
     }
     lines.push({ label: 'LLM', value: `${serverStatus.llm?.providerResolved || '?'} / ${serverStatus.llm?.model || 'n/a'}` });
     lines.push({ label: 'VLM', value: `${serverStatus.vlm?.providerResolved || '?'} / ${serverStatus.vlm?.model || 'n/a'}` });
@@ -228,6 +240,20 @@ export function ChatPanel() {
             {modelBadgeLabel.text} {statusExpanded ? '▲' : '▼'}
           </button>
         ) : null}
+        {codexBadge && (
+          <button
+            type="button"
+            className={`px-1.5 py-0.5 rounded border text-[9px] normal-case tracking-normal transition-colors ${
+              codexBadge.ok
+                ? 'border-purple-500/30 bg-purple-500/10 text-purple-400'
+                : 'border-red-500/30 bg-red-500/10 text-red-400'
+            }`}
+            onClick={() => setStatusExpanded((v) => !v)}
+            title="Codex SDK status"
+          >
+            {codexBadge.text}
+          </button>
+        )}
         {modelBadgeLabel && (
           <button
             type="button"
