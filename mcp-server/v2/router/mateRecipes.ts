@@ -168,6 +168,18 @@ export function clearRecipeCache(): void {
  * - Recipes = exact part-pair cache (skip LLM)
  * - Demonstrations = richer learning signal with scene context + explanations
  */
+/** Serialization-safe feature pair (no THREE.js objects). */
+export type SerializedFeaturePair = {
+  sourceFeatureId: string;
+  sourceFeatureType: string;
+  targetFeatureId: string;
+  targetFeatureType: string;
+  compatibilityScore: number;
+  dimensionFitScore: number;
+  axisAlignmentScore: number;
+  notes: string[];
+};
+
 export type DemonstrationRecord = {
   id: string;
   timestamp: string;
@@ -177,6 +189,16 @@ export type DemonstrationRecord = {
   targetPartName: string;
   /** ID of the MatingCandidate the user chose (optional — not always available) */
   chosenCandidateId?: string;
+  /** Serialized feature pairs chosen by the human. Optional for backward compat. */
+  chosenFeaturePairs?: SerializedFeaturePair[];
+  /** Final transform applied. Optional for backward compat. */
+  finalTransform?: {
+    translation: [number, number, number];
+    rotation: [number, number, number, number]; // quaternion xyzw
+    approachDirection: [number, number, number];
+    method: string;
+    residualError: number;
+  };
   /** User's explanation in their own words */
   textExplanation?: string;
   /** The wrong approach to avoid */

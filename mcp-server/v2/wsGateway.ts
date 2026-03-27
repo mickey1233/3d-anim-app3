@@ -576,6 +576,19 @@ export class WsGatewayV2 {
               targetPartId?: string;
               targetPartName?: string;
               chosenCandidateId?: string;
+              chosenFeaturePairs?: Array<{
+                sourceFeatureId: string; sourceFeatureType: string;
+                targetFeatureId: string; targetFeatureType: string;
+                compatibilityScore: number; dimensionFitScore: number;
+                axisAlignmentScore: number; notes: string[];
+              }>;
+              finalTransform?: {
+                translation: [number,number,number];
+                rotation: [number,number,number,number];
+                approachDirection: [number,number,number];
+                method: string;
+                residualError: number;
+              };
               textExplanation?: string;
               antiPattern?: string;
               generalizedRule?: string;
@@ -596,6 +609,8 @@ export class WsGatewayV2 {
               targetPartId: args.targetPartId,
               targetPartName: args.targetPartName ?? args.targetPartId,
               chosenCandidateId: args.chosenCandidateId,
+              chosenFeaturePairs: args.chosenFeaturePairs,
+              finalTransform: args.finalTransform,
               textExplanation: args.textExplanation,
               antiPattern: args.antiPattern,
               generalizedRule: args.generalizedRule,

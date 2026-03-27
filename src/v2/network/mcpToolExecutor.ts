@@ -17,6 +17,23 @@ import { solveMateTopBottom, applyMateTransform } from '../three/mating/solver';
 import { clusterPlanarFaces } from '../three/mating/faceClustering';
 import { extractFeatures } from '../three/mating/featureExtractor';
 import { generateMatingCandidates } from '../three/mating/featureMatcher';
+import { solveAlignment } from '../three/mating/featureSolver';
+import type { MatingCandidate } from '../three/mating/featureTypes';
+
+// ---------------------------------------------------------------------------
+// Candidate registry — session-scoped, cleared on scene reset
+// ---------------------------------------------------------------------------
+/**
+ * Stores full MatingCandidate[] keyed by "sourcePartId:targetPartId".
+ * Cleared when the scene resets (resetRuntimeForNewScene).
+ */
+const candidateRegistry = new Map<string, MatingCandidate[]>();
+
+function candidateRegistryKey(srcId: string, tgtId: string): string {
+  return `${srcId}:${tgtId}`;
+}
+
+// ---------------------------------------------------------------------------
 
 type ToolErrorCode =
   | 'INVALID_ARGUMENT'
@@ -734,6 +751,7 @@ function resetRuntimeForNewScene() {
   runtimeState.previewBeforeTransformByPartId.clear();
   runtimeState.rotateSessions.clear();
   runtimeState.interactionMode = 'move';
+  candidateRegistry.clear();
 }
 
 function commitRevision(mutating: boolean) {
@@ -5234,8 +5252,14 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       targetFeatures,
       sourcePart.partId,
       targetPart.partId,
-      { maxCandidates }
+      { maxCandidates },
+      sourceObj,
+      targetObj
     );
+
+    // Store full candidates in registry for later lookup
+    const regKey = candidateRegistryKey(sourcePart.partId, targetPart.partId);
+    candidateRegistry.set(regKey, candidates);
 
     // Return a serialization-friendly summary (featurePairs contain full feature objects
     // which could be large — summarize them instead of embedding).
@@ -5267,6 +5291,226 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     });
   }
 
+  // ── query.candidate_detail ─────────────────────────────────────────────────
+  if (tool === 'query.candidate_detail') {
+    const input = args as { sourcePart: PartRef; targetPart: PartRef; candidateId: string };
+    const sourcePart = resolvePart(input.sourcePart);
+    const targetPart = resolvePart(input.targetPart);
+
+    const regKey = candidateRegistryKey(sourcePart.partId, targetPart.partId);
+    const stored = candidateRegistry.get(regKey);
+    if (!stored || stored.length === 0) {
+      throw new ToolExecutionError({
+        code: 'NOT_FOUND',
+        message: `No candidates found for ${sourcePart.partName} → ${targetPart.partName}. Run query.generate_candidates first.`,
+        suggestedToolCalls: [{ tool: 'query.generate_candidates', args: { sourcePart: input.sourcePart, targetPart: input.targetPart } }],
+      });
+    }
+
+    const candidate = stored.find(c => c.id === input.candidateId);
+    if (!candidate) {
+      throw new ToolExecutionError({
+        code: 'NOT_FOUND',
+        message: `Candidate '${input.candidateId}' not found in registry for ${sourcePart.partName} → ${targetPart.partName}.`,
+        suggestedToolCalls: [{ tool: 'query.generate_candidates', args: { sourcePart: input.sourcePart, targetPart: input.targetPart } }],
+      });
+    }
+
+    return ok({
+      candidate: {
+        id: candidate.id,
+        sourcePartId: candidate.sourcePartId,
+        targetPartId: candidate.targetPartId,
+        totalScore: candidate.totalScore,
+        description: candidate.description,
+        diagnostics: candidate.diagnostics,
+        scoreBreakdown: candidate.scoreBreakdown,
+        featurePairs: candidate.featurePairs.map(fp => ({
+          sourceFeatureType: fp.sourceFeature.type,
+          targetFeatureType: fp.targetFeature.type,
+          compatibilityScore: fp.compatibilityScore,
+          dimensionFitScore: fp.dimensionFitScore,
+          axisAlignmentScore: fp.axisAlignmentScore,
+          notes: fp.notes,
+        })),
+        transform: candidate.transform ? {
+          translation: candidate.transform.translation,
+          rotation: candidate.transform.rotation,
+          approachDirection: candidate.transform.approachDirection,
+          method: candidate.transform.method,
+          residualError: candidate.transform.residualError,
+          diagnostics: candidate.transform.diagnostics,
+        } : undefined,
+      },
+    }, { mutating: false });
+  }
+
+  // ── action.solve_candidate ─────────────────────────────────────────────────
+  if (tool === 'action.solve_candidate') {
+    const input = args as { sourcePart: PartRef; targetPart: PartRef; candidateId: string };
+    const sourcePart = resolvePart(input.sourcePart);
+    const targetPart = resolvePart(input.targetPart);
+
+    const sourceObj = getV2ObjectByPartId(sourcePart.partId);
+    const targetObj = getV2ObjectByPartId(targetPart.partId);
+    if (!sourceObj) {
+      throw new ToolExecutionError({ code: 'NOT_FOUND', message: `Source part '${sourcePart.partName}' not in scene`, suggestedToolCalls: [] });
+    }
+    if (!targetObj) {
+      throw new ToolExecutionError({ code: 'NOT_FOUND', message: `Target part '${targetPart.partName}' not in scene`, suggestedToolCalls: [] });
+    }
+
+    const regKey = candidateRegistryKey(sourcePart.partId, targetPart.partId);
+    const stored = candidateRegistry.get(regKey);
+    const candidate = stored?.find(c => c.id === input.candidateId);
+    if (!candidate) {
+      throw new ToolExecutionError({
+        code: 'NOT_FOUND',
+        message: `Candidate '${input.candidateId}' not found. Run query.generate_candidates first.`,
+        suggestedToolCalls: [{ tool: 'query.generate_candidates', args: { sourcePart: input.sourcePart, targetPart: input.targetPart } }],
+      });
+    }
+
+    // Sync transforms from store
+    const store = currentStore();
+    const syncT = (obj: THREE.Object3D, partId: string) => {
+      const t = store.parts.overridesById[partId] || store.parts.initialTransformById[partId];
+      if (t) { obj.position.set(t.position[0], t.position[1], t.position[2]); obj.quaternion.set(t.quaternion[0], t.quaternion[1], t.quaternion[2], t.quaternion[3]); }
+      obj.updateWorldMatrix(true, true);
+    };
+    syncT(sourceObj, sourcePart.partId);
+    syncT(targetObj, targetPart.partId);
+
+    const solution = solveAlignment(sourceObj, targetObj, candidate.featurePairs);
+    const diagnostics = solution?.diagnostics ?? ['Solver returned null'];
+
+    return ok({
+      solution: solution ? {
+        translation: solution.translation,
+        rotation: solution.rotation,
+        approachDirection: solution.approachDirection,
+        method: solution.method,
+        residualError: solution.residualError,
+        diagnostics: solution.diagnostics,
+      } : null,
+      diagnostics,
+    }, { mutating: false });
+  }
+
+  // ── action.apply_candidate ─────────────────────────────────────────────────
+  if (tool === 'action.apply_candidate') {
+    const input = args as {
+      sourcePart: PartRef;
+      targetPart: PartRef;
+      candidateId: string;
+      commit?: boolean;
+      pushHistory?: boolean;
+      stepLabel?: string;
+    };
+    const sourcePart = resolvePart(input.sourcePart);
+    const targetPart = resolvePart(input.targetPart);
+    const commit = input.commit !== false; // default true
+
+    const sourceObj = getV2ObjectByPartId(sourcePart.partId);
+    const targetObj = getV2ObjectByPartId(targetPart.partId);
+    if (!sourceObj) {
+      throw new ToolExecutionError({ code: 'NOT_FOUND', message: `Source part '${sourcePart.partName}' not in scene`, suggestedToolCalls: [] });
+    }
+    if (!targetObj) {
+      throw new ToolExecutionError({ code: 'NOT_FOUND', message: `Target part '${targetPart.partName}' not in scene`, suggestedToolCalls: [] });
+    }
+
+    const regKey = candidateRegistryKey(sourcePart.partId, targetPart.partId);
+    const stored = candidateRegistry.get(regKey);
+    const candidate = stored?.find(c => c.id === input.candidateId);
+    if (!candidate) {
+      throw new ToolExecutionError({
+        code: 'NOT_FOUND',
+        message: `Candidate '${input.candidateId}' not found. Run query.generate_candidates first.`,
+        suggestedToolCalls: [{ tool: 'query.generate_candidates', args: { sourcePart: input.sourcePart, targetPart: input.targetPart } }],
+      });
+    }
+
+    // Sync transforms from store
+    const storeAc = currentStore();
+    const syncTAc = (obj: THREE.Object3D, partId: string) => {
+      const t = storeAc.parts.overridesById[partId] || storeAc.parts.initialTransformById[partId];
+      if (t) { obj.position.set(t.position[0], t.position[1], t.position[2]); obj.quaternion.set(t.quaternion[0], t.quaternion[1], t.quaternion[2], t.quaternion[3]); }
+      obj.updateWorldMatrix(true, true);
+    };
+    syncTAc(sourceObj, sourcePart.partId);
+    syncTAc(targetObj, targetPart.partId);
+
+    const solution = solveAlignment(sourceObj, targetObj, candidate.featurePairs);
+    const diagnostics: string[] = solution?.diagnostics ?? ['Solver returned null'];
+
+    if (!solution) {
+      return ok({ applied: false, solution: null, diagnostics }, { mutating: false });
+    }
+
+    if (!commit) {
+      return ok({
+        applied: false,
+        solution: {
+          translation: solution.translation,
+          rotation: solution.rotation,
+          approachDirection: solution.approachDirection,
+          method: solution.method,
+          residualError: solution.residualError,
+          diagnostics: solution.diagnostics,
+        },
+        diagnostics,
+      }, { mutating: false });
+    }
+
+    // Apply the solution to the source object and update the store
+    const newPos = new THREE.Vector3(...solution.translation);
+    const currentWorldPos = new THREE.Vector3();
+    sourceObj.getWorldPosition(currentWorldPos);
+    const newWorldPos = currentWorldPos.clone().add(newPos);
+
+    const newQuat = new THREE.Quaternion(...solution.rotation);
+    // Combine: apply solution rotation on top of current world rotation
+    const currentWorldQuat = new THREE.Quaternion();
+    sourceObj.getWorldQuaternion(currentWorldQuat);
+    const combinedQuat = newQuat.clone().multiply(currentWorldQuat);
+
+    sourceObj.position.copy(newWorldPos);
+    sourceObj.quaternion.copy(combinedQuat);
+    sourceObj.updateWorldMatrix(true, true);
+
+    // Convert world transform back to local (parent-relative)
+    const localPos = sourceObj.parent
+      ? newWorldPos.clone().applyMatrix4(new THREE.Matrix4().copy(sourceObj.parent.matrixWorld).invert())
+      : newWorldPos.clone();
+
+    const parentWorldQuat = new THREE.Quaternion();
+    if (sourceObj.parent) sourceObj.parent.getWorldQuaternion(parentWorldQuat);
+    const localQuat = parentWorldQuat.clone().invert().multiply(combinedQuat);
+
+    const currentTransform = getPartTransformOrThrow(sourcePart.partId);
+    const newTransform = {
+      position: [localPos.x, localPos.y, localPos.z] as [number, number, number],
+      quaternion: [localQuat.x, localQuat.y, localQuat.z, localQuat.w] as [number, number, number, number],
+      scale: currentTransform.scale,
+    };
+
+    currentStore().setPartOverride(sourcePart.partId, newTransform);
+
+    return ok({
+      applied: true,
+      solution: {
+        translation: solution.translation,
+        rotation: solution.rotation,
+        approachDirection: solution.approachDirection,
+        method: solution.method,
+        residualError: solution.residualError,
+        diagnostics: solution.diagnostics,
+      },
+      diagnostics,
+    }, { mutating: true });
+  }
+
   // ── mate.record_demonstration ──────────────────────────────────────────────
   if (tool === 'mate.record_demonstration') {
     const input = args as {
@@ -5276,6 +5520,19 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       textExplanation?: string;
       antiPattern?: string;
       generalizedRule?: string;
+      chosenFeaturePairs?: Array<{
+        sourceFeatureId: string; sourceFeatureType: string;
+        targetFeatureId: string; targetFeatureType: string;
+        compatibilityScore: number; dimensionFitScore: number;
+        axisAlignmentScore: number; notes: string[];
+      }>;
+      finalTransform?: {
+        translation: [number, number, number];
+        rotation: [number, number, number, number];
+        approachDirection: [number, number, number];
+        method: string;
+        residualError: number;
+      };
     };
 
     if (!input.sourcePartId || !input.targetPartId) {
@@ -5305,6 +5562,40 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       }
     }
 
+    // If candidateId is provided, enrich from registry
+    let chosenFeaturePairs = input.chosenFeaturePairs;
+    let finalTransform = input.finalTransform;
+
+    if (input.chosenCandidateId && !chosenFeaturePairs) {
+      const regKey = candidateRegistryKey(input.sourcePartId, input.targetPartId);
+      const storedCandidates = candidateRegistry.get(regKey);
+      const foundCandidate = storedCandidates?.find(c => c.id === input.chosenCandidateId);
+      if (foundCandidate) {
+        // Serialize feature pairs (strip THREE.js objects)
+        chosenFeaturePairs = foundCandidate.featurePairs.map(fp => ({
+          sourceFeatureId: fp.sourceFeature.id,
+          sourceFeatureType: fp.sourceFeature.type,
+          targetFeatureId: fp.targetFeature.id,
+          targetFeatureType: fp.targetFeature.type,
+          compatibilityScore: fp.compatibilityScore,
+          dimensionFitScore: fp.dimensionFitScore,
+          axisAlignmentScore: fp.axisAlignmentScore,
+          notes: fp.notes,
+        }));
+
+        // If we have a solved transform from generation time, use it
+        if (!finalTransform && foundCandidate.transform) {
+          finalTransform = {
+            translation: foundCandidate.transform.translation,
+            rotation: foundCandidate.transform.rotation,
+            approachDirection: foundCandidate.transform.approachDirection,
+            method: foundCandidate.transform.method,
+            residualError: foundCandidate.transform.residualError,
+          };
+        }
+      }
+    }
+
     const demonstrationId = crypto.randomUUID();
     // Send the demonstration to the backend for storage
     let saved = false;
@@ -5317,6 +5608,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         targetPartId: input.targetPartId,
         targetPartName,
         chosenCandidateId: input.chosenCandidateId,
+        chosenFeaturePairs,
+        finalTransform,
         textExplanation: input.textExplanation,
         antiPattern: input.antiPattern,
         generalizedRule: input.generalizedRule,

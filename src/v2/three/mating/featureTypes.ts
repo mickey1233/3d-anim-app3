@@ -209,6 +209,21 @@ export type AssemblyRecipe = {
   savedAt: string;
 };
 
+/**
+ * Serialization-safe version of FeaturePair (no THREE.js objects, just plain numbers).
+ * Used in DemonstrationRecord to avoid serializing full AssemblyFeature objects.
+ */
+export type SerializedFeaturePair = {
+  sourceFeatureId: string;
+  sourceFeatureType: FeatureType;
+  targetFeatureId: string;
+  targetFeatureType: FeatureType;
+  compatibilityScore: number;
+  dimensionFitScore: number;
+  axisAlignmentScore: number;
+  notes: string[];
+};
+
 /** A human demonstration record for future imitation learning. */
 export type DemonstrationRecord = {
   id: string;
@@ -217,10 +232,23 @@ export type DemonstrationRecord = {
   sourcePartName: string;
   targetPartId: string;
   targetPartName: string;
-  /** The feature pairs the human selected or confirmed */
-  chosenFeaturePairs: FeaturePair[];
-  /** Final transform applied */
-  finalTransform: AlignmentSolution;
+  /** ID of the MatingCandidate the user chose */
+  chosenCandidateId?: string;
+  /**
+   * Serialized feature pairs — stored as plain objects, not THREE.js instances.
+   * Optional for backward compat with old records.
+   */
+  chosenFeaturePairs?: SerializedFeaturePair[];
+  /**
+   * Final transform applied. Optional for backward compat with old records.
+   */
+  finalTransform?: {
+    translation: [number, number, number];
+    rotation: [number, number, number, number]; // quaternion xyzw
+    approachDirection: [number, number, number];
+    method: string;
+    residualError: number;
+  };
   /** Human explanation of why this assembly is correct */
   textExplanation?: string;
   /** The wrong approach to avoid */
@@ -358,6 +386,17 @@ export const AssemblyRecipeSchema = z.object({
   savedAt: z.string(),
 });
 
+export const SerializedFeaturePairSchema = z.object({
+  sourceFeatureId: z.string(),
+  sourceFeatureType: FeatureTypeSchema,
+  targetFeatureId: z.string(),
+  targetFeatureType: FeatureTypeSchema,
+  compatibilityScore: z.number().min(0).max(1),
+  dimensionFitScore: z.number().min(0).max(1),
+  axisAlignmentScore: z.number().min(0).max(1),
+  notes: z.array(z.string()),
+});
+
 export const DemonstrationRecordSchema = z.object({
   id: z.string().uuid(),
   timestamp: z.string(),
@@ -365,8 +404,15 @@ export const DemonstrationRecordSchema = z.object({
   sourcePartName: z.string(),
   targetPartId: z.string(),
   targetPartName: z.string(),
-  chosenFeaturePairs: z.array(FeaturePairSchema),
-  finalTransform: AlignmentSolutionSchema,
+  chosenCandidateId: z.string().optional(),
+  chosenFeaturePairs: z.array(SerializedFeaturePairSchema).optional(),
+  finalTransform: z.object({
+    translation: Vec3TupleSchema,
+    rotation: Vec4TupleSchema,
+    approachDirection: Vec3TupleSchema,
+    method: z.string(),
+    residualError: z.number().nonnegative(),
+  }).optional(),
   textExplanation: z.string().optional(),
   antiPattern: z.string().optional(),
   geometrySignal: z.string().optional(),

@@ -18,6 +18,7 @@ import type {
   SemanticRole,
   FeatureType,
 } from './featureTypes';
+import { solveAlignment, estimateInsertionFeasibility } from './featureSolver';
 
 // ---------------------------------------------------------------------------
 // Feature type compatibility table
@@ -340,6 +341,8 @@ function buildCandidateDescription(
  * @param sourcePartId - UUID of the source part
  * @param targetPartId - UUID of the target part
  * @param options - Matching options
+ * @param sourceObj - Optional Three.js object for source part (enables feasibility check)
+ * @param targetObj - Optional Three.js object for target part (enables feasibility check)
  */
 export function generateMatingCandidates(
   sourceFeatures: AssemblyFeature[],
@@ -350,7 +353,9 @@ export function generateMatingCandidates(
     maxCandidates?: number;
     toleranceMultiplier?: number;
     requireSemanticCompat?: boolean;
-  }
+  },
+  sourceObj?: THREE.Object3D,
+  targetObj?: THREE.Object3D
 ): MatingCandidate[] {
   const maxCandidates = options?.maxCandidates ?? 10;
   const toleranceMultiplier = options?.toleranceMultiplier ?? 2.0;
@@ -449,19 +454,42 @@ export function generateMatingCandidates(
       diagnostics.push('only planar face pairs — rotation around normal axis is ambiguous');
     }
 
+    // Run solver + feasibility check if objects are provided
+    let solvedTransform = undefined;
+    let collisionPenalty = 0;
+    let insertionFeasibility = 1.0;
+    if (sourceObj && targetObj) {
+      try {
+        const solution = solveAlignment(sourceObj, targetObj, pairsForCandidate);
+        if (solution) {
+          solvedTransform = solution;
+          const primaryPair = pairsForCandidate[0];
+          const feas = estimateInsertionFeasibility(sourceObj, targetObj, primaryPair, solution);
+          collisionPenalty = feas.collisionPenalty;
+          insertionFeasibility = feas.feasibility;
+          if (feas.notes.length > 0) {
+            diagnostics.push(...feas.notes);
+          }
+        }
+      } catch {
+        // feasibility check is best-effort
+      }
+    }
+
     const candidate: MatingCandidate = {
       id: crypto.randomUUID(),
       sourcePartId,
       targetPartId,
       featurePairs: pairsForCandidate,
-      totalScore,
+      transform: solvedTransform,
+      totalScore: Math.max(0, Math.min(1, totalScore - collisionPenalty * 0.3)),
       scoreBreakdown: {
         featureCompatibility: avgTypeScore,
         dimensionFit: avgDimScore,
         axisAlignment: avgAxisScore,
         faceSupportConsistency: faceSupportScore,
-        collisionPenalty: 0, // TODO(v3-geometry): implement collision detection
-        insertionFeasibility: 1.0, // TODO(v3-geometry): check clearance/interference
+        collisionPenalty,
+        insertionFeasibility,
         symmetryAmbiguityPenalty: symmetryPenalty,
         recipePrior: 0, // set by caller if recipe lookup succeeds
       },

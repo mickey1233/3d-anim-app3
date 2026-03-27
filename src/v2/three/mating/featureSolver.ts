@@ -20,6 +20,7 @@ import type {
   AlignmentSolution,
   AssemblyFeature,
   FeaturePair,
+  MatingCandidate,
 } from './featureTypes';
 
 // ---------------------------------------------------------------------------
@@ -148,14 +149,10 @@ function solvePlanePair(
 // ---------------------------------------------------------------------------
 
 /**
- * Solve: align peg axis anti-parallel to hole axis, translate peg center to hole center.
+ * Solve: align peg axis anti-parallel to hole axis, translate peg tip to hole opening.
  *
- * The peg tip should end up at the hole opening. The rotation aligns the peg axis
- * to point down the hole. Translation moves the peg center (not tip) to align with
- * the hole center.
- *
- * TODO(v3-geometry): improve — currently places peg center AT hole center.
- * A proper peg-hole mate should offset by peg height / 2 so the peg tip enters the hole.
+ * The peg TIP aligns with the hole opening (not peg center to hole center).
+ * Offset = half peg depth toward insertion direction.
  */
 function solvePegHolePair(
   sourceObj: THREE.Object3D,
@@ -183,6 +180,11 @@ function solvePegHolePair(
   const targetPegAxis = holeAxisWorld.clone().negate();
   const rotation = new THREE.Quaternion().setFromUnitVectors(pegAxisWorld, targetPegAxis);
 
+  // Compute peg insertion depth offset: move peg so tip (not center) aligns with hole opening
+  // depth = peg height (how far it protrudes); offset peg center by depth/2 toward insertion
+  const pegDepth = pegFeature.dimensions.depth ?? pegFeature.dimensions.diameter ?? 0;
+  const insertionOffset = pegDepth * 0.5;
+
   // Apply rotation to peg center and compute translation
   const srcWorldPos = new THREE.Vector3();
   sourceObj.getWorldPosition(srcWorldPos);
@@ -192,15 +194,23 @@ function solvePegHolePair(
     .applyQuaternion(applyToSource ? rotation : new THREE.Quaternion())
     .add(srcWorldPos);
 
-  const translation = holeCenterWorld.clone().sub(
-    applyToSource ? rotatedPegCenter : pegCenterWorld
-  );
+  // The peg tip is at rotatedPegCenter + pegAxis_rotated * insertionOffset
+  // We want the tip to align with hole center, so:
+  // rotatedPegCenter + insertionOffset * (-holeAxis) = holeCenterWorld
+  // => translation = holeCenterWorld - insertionOffset * (-holeAxis) - rotatedPegCenter
+  const pegAxisAfterRotation = pegAxisWorld.clone().applyQuaternion(applyToSource ? rotation : new THREE.Quaternion()).normalize();
+  const tipOffset = pegAxisAfterRotation.clone().multiplyScalar(insertionOffset);
+
+  const translation = holeCenterWorld.clone()
+    .sub(rotatedPegCenter)
+    .sub(tipOffset);
 
   // Residual: how well do diameters match?
   const pegDiam = pegFeature.dimensions.diameter ?? 0;
   const holeDiam = holeFeature.dimensions.diameter ?? 0;
   const diameterResidual = holeDiam > 0 ? Math.abs(pegDiam - holeDiam) : 0;
 
+  // Approach direction = peg's local axis (direction the source moves toward target)
   const approachDirection = holeAxisWorld.clone().negate();
 
   return {
@@ -212,6 +222,7 @@ function solvePegHolePair(
     residualError: diameterResidual,
     diagnostics: [
       `peg_slot: pegDiam=${(pegDiam * 1000).toFixed(2)}mm holeDiam=${(holeDiam * 1000).toFixed(2)}mm`,
+      `pegDepth=${(pegDepth * 1000).toFixed(2)}mm insertionOffset=${(insertionOffset * 1000).toFixed(2)}mm`,
       `diameterResidual=${(diameterResidual * 1000).toFixed(3)}mm`,
     ],
   };
@@ -427,6 +438,94 @@ function solveGenericAxisAlign(
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Insertion feasibility heuristic
+// ---------------------------------------------------------------------------
+
+/**
+ * Estimate how feasible the insertion is, including a simple bbox collision check.
+ *
+ * Returns feasibility [0–1], collisionPenalty [0–1], and diagnostic notes.
+ */
+export function estimateInsertionFeasibility(
+  sourceObj: THREE.Object3D,
+  targetObj: THREE.Object3D,
+  featurePair: FeaturePair,
+  solution: AlignmentSolution
+): { feasibility: number; collisionPenalty: number; notes: string[] } {
+  const notes: string[] = [];
+
+  try {
+    sourceObj.updateWorldMatrix(true, true);
+    targetObj.updateWorldMatrix(true, true);
+
+    // Compute world-space bounding boxes
+    const srcBox = new THREE.Box3().setFromObject(sourceObj);
+    const tgtBox = new THREE.Box3().setFromObject(targetObj);
+
+    // Apply solution translation to source bbox
+    const trans = new THREE.Vector3(...solution.translation);
+    const solvedSrcBox = srcBox.clone().translate(trans);
+
+    // Check overlap with target bbox
+    const intersects = solvedSrcBox.intersectsBox(tgtBox);
+
+    if (intersects) {
+      // Compute overlap volume
+      const overlapBox = solvedSrcBox.clone().intersect(tgtBox);
+      const overlapSize = new THREE.Vector3();
+      overlapBox.getSize(overlapSize);
+      const overlapVol = overlapSize.x * overlapSize.y * overlapSize.z;
+
+      const srcSize = new THREE.Vector3();
+      solvedSrcBox.getSize(srcSize);
+      const srcVol = srcSize.x * srcSize.y * srcSize.z;
+
+      const overlapRatio = srcVol > 0 ? overlapVol / srcVol : 0;
+
+      if (overlapRatio > 0.1) {
+        // Source is significantly inside target — likely wrong
+        const penalty = Math.min(1, overlapRatio * 2);
+        notes.push(`bbox overlap ratio=${overlapRatio.toFixed(2)} → collision penalty=${penalty.toFixed(2)}`);
+        return { feasibility: 1 - penalty, collisionPenalty: penalty, notes };
+      }
+      notes.push(`minor bbox overlap ratio=${overlapRatio.toFixed(3)} — accepted`);
+    }
+
+    // Peg-hole specific: check radius compatibility
+    const srcType = featurePair.sourceFeature.type;
+    const tgtType = featurePair.targetFeature.type;
+    if (
+      (srcType === 'peg' && (tgtType === 'cylindrical_hole' || tgtType === 'blind_hole')) ||
+      ((srcType === 'cylindrical_hole' || srcType === 'blind_hole') && tgtType === 'peg')
+    ) {
+      const pegFeature = srcType === 'peg' ? featurePair.sourceFeature : featurePair.targetFeature;
+      const holeFeature = srcType === 'peg' ? featurePair.targetFeature : featurePair.sourceFeature;
+      const pegR = (pegFeature.dimensions.diameter ?? 0) / 2;
+      const holeR = (holeFeature.dimensions.diameter ?? 0) / 2;
+      const tolerance = Math.max(holeFeature.dimensions.tolerance, pegFeature.dimensions.tolerance);
+
+      if (pegR > holeR + tolerance) {
+        const oversize = pegR - holeR;
+        const penalty = Math.min(1, oversize / Math.max(tolerance, 0.0001) * 0.5);
+        notes.push(`peg (r=${(pegR * 1000).toFixed(1)}mm) too large for hole (r=${(holeR * 1000).toFixed(1)}mm) → penalty=${penalty.toFixed(2)}`);
+        return { feasibility: 1 - penalty, collisionPenalty: penalty, notes };
+      }
+      notes.push(`peg-hole radius OK: peg=${(pegR * 1000).toFixed(1)}mm hole=${(holeR * 1000).toFixed(1)}mm`);
+    }
+
+    // Planar faces: always feasible (no insertion collision)
+    if (srcType === 'planar_face' && tgtType === 'planar_face') {
+      return { feasibility: 1.0, collisionPenalty: 0, notes: ['planar_face pair — always feasible'] };
+    }
+
+    return { feasibility: 1.0, collisionPenalty: 0, notes };
+  } catch (err) {
+    notes.push(`feasibility check failed: ${String(err)}`);
+    return { feasibility: 0.5, collisionPenalty: 0, notes };
+  }
+}
 
 /**
  * Solve the rigid transform that aligns source to target using the provided feature pairs.
