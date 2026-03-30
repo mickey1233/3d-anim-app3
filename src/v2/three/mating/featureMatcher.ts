@@ -21,7 +21,7 @@ import type {
 import { solveAlignment, estimateInsertionFeasibility } from './featureSolver';
 
 // Inline minimal type for demonstration prior (avoids importing server-side mateRecipes in browser)
-type DemonstrationRelevanceScore = {
+export type DemonstrationRelevanceScore = {
   demonstrationId: string;
   totalScore: number;
   partNameMatch: boolean;

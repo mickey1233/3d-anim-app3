@@ -16,7 +16,7 @@ import { resolveAnchor } from '../three/mating/anchorMethods';
 import { solveMateTopBottom, applyMateTransform } from '../three/mating/solver';
 import { clusterPlanarFaces } from '../three/mating/faceClustering';
 import { extractFeatures } from '../three/mating/featureExtractor';
-import { generateMatingCandidates } from '../three/mating/featureMatcher';
+import { generateMatingCandidates, type DemonstrationRelevanceScore } from '../three/mating/featureMatcher';
 import { solveAlignment } from '../three/mating/featureSolver';
 import type { MatingCandidate } from '../three/mating/featureTypes';
 
@@ -5248,13 +5248,29 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const sourceFeatures = extractFeatures(sourceObj, sourcePart.partId);
     const targetFeatures = extractFeatures(targetObj, targetPart.partId);
 
+    // Fetch demonstration priors from server (non-blocking — best-effort)
+    let demonstrationPriors: DemonstrationRelevanceScore[] = [];
+    try {
+      const demoResp = await v2Client.request('agent.find_relevant_demonstrations', {
+        sourceName: sourcePart.partName,
+        targetName: targetPart.partName,
+        featureTypeHints: [...new Set([
+          ...sourceFeatures.map(f => f.type),
+          ...targetFeatures.map(f => f.type),
+        ])],
+      }) as { scores?: DemonstrationRelevanceScore[] };
+      demonstrationPriors = demoResp?.scores ?? [];
+    } catch {
+      // Demo priors are optional — proceed without them
+    }
+
     const maxCandidates = typeof input.maxCandidates === 'number' ? input.maxCandidates : 10;
     const candidates = generateMatingCandidates(
       sourceFeatures,
       targetFeatures,
       sourcePart.partId,
       targetPart.partId,
-      { maxCandidates },
+      { maxCandidates, demonstrationPriors },
       sourceObj,
       targetObj
     );
@@ -5327,6 +5343,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         sourceFeatureCount: sourceFeatures.length,
         targetFeatureCount: targetFeatures.length,
         vlmRerank,
+        demonstrationPriorCount: demonstrationPriors.length,
+        topDemoScore: demonstrationPriors[0]?.totalScore ?? 0,
       },
     });
   }

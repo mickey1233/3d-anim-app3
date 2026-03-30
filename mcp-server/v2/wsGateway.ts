@@ -12,7 +12,7 @@ import { inferAssemblySequence } from './vlm/autoAssemble.js';
 import { verifyAnchorFace, logAnchorVerifyFailure } from './vlm/anchorVerify.js';
 import { inferMateFromImages } from './vlm/mateInfer.js';
 import { inferMateParams } from './router/mateParamsInfer.js';
-import { saveRecipe, deleteRecipe, listRecipes, saveDemonstration, listDemonstrations } from './router/mateRecipes.js';
+import { saveRecipe, deleteRecipe, listRecipes, saveDemonstration, listDemonstrations, findRelevantDemonstrations } from './router/mateRecipes.js';
 import { queryWeather, queryWebSearch } from './web/queryTools.js';
 import { getServerStatus } from './status/serverStatus.js';
 
@@ -669,6 +669,21 @@ export class WsGatewayV2 {
               console.warn('[wsGateway] agent.vlm_rerank_candidates failed:', err?.message);
               this.sendResponse(ws, parsed.data.id, true, { reranked: [] });
             }
+            return;
+          }
+
+          if (parsed.data.command === 'agent.find_relevant_demonstrations') {
+            const { sourceName, targetName, featureTypeHints } = (parsed.data.args ?? {}) as {
+              sourceName: string;
+              targetName: string;
+              featureTypeHints?: string[];
+            };
+            const scores = await findRelevantDemonstrations({
+              sourcePartName: sourceName ?? '',
+              targetPartName: targetName ?? '',
+              ...(featureTypeHints ? { featureTypes: featureTypeHints } : {}),
+            });
+            this.sendResponse(ws, parsed.data.id, true, { scores });
             return;
           }
 
