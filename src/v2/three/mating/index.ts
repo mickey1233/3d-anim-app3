@@ -10,6 +10,9 @@ export * from './featureTypes';
 export * from './featureExtractor';
 export * from './featureMatcher';
 export * from './featureSolver';
+export { scoreSolvers, deriveSolverPriorsFromDemonstrations } from './solverScoring';
+export type { SolverScoringInput } from './solverScoring';
+export type { AssemblySemanticDescription, DemonstrationPriorScore, SolverFamily, SolverScore, SolverScoringResult } from './featureTypes';
 
 // --- Legacy v2 face-based API (unchanged) ---
 export { clusterPlanarFaces } from './faceClustering';

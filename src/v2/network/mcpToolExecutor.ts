@@ -16,9 +16,10 @@ import { resolveAnchor } from '../three/mating/anchorMethods';
 import { solveMateTopBottom, applyMateTransform } from '../three/mating/solver';
 import { clusterPlanarFaces } from '../three/mating/faceClustering';
 import { extractFeatures } from '../three/mating/featureExtractor';
-import { generateMatingCandidates, type DemonstrationRelevanceScore } from '../three/mating/featureMatcher';
+import { generateMatingCandidates } from '../three/mating/featureMatcher';
 import { solveAlignment } from '../three/mating/featureSolver';
-import type { MatingCandidate } from '../three/mating/featureTypes';
+import { scoreSolvers } from '../three/mating/solverScoring';
+import type { MatingCandidate, DemonstrationPriorScore } from '../three/mating/featureTypes';
 
 // ---------------------------------------------------------------------------
 // Candidate registry — session-scoped, cleared on scene reset
@@ -5249,7 +5250,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const targetFeatures = extractFeatures(targetObj, targetPart.partId);
 
     // Fetch demonstration priors from server (non-blocking — best-effort)
-    let demonstrationPriors: DemonstrationRelevanceScore[] = [];
+    let demonstrationPriors: DemonstrationPriorScore[] = [];
     try {
       const demoResp = await v2Client.request('agent.find_relevant_demonstrations', {
         sourceName: sourcePart.partName,
@@ -5258,7 +5259,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           ...sourceFeatures.map(f => f.type),
           ...targetFeatures.map(f => f.type),
         ])],
-      }) as { scores?: DemonstrationRelevanceScore[] };
+      }) as { scores?: DemonstrationPriorScore[] };
       demonstrationPriors = demoResp?.scores ?? [];
     } catch {
       // Demo priors are optional — proceed without them
@@ -5312,6 +5313,14 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       }
     }
 
+    // Score solver families based on geometry features, demo priors, and candidates
+    const solverScoringResult = scoreSolvers({
+      sourceFeatures,
+      targetFeatures,
+      demonstrationPriors,
+      existingCandidates: candidates,
+    });
+
     // Store full candidates in registry for later lookup
     const regKey = candidateRegistryKey(sourcePart.partId, targetPart.partId);
     candidateRegistry.set(regKey, candidates);
@@ -5337,6 +5346,11 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       targetPartId: targetPart.partId,
       candidates: candidateSummaries,
       candidateCount: candidates.length,
+      solverRecommendation: {
+        recommendedSolver: solverScoringResult.recommendedSolver,
+        confidence: solverScoringResult.confidence,
+        diagnostics: solverScoringResult.diagnostics,
+      },
     }, {
       mutating: false,
       debug: {
@@ -5345,6 +5359,10 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         vlmRerank,
         demonstrationPriorCount: demonstrationPriors.length,
         topDemoScore: demonstrationPriors[0]?.totalScore ?? 0,
+        recommendedSolver: solverScoringResult.recommendedSolver,
+        solverScores: solverScoringResult.rankedSolvers.map(s => ({
+          solver: s.solver, score: s.totalScore, reasons: s.reasons, implemented: s.implemented,
+        })),
       },
     });
   }

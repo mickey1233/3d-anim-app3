@@ -19,6 +19,7 @@
 import { readFile, writeFile } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import type { DemonstrationPriorScore } from '../../../shared/schema/assemblySemanticTypes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RECIPES_FILE = path.resolve(__dirname, 'mate-recipes.json');
@@ -398,15 +399,6 @@ export function clearDemoCache(): void {
 // Demonstration Retrieval Prior — relevance-scored demo lookup for LLM context
 // =============================================================================
 
-export type DemonstrationRelevanceScore = {
-  demonstrationId: string;
-  totalScore: number;
-  partNameMatch: boolean;
-  featureTypeOverlap: number;   // 0–1
-  ruleTextMatch: number;        // 0–1 (keyword overlap)
-  summary: string;              // one-line human-readable
-};
-
 /**
  * Find demonstrations relevant to a candidate assembly.
  * Uses part-name match, feature type overlap, and text keyword match.
@@ -417,7 +409,7 @@ export async function findRelevantDemonstrations(params: {
   targetPartName: string;
   featureTypes?: string[];
   maxResults?: number;
-}): Promise<DemonstrationRelevanceScore[]> {
+}): Promise<DemonstrationPriorScore[]> {
   const { sourcePartName, targetPartName, featureTypes = [], maxResults = 5 } = params;
   const store = await loadDemoStore();
   if (store.length === 0) return [];
@@ -425,24 +417,25 @@ export async function findRelevantDemonstrations(params: {
   const upperSrc = sourcePartName.toUpperCase();
   const upperTgt = targetPartName.toUpperCase();
 
-  const scored: DemonstrationRelevanceScore[] = [];
+  const scored: DemonstrationPriorScore[] = [];
 
   for (const demo of store) {
     const demoSrc = demo.sourcePartName.toUpperCase();
     const demoTgt = demo.targetPartName.toUpperCase();
 
     let score = 0;
-    let partNameMatch = false;
-    let featureTypeOverlap = 0;
-    let ruleTextMatch = 0;
+    let nameMatchScore = 0;
+    let featureTypeScore = 0;
+    let textScore = 0;
+    const matchedFeatureTypes: string[] = [];
 
     // Part name matching (order-independent)
     const exactMatch =
       (demoSrc === upperSrc && demoTgt === upperTgt) ||
       (demoSrc === upperTgt && demoTgt === upperSrc);
     if (exactMatch) {
-      score += 0.6;
-      partNameMatch = true;
+      nameMatchScore = 0.6;
+      score += nameMatchScore;
     } else {
       // Partial/substring match
       const partialSrcA = demoSrc.includes(upperSrc) || upperSrc.includes(demoSrc);
@@ -450,8 +443,8 @@ export async function findRelevantDemonstrations(params: {
       const partialSrcB = demoSrc.includes(upperTgt) || upperTgt.includes(demoSrc);
       const partialTgtA = demoTgt.includes(upperSrc) || upperSrc.includes(demoTgt);
       if ((partialSrcA && partialTgtB) || (partialSrcB && partialTgtA)) {
-        score += 0.3;
-        partNameMatch = true;
+        nameMatchScore = 0.3;
+        score += nameMatchScore;
       }
     }
 
@@ -464,10 +457,13 @@ export async function findRelevantDemonstrations(params: {
       }
       let matches = 0;
       for (const ft of featureTypes) {
-        if (demoTypeSet.has(ft)) matches++;
+        if (demoTypeSet.has(ft)) {
+          matches++;
+          matchedFeatureTypes.push(ft);
+        }
       }
-      featureTypeOverlap = matches / featureTypes.length;
-      score += featureTypeOverlap * 0.3;
+      featureTypeScore = matches / featureTypes.length;
+      score += featureTypeScore * 0.3;
     }
 
     // Keyword match in generalizedRule or textExplanation
@@ -477,23 +473,22 @@ export async function findRelevantDemonstrations(params: {
       for (const ft of featureTypes) {
         if (ruleText.includes(ft.toLowerCase())) kwMatches++;
       }
-      ruleTextMatch = featureTypes.length > 0 ? kwMatches / featureTypes.length : 0;
-      score += ruleTextMatch * 0.1;
+      textScore = featureTypes.length > 0 ? kwMatches / featureTypes.length : 0;
+      score += textScore * 0.1;
     }
 
     if (score < 0.05) continue; // Skip irrelevant demos
 
-    const summary =
-      `${demo.sourcePartName} ↔ ${demo.targetPartName}` +
-      (demo.generalizedRule ? ` — ${demo.generalizedRule.slice(0, 80)}` : '');
-
     scored.push({
       demonstrationId: demo.id,
+      sourcePartName: demo.sourcePartName,
+      targetPartName: demo.targetPartName,
       totalScore: Math.min(1, score),
-      partNameMatch,
-      featureTypeOverlap,
-      ruleTextMatch,
-      summary,
+      nameMatchScore,
+      featureTypeScore,
+      textScore,
+      matchedFeatureTypes,
+      generalizedRuleSummary: demo.generalizedRule?.slice(0, 100),
     });
   }
 
@@ -534,7 +529,7 @@ export async function getDemonstrationLearningContext(params: {
     const demo = demoById.get(rel.demonstrationId);
     if (!demo) return;
 
-    const scoreLabel = rel.partNameMatch ? 'part match' : 'feature match';
+    const scoreLabel = rel.nameMatchScore > 0 ? 'part match' : 'feature match';
     lines.push(`Demo #${i + 1} (score=${rel.totalScore.toFixed(2)}, ${scoreLabel}): ${demo.sourcePartName} ↔ ${demo.targetPartName}`);
 
     if (demo.textExplanation) {

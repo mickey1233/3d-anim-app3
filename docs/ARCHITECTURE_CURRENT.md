@@ -1,156 +1,105 @@
-# Architecture: v2 System (Current)
+# Assembly Architecture — Current State
 
-## Overview
+## 3-Layer Architecture
 
-The 3D CAD assembly studio uses a split architecture:
-- **Frontend** (React + Three.js): renders scene, executes tool mutations, owns Zustand state
-- **Backend** (Node.js WebSocket server): routes chat intent to tool calls via an LLM agent
+### Layer 1: VLM Semantic Description
+**File**: `mcp-server/v2/vlm/semanticDescriber.ts`
 
-Most tool execution happens **in the browser**. The backend is a routing layer, not a scene authority.
+Produces `AssemblySemanticDescription`:
+- `sourceRole`, `targetRole` — part semantic roles (lid/body/bracket/…)
+- `assemblyIntent` — insert/cover/mount/slide/screw/snap/default
+- `relationship` — natural language (e.g. "fan mounts onto side panel")
+- `likelyContactRegions`, `likelyApproachDirection` — geometry hints
+- `preferredSolverHints` — solver families VLM suggests
+- `confidence` — 0–1
+
+**Status**: Implemented. Failure-safe (returns null when VLM unavailable).
+**Important**: VLM DESCRIBES; it does NOT compute transforms.
+
+---
+
+### Layer 2: Solver Scoring Framework
+**File**: `src/v2/three/mating/solverScoring.ts`
+
+Input signals:
+1. Feature extraction results (geometry types, counts)
+2. Existing mating candidates (scored pairs)
+3. VLM semantic description (intent, solver hints)
+4. Demonstration priors (from mateRecipes.ts)
+5. Recipe priors (exact part-pair cache)
+
+Output: `SolverScoringResult` with ranked `SolverScore[]`, each having:
+- `solver` — solver family name
+- `totalScore` — 0–1
+- `components` — one score per signal (for debugging / model replacement)
+- `reasons` — human-readable explanation
+- `implemented` — whether solver is fully implemented
+
+Score components (weights):
+- `geometryCompatibility` (0.28) — feature types present
+- `featureCompatibility` (0.24) — scored candidate patterns
+- `semanticIntentMatch` (0.24) — VLM intent/hints
+- `demonstrationPrior` (0.14) — keyword/feature-type matching from demos
+- `recipePrior` (0.05) — exact recipe match signal
+- `symmetryResolutionGain` (0.03) — future
+- `insertionAxisConfidence` (0.02) — future
+
+**Status**: Heuristic scorer. Structured for future learned-model replacement.
+
+---
+
+### Layer 3: Geometry Solver
+**File**: `src/v2/three/mating/featureSolver.ts`
+
+Implemented solver families:
+- `plane_align` — planar face flush
+- `peg_hole` — single peg/hole insertion
+- `pattern_align` — multi-point Kabsch SVD alignment
+
+Planned (not implemented): `slot_insert`, `rim_align`, `rail_slide`
+
+Output contract: `AlignmentSolution` with `solutionType: 'absolute_world'`
 
 ---
 
 ## Data Flow
 
 ```
-User types chat message
-        │
-        ▼
-Chat UI (src/v2/ui/ChatPanel.tsx)
-        │  sends text over WebSocket
-        ▼
-WS Client (src/v2/network/client.ts)
-        │  { command: 'agent.route', text: '...' }
-        ▼
-WebSocket Gateway (mcp-server/v2/wsGateway.ts)
-        │  dispatches to router
-        ▼
-Router (mcp-server/v2/router/router.ts)
-        │  selects provider based on env
-        ▼
-Agent Provider (mcp-server/v2/router/agentProvider.ts)
-        │  reads agent-prompts/ markdown docs
-        │  calls LLM (Gemini / Claude / Ollama / OpenAI)
-        ▼
-LLM returns { toolCalls: [{ tool, args }], replyText }
-        │
-        ▼
-Gateway serializes tool calls
-        │  sends { command: 'tool_proxy_invoke', tool, args } back to frontend
-        ▼
-WS Client receives tool_proxy_invoke
-        │
-        ▼
-mcpToolExecutor.ts (src/v2/network/mcpToolExecutor.ts)
-        │  dispatches on tool name
-        │  reads/writes Zustand store
-        │  calls Three.js solvers (solveMateTopBottom, etc.)
-        ▼
-Zustand store (src/v2/store/store.ts)
-        │  React components rerender
-        ▼
-Three.js scene updated (src/v2/three/)
+User chat command
+  → Router Agent (agentProvider.ts / agentLlm.ts)
+  → action.smart_mate_execute (legacy face-based) OR query.generate_candidates (feature-based)
+
+[Feature-based path — query.generate_candidates]
+  → Feature extraction (featureExtractor.ts)
+  → Demo priors fetch (agent.find_relevant_demonstrations → mateRecipes.ts)
+  → [Optional] VLM semantic description (semanticDescriber.ts)       [Layer 1]
+  → Solver scoring (solverScoring.ts)                                 [Layer 2]
+  → Candidate generation (featureMatcher.ts) with demo prior boosts
+  → Geometry solver per candidate (featureSolver.ts)                  [Layer 3]
+  → Feasibility check (estimateInsertionFeasibility)
+  → Return candidates + solverRecommendation + diagnostics
+  → [Optional] VLM rerank (agent.vlm_rerank_candidates)
+  → action.apply_candidate → transform applied
+  → Human correction → mate.record_demonstration → learning
+
+[Legacy face-based path — still working]
+  → mateParamsInfer.ts → LLM infers source/target face
+  → structuredMate.ts → VLM multi-view analysis
+  → solver.ts → face-flush / insert-arc transform
 ```
 
 ---
 
-## Key Directories
+## Shared Types
 
-| Path | Role |
-|------|------|
-| `src/v2/store/store.ts` | Single Zustand store for all app state |
-| `src/v2/three/` | R3F scene, model loading, mating solvers |
-| `src/v2/network/mcpToolExecutor.ts` | Frontend tool executor (~5200 lines) |
-| `src/v2/ui/` | React panels (Chat, Parts, Steps, VLM, Mate) |
-| `mcp-server/v2/wsGateway.ts` | WS server, request routing, side-channel commands |
-| `mcp-server/v2/router/` | Intent routing, LLM agent, recipe learning |
-| `agent-prompts/` | Markdown docs injected into LLM system prompt |
-| `shared/schema/mcpToolsV3.ts` | Zod schemas for all MCP tools (~1600+ lines) |
+All cross-layer types: `shared/schema/assemblySemanticTypes.ts`
+- `DemonstrationPriorScore` — demo relevance score (server ↔ WS ↔ browser)
+- `AssemblySemanticDescription` — Layer 1 output
+- `SolverScoringResult`, `SolverScore` — Layer 2 output
+- `SolverFamily`, `PartRole`, `AssemblyIntent` — enums
 
 ---
 
-## Special Routes (Backend-only)
+## Current Limitations
 
-These do NOT go through `mcpToolExecutor.ts`:
-
-| Command | Handler |
-|---------|---------|
-| `agent.save_mate_recipe` | wsGateway → mateRecipes.saveRecipe |
-| `agent.delete_mate_recipe` | wsGateway → mateRecipes.deleteRecipe |
-| `agent.list_mate_recipes` | wsGateway → mateRecipes.listRecipes |
-| `agent.save_demonstration` | wsGateway → mateRecipes.saveDemonstration |
-| `agent.list_demonstrations` | wsGateway → mateRecipes.listDemonstrations |
-| `agent.infer_mate_params` | wsGateway → mateParamsInfer.inferMateParams |
-| `vlm.structured_mate` | wsGateway → structuredMate pipeline |
-| `save_asset` | wsGateway → filesystem |
-
----
-
-## Mate Execution Flow (v2 face-based)
-
-```
-action.smart_mate_execute
-        │
-        ▼
-mcpToolExecutor: resolveFeature(sourcePart, targetPart)
-        │  calls callAgentForMateParams() → LLM infers intent/faces/methods
-        │  falls back to geometry heuristics
-        ▼
-solveMateTopBottom(sourceObj, targetObj, sourceFace, targetFace, mode)
-        │  resolveAnchor() → FaceCluster → AnchorResult (centerLocal, normalLocal)
-        │  buildMateTransform() → rotation quaternion + translation vector
-        ▼
-applyMateTransform(obj, transform)
-        │  updates Three.js object position/quaternion
-        ▼
-currentStore().setPartOverride(partId, transform)
-        │  triggers React rerender
-        ▼
-Part moves in scene
-```
-
----
-
-## Mate Execution Flow (v3 feature-based — new)
-
-```
-query.generate_candidates
-        │
-        ▼
-extractFeatures(sourceObj, sourcePartId)   extractFeatures(targetObj, targetPartId)
-        │  Stage 1: clusterPlanarFaces → planar_face features
-        │  Stage 2: circle fit on plane clusters → cylindrical_hole features
-        │  Stage 3: peg detection above support plane → peg features
-        │  Stage 4: slot detection (stub)
-        ▼
-generateMatingCandidates(srcFeatures, tgtFeatures)
-        │  feature type compatibility table
-        │  dimension fit scoring (Gaussian)
-        │  axis alignment scoring
-        │  face support consistency (backward compat)
-        ▼
-MatingCandidate[] sorted by totalScore
-        │
-        ▼
-(optional) solveAlignment(sourceObj, targetObj, featurePairs)
-        │  plane_align / peg_slot / point_align / axis_align
-        ▼
-AlignmentSolution { translation, rotation, approachDirection }
-```
-
----
-
-## State Architecture
-
-The Zustand store is exposed as `window.__V2_STORE__` in development for Playwright tests.
-
-Top-level store slices:
-- `parts` — byId map, order array, transforms, overrides
-- `selection` — active feature, stack
-- `steps` — assembly sequence
-- `playback` — animation state
-- `chat` — message history
-- `mateDraft` / `matePreview` — in-progress mate state
-- `vlm` — VLM analysis results
-- `view` — environment, grid, anchor visibility
-- `connection` — WebSocket state
+See `docs/CURRENT_LIMITATIONS.md`

@@ -20,6 +20,38 @@
  *   rotation    = absolute world quaternion for source part after alignment (NOT delta)
  */
 
+/**
+ * GEOMETRY SOLVER LAYER (Layer 3 of 3-layer assembly architecture)
+ *
+ * RESPONSIBILITIES:
+ *   - Accept feature pairs / constraints as input
+ *   - Compute deterministic transforms (translation + rotation as absolute world pose)
+ *   - Calculate residual error (fit quality metric)
+ *   - Estimate insertion feasibility / collision
+ *   - Return structured AlignmentSolution with diagnostics
+ *
+ * NOT RESPONSIBLE FOR:
+ *   - Inferring semantics           → semanticDescriber.ts (Layer 1)
+ *   - Choosing which solver to use  → solverScoring.ts (Layer 2)
+ *   - Calling VLM                   → structuredMate.ts
+ *
+ * SOLVER FAMILIES IMPLEMENTED:
+ *   plane_align    — face flush (planar_face ↔ planar_face), translate only
+ *   peg_hole       — single peg/hole pair insertion
+ *   pattern_align  — multi-point Kabsch SVD (≥2 peg/hole pairs)
+ *
+ * PLANNED (not yet implemented):
+ *   slot_insert    — slot/pocket mating
+ *   rim_align      — circular rim to opening
+ *   rail_slide     — rail/groove sliding
+ *
+ * OUTPUT CONTRACT:
+ *   AlignmentSolution.solutionType === 'absolute_world'
+ *   AlignmentSolution.translation = absolute world position for source part
+ *   AlignmentSolution.rotation    = absolute world quaternion for source part
+ *   AlignmentSolution.residualError = RMSE of feature alignment (0 = perfect)
+ */
+
 import * as THREE from 'three';
 import type {
   AlignmentSolution,

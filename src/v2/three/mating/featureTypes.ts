@@ -409,6 +409,17 @@ export const SerializedFeaturePairSchema = z.object({
   notes: z.array(z.string()),
 });
 
+// Re-export shared types for convenience
+export type {
+  DemonstrationPriorScore,
+  AssemblySemanticDescription,
+  SolverFamily,
+  SolverScore,
+  SolverScoringResult,
+  PartRole,
+  AssemblyIntent,
+} from '../../../../shared/schema/assemblySemanticTypes';
+
 export const DemonstrationRecordSchema = z.object({
   id: z.string().uuid(),
   timestamp: z.string(),

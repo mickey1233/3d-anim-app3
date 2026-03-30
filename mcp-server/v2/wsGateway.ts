@@ -13,6 +13,7 @@ import { verifyAnchorFace, logAnchorVerifyFailure } from './vlm/anchorVerify.js'
 import { inferMateFromImages } from './vlm/mateInfer.js';
 import { inferMateParams } from './router/mateParamsInfer.js';
 import { saveRecipe, deleteRecipe, listRecipes, saveDemonstration, listDemonstrations, findRelevantDemonstrations } from './router/mateRecipes.js';
+import type { DemonstrationPriorScore } from '../../shared/schema/assemblySemanticTypes.js';
 import { queryWeather, queryWebSearch } from './web/queryTools.js';
 import { getServerStatus } from './status/serverStatus.js';
 
@@ -678,7 +679,7 @@ export class WsGatewayV2 {
               targetName: string;
               featureTypeHints?: string[];
             };
-            const scores = await findRelevantDemonstrations({
+            const scores: DemonstrationPriorScore[] = await findRelevantDemonstrations({
               sourcePartName: sourceName ?? '',
               targetPartName: targetName ?? '',
               ...(featureTypeHints ? { featureTypes: featureTypeHints } : {}),

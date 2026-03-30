@@ -17,18 +17,9 @@ import type {
   MatingCandidate,
   SemanticRole,
   FeatureType,
+  DemonstrationPriorScore,
 } from './featureTypes';
 import { solveAlignment, estimateInsertionFeasibility } from './featureSolver';
-
-// Inline minimal type for demonstration prior (avoids importing server-side mateRecipes in browser)
-export type DemonstrationRelevanceScore = {
-  demonstrationId: string;
-  totalScore: number;
-  partNameMatch: boolean;
-  featureTypeOverlap: number;
-  ruleTextMatch: number;
-  summary: string;
-};
 
 // ---------------------------------------------------------------------------
 // Feature type compatibility table
@@ -363,7 +354,7 @@ export function generateMatingCandidates(
     maxCandidates?: number;
     toleranceMultiplier?: number;
     requireSemanticCompat?: boolean;
-    demonstrationPriors?: DemonstrationRelevanceScore[];
+    demonstrationPriors?: DemonstrationPriorScore[];
   },
   sourceObj?: THREE.Object3D,
   targetObj?: THREE.Object3D
@@ -478,6 +469,13 @@ export function generateMatingCandidates(
     if (demoPriorBoost > 0 && demonstrationPriors.length > 0) {
       const topDemo = demonstrationPriors[0];
       diagnostics.push(`demonstration prior: demoId=${topDemo.demonstrationId}, score=${topDemo.totalScore.toFixed(2)}`);
+      // Feature type match boost using matchedFeatureTypes from DemonstrationPriorScore
+      const typeMatch = topDemo.matchedFeatureTypes.some(ft =>
+        pairsForCandidate.some(p => p.sourceFeature.type === ft || p.targetFeature.type === ft)
+      );
+      if (typeMatch) {
+        diagnostics.push(`demo feature type match: ${topDemo.matchedFeatureTypes.join(',')}`);
+      }
     }
 
     // Run solver + feasibility check if objects are provided
