@@ -627,6 +627,51 @@ export class WsGatewayV2 {
             return;
           }
 
+          if (parsed.data.command === 'agent.vlm_rerank_candidates') {
+            // VLM-based candidate reranking via LLM.
+            // Input: { source: string, target: string, candidates: [{id, description, primaryFeatureTypes, score}] }
+            // Output: [{ candidateId, semanticScore, reason, reject }]
+            try {
+              const rrArgs = (parsed.data.args ?? {}) as {
+                source?: string;
+                target?: string;
+                candidates?: Array<{ id: string; description?: string; primaryFeatureTypes?: string[]; score?: number }>;
+              };
+              if (!rrArgs.candidates || rrArgs.candidates.length === 0) {
+                this.sendResponse(ws, parsed.data.id, true, { reranked: [] });
+                return;
+              }
+
+              const { callAgentLlm } = await import('./router/agentLlm.js');
+              const systemPrompt =
+                'You are a mechanical assembly expert. Rank these assembly candidates by semantic plausibility.\n' +
+                'Output ONLY a valid JSON array (no markdown): [{"candidateId": "...", "semanticScore": 0.0-1.0, "reason": "...", "reject": false}]\n' +
+                'semanticScore=1.0 means highly plausible, 0.0 means implausible. reject=true if you are confident it is wrong.';
+              const userMessage =
+                `Task: Rerank assembly candidates for ${rrArgs.source ?? 'source'} → ${rrArgs.target ?? 'target'}\n` +
+                `Candidates: ${JSON.stringify(rrArgs.candidates, null, 2)}`;
+
+              const llmResult = await callAgentLlm(systemPrompt, userMessage);
+              // Parse the replyText as JSON array
+              let reranked: Array<{ candidateId: string; semanticScore: number; reason: string; reject: boolean }> = [];
+              try {
+                const text = llmResult?.replyText?.trim() ?? '';
+                const start = text.indexOf('[');
+                const end = text.lastIndexOf(']');
+                if (start >= 0 && end > start) {
+                  reranked = JSON.parse(text.slice(start, end + 1));
+                }
+              } catch {
+                // If parse fails, return empty — caller handles gracefully
+              }
+              this.sendResponse(ws, parsed.data.id, true, { reranked });
+            } catch (err: any) {
+              console.warn('[wsGateway] agent.vlm_rerank_candidates failed:', err?.message);
+              this.sendResponse(ws, parsed.data.id, true, { reranked: [] });
+            }
+            return;
+          }
+
           if (parsed.data.command === 'mcp_tool_call') {
             const toolRequestParsed = MCPToolRequestSchema.safeParse(parsed.data.args ?? {});
             if (!toolRequestParsed.success) {

@@ -280,3 +280,161 @@ export async function findDemonstrations(
 export function clearDemoCache(): void {
   demoCache = null;
 }
+
+// =============================================================================
+// Demonstration Retrieval Prior — relevance-scored demo lookup for LLM context
+// =============================================================================
+
+export type DemonstrationRelevanceScore = {
+  demonstrationId: string;
+  totalScore: number;
+  partNameMatch: boolean;
+  featureTypeOverlap: number;   // 0–1
+  ruleTextMatch: number;        // 0–1 (keyword overlap)
+  summary: string;              // one-line human-readable
+};
+
+/**
+ * Find demonstrations relevant to a candidate assembly.
+ * Uses part-name match, feature type overlap, and text keyword match.
+ * Returns scored list, descending by relevance.
+ */
+export async function findRelevantDemonstrations(params: {
+  sourcePartName: string;
+  targetPartName: string;
+  featureTypes?: string[];
+  maxResults?: number;
+}): Promise<DemonstrationRelevanceScore[]> {
+  const { sourcePartName, targetPartName, featureTypes = [], maxResults = 5 } = params;
+  const store = await loadDemoStore();
+  if (store.length === 0) return [];
+
+  const upperSrc = sourcePartName.toUpperCase();
+  const upperTgt = targetPartName.toUpperCase();
+
+  const scored: DemonstrationRelevanceScore[] = [];
+
+  for (const demo of store) {
+    const demoSrc = demo.sourcePartName.toUpperCase();
+    const demoTgt = demo.targetPartName.toUpperCase();
+
+    let score = 0;
+    let partNameMatch = false;
+    let featureTypeOverlap = 0;
+    let ruleTextMatch = 0;
+
+    // Part name matching (order-independent)
+    const exactMatch =
+      (demoSrc === upperSrc && demoTgt === upperTgt) ||
+      (demoSrc === upperTgt && demoTgt === upperSrc);
+    if (exactMatch) {
+      score += 0.6;
+      partNameMatch = true;
+    } else {
+      // Partial/substring match
+      const partialSrcA = demoSrc.includes(upperSrc) || upperSrc.includes(demoSrc);
+      const partialTgtB = demoTgt.includes(upperTgt) || upperTgt.includes(demoTgt);
+      const partialSrcB = demoSrc.includes(upperTgt) || upperTgt.includes(demoSrc);
+      const partialTgtA = demoTgt.includes(upperSrc) || upperSrc.includes(demoTgt);
+      if ((partialSrcA && partialTgtB) || (partialSrcB && partialTgtA)) {
+        score += 0.3;
+        partNameMatch = true;
+      }
+    }
+
+    // Feature type overlap
+    if (featureTypes.length > 0 && demo.chosenFeaturePairs && demo.chosenFeaturePairs.length > 0) {
+      const demoTypeSet = new Set<string>();
+      for (const fp of demo.chosenFeaturePairs) {
+        demoTypeSet.add(fp.sourceFeatureType);
+        demoTypeSet.add(fp.targetFeatureType);
+      }
+      let matches = 0;
+      for (const ft of featureTypes) {
+        if (demoTypeSet.has(ft)) matches++;
+      }
+      featureTypeOverlap = matches / featureTypes.length;
+      score += featureTypeOverlap * 0.3;
+    }
+
+    // Keyword match in generalizedRule or textExplanation
+    const ruleText = ((demo.generalizedRule ?? '') + ' ' + (demo.textExplanation ?? '')).toLowerCase();
+    if (ruleText.length > 0 && featureTypes.length > 0) {
+      let kwMatches = 0;
+      for (const ft of featureTypes) {
+        if (ruleText.includes(ft.toLowerCase())) kwMatches++;
+      }
+      ruleTextMatch = featureTypes.length > 0 ? kwMatches / featureTypes.length : 0;
+      score += ruleTextMatch * 0.1;
+    }
+
+    if (score < 0.05) continue; // Skip irrelevant demos
+
+    const summary =
+      `${demo.sourcePartName} ↔ ${demo.targetPartName}` +
+      (demo.generalizedRule ? ` — ${demo.generalizedRule.slice(0, 80)}` : '');
+
+    scored.push({
+      demonstrationId: demo.id,
+      totalScore: Math.min(1, score),
+      partNameMatch,
+      featureTypeOverlap,
+      ruleTextMatch,
+      summary,
+    });
+  }
+
+  scored.sort((a, b) => b.totalScore - a.totalScore);
+  return scored.slice(0, maxResults);
+}
+
+/**
+ * Build compact text summarizing relevant demonstrations for LLM prompt injection.
+ * Returns empty string when no relevant demonstrations are found.
+ */
+export async function getDemonstrationLearningContext(params: {
+  sourcePartName: string;
+  targetPartName: string;
+  featureTypes?: string[];
+  maxDemos?: number;
+}): Promise<string> {
+  const { sourcePartName, targetPartName, featureTypes, maxDemos = 3 } = params;
+  const relevant = await findRelevantDemonstrations({
+    sourcePartName,
+    targetPartName,
+    ...(featureTypes !== undefined ? { featureTypes } : {}),
+    maxResults: maxDemos,
+  });
+
+  if (relevant.length === 0) return '';
+
+  const store = await loadDemoStore();
+  const demoById = new Map(store.map(d => [d.id, d]));
+
+  const lines: string[] = [
+    '## Relevant Assembly Demonstrations',
+    `(retrieved for: ${sourcePartName} ↔ ${targetPartName})`,
+    '',
+  ];
+
+  relevant.forEach((rel, i) => {
+    const demo = demoById.get(rel.demonstrationId);
+    if (!demo) return;
+
+    const scoreLabel = rel.partNameMatch ? 'part match' : 'feature match';
+    lines.push(`Demo #${i + 1} (score=${rel.totalScore.toFixed(2)}, ${scoreLabel}): ${demo.sourcePartName} ↔ ${demo.targetPartName}`);
+
+    if (demo.textExplanation) {
+      lines.push(`  Reason: ${demo.textExplanation}`);
+    }
+    if (demo.generalizedRule) {
+      lines.push(`  Rule: ${demo.generalizedRule}`);
+    }
+    if (demo.antiPattern) {
+      lines.push(`  Anti-pattern: Do NOT ${demo.antiPattern}`);
+    }
+    lines.push('');
+  });
+
+  return lines.join('\n');
+}

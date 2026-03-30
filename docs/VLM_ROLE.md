@@ -64,6 +64,23 @@ This is used by `action.smart_mate_execute` as a face-selection hint, not as a s
 VLM verifies that the anchor (face center) resolved by geometry is the visually correct one.
 If disagreement > threshold, the anchor method is re-run with the VLM's suggested face.
 
+### `agent.vlm_rerank_candidates` (implemented 2026-03-30)
+Text-based LLM reranking of feature-based assembly candidates. Triggered when
+`query.generate_candidates` is called with `vlmRerank: true`.
+
+**Flow**:
+1. Top 3 candidates summarized (id, description, feature types, score)
+2. Compact JSON payload sent to `agent.vlm_rerank_candidates` via WS
+3. `wsGateway.ts` forwards to LLM with mechanical assembly expert system prompt
+4. LLM returns `[{ candidateId, semanticScore, reason, reject }]`
+5. `scoreBreakdown.vlmRerank` populated; `totalScore += semanticScore * 0.15`
+6. Candidates re-sorted
+
+**Failure-safe**: any error → original candidates returned unmodified, warning logged.
+
+**Note**: this uses the same `AGENT_LLM_PROVIDER` as the main router. It does NOT use
+image rendering — it's text-only. For visual verification, use `vlm.analyze` separately.
+
 ---
 
 ## VLM Providers

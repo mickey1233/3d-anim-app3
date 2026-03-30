@@ -20,6 +20,16 @@ import type {
 } from './featureTypes';
 import { solveAlignment, estimateInsertionFeasibility } from './featureSolver';
 
+// Inline minimal type for demonstration prior (avoids importing server-side mateRecipes in browser)
+type DemonstrationRelevanceScore = {
+  demonstrationId: string;
+  totalScore: number;
+  partNameMatch: boolean;
+  featureTypeOverlap: number;
+  ruleTextMatch: number;
+  summary: string;
+};
+
 // ---------------------------------------------------------------------------
 // Feature type compatibility table
 // ---------------------------------------------------------------------------
@@ -353,6 +363,7 @@ export function generateMatingCandidates(
     maxCandidates?: number;
     toleranceMultiplier?: number;
     requireSemanticCompat?: boolean;
+    demonstrationPriors?: DemonstrationRelevanceScore[];
   },
   sourceObj?: THREE.Object3D,
   targetObj?: THREE.Object3D
@@ -360,6 +371,11 @@ export function generateMatingCandidates(
   const maxCandidates = options?.maxCandidates ?? 10;
   const toleranceMultiplier = options?.toleranceMultiplier ?? 2.0;
   const requireSemanticCompat = options?.requireSemanticCompat ?? false;
+  const demonstrationPriors = options?.demonstrationPriors ?? [];
+  // Highest relevant demonstration score (0–1) for this part pair
+  const topDemoScore = demonstrationPriors.length > 0
+    ? Math.max(...demonstrationPriors.map(d => d.totalScore))
+    : 0;
 
   if (sourceFeatures.length === 0 || targetFeatures.length === 0) {
     return [];
@@ -435,7 +451,13 @@ export function generateMatingCandidates(
     const hasOnlyPlanarFaces = pairsForCandidate.every(
       p => p.sourceFeature.type === 'planar_face' && p.targetFeature.type === 'planar_face'
     );
-    const symmetryPenalty = hasOnlyPlanarFaces ? 0.1 : 0.0;
+    // Reduce symmetry penalty if multiple pairs are used (more pairs = less ambiguity)
+    const basePenalty = hasOnlyPlanarFaces ? 0.1 : 0.0;
+    const symmetryPenalty = Math.max(0, basePenalty - 0.1 * (pairsForCandidate.length - 1));
+
+    // Demonstration prior boost: if a relevant demonstration exists for this part pair
+    // boost the recipePrior score proportionally
+    const demoPriorBoost = topDemoScore > 0.5 ? 0.1 * topDemoScore : 0;
 
     const totalScore = Math.max(0, Math.min(1,
       avgTypeScore * 0.25 +
@@ -452,6 +474,10 @@ export function generateMatingCandidates(
     }
     if (hasOnlyPlanarFaces) {
       diagnostics.push('only planar face pairs — rotation around normal axis is ambiguous');
+    }
+    if (demoPriorBoost > 0 && demonstrationPriors.length > 0) {
+      const topDemo = demonstrationPriors[0];
+      diagnostics.push(`demonstration prior: demoId=${topDemo.demonstrationId}, score=${topDemo.totalScore.toFixed(2)}`);
     }
 
     // Run solver + feasibility check if objects are provided
@@ -476,13 +502,21 @@ export function generateMatingCandidates(
       }
     }
 
+    // Apply pattern_align insertionFeasibility boost if residual is very small
+    let feasibilityBoost = 0;
+    if (solvedTransform?.method === 'pattern_align' && (solvedTransform?.residualError ?? 1) < 0.001) {
+      feasibilityBoost = 0.05;
+    }
+
     const candidate: MatingCandidate = {
       id: crypto.randomUUID(),
       sourcePartId,
       targetPartId,
       featurePairs: pairsForCandidate,
       transform: solvedTransform,
-      totalScore: Math.max(0, Math.min(1, totalScore - collisionPenalty * 0.3)),
+      totalScore: Math.max(0, Math.min(1,
+        totalScore - collisionPenalty * 0.3 + demoPriorBoost + feasibilityBoost
+      )),
       scoreBreakdown: {
         featureCompatibility: avgTypeScore,
         dimensionFit: avgDimScore,
@@ -491,7 +525,7 @@ export function generateMatingCandidates(
         collisionPenalty,
         insertionFeasibility,
         symmetryAmbiguityPenalty: symmetryPenalty,
-        recipePrior: 0, // set by caller if recipe lookup succeeds
+        recipePrior: demoPriorBoost, // populated from demonstration prior
       },
       description: buildCandidateDescription(pairsForCandidate, sourcePartId, targetPartId),
       diagnostics,

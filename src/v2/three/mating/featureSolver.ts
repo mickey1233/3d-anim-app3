@@ -11,8 +11,13 @@
  *  - point_align  : two planar_face pairs — translation + rotation around normal
  *  - axis_align   : general axis alignment
  *  - socket_insert: tab↔slot or socket↔edge_connector
+ *  - pattern_align: ≥2 matched hole/peg pairs — Kabsch SVD rigid alignment
  *
  * Backward compat: does not modify solveMateTopBottom or any existing solver paths.
+ *
+ * AlignmentSolution.solutionType is ALWAYS 'absolute_world':
+ *   translation = absolute world position for source part after alignment (NOT delta)
+ *   rotation    = absolute world quaternion for source part after alignment (NOT delta)
  */
 
 import * as THREE from 'three';
@@ -77,6 +82,165 @@ function featureWorldAxis(
 }
 
 // ---------------------------------------------------------------------------
+// 3×3 matrix utilities for Kabsch SVD
+// ---------------------------------------------------------------------------
+
+/** 3×3 matrix as flat row-major array [a00,a01,a02, a10,a11,a12, a20,a21,a22] */
+type Mat3 = [number,number,number, number,number,number, number,number,number];
+
+function mat3Identity(): Mat3 { return [1,0,0, 0,1,0, 0,0,1]; }
+
+function mat3Transpose(A: Mat3): Mat3 {
+  return [A[0],A[3],A[6], A[1],A[4],A[7], A[2],A[5],A[8]];
+}
+
+function mat3Mul(A: Mat3, B: Mat3): Mat3 {
+  const C = mat3Identity();
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 3; j++) {
+      C[i*3+j] = A[i*3+0]*B[0*3+j] + A[i*3+1]*B[1*3+j] + A[i*3+2]*B[2*3+j];
+    }
+  }
+  return C;
+}
+
+function mat3Det(A: Mat3): number {
+  return A[0]*(A[4]*A[8]-A[5]*A[7]) - A[1]*(A[3]*A[8]-A[5]*A[6]) + A[2]*(A[3]*A[7]-A[4]*A[6]);
+}
+
+/**
+ * Computes SVD of 3×3 matrix A via Jacobi eigendecomposition of A^T A.
+ * Returns U, S (singular values), V such that A ≈ U * diag(S) * V^T.
+ * Uses 50 Jacobi iterations — reliable for 3×3.
+ */
+function svd3x3Sym(A: Mat3): { U: Mat3; S: [number,number,number]; V: Mat3 } {
+  // Compute B = A^T A (symmetric)
+  const At = mat3Transpose(A);
+  const B = mat3Mul(At, A);
+
+  // Jacobi for symmetric B → eigenvalues/vectors
+  let J: Mat3 = mat3Identity();
+  let Bc: Mat3 = [...B] as Mat3;
+
+  for (let iter = 0; iter < 50; iter++) {
+    // Find off-diagonal element with largest absolute value
+    let p = 0, q = 1;
+    let maxVal = Math.abs(Bc[1]);
+    if (Math.abs(Bc[2]) > maxVal) { p = 0; q = 2; maxVal = Math.abs(Bc[2]); }
+    if (Math.abs(Bc[5]) > maxVal) { p = 1; q = 2; }
+
+    if (Math.abs(Bc[p*3+q]) < 1e-12) break;
+
+    const bpp = Bc[p*3+p];
+    const bqq = Bc[q*3+q];
+    const bpq = Bc[p*3+q];
+    const theta = 0.5 * Math.atan2(2*bpq, bqq - bpp);
+    const c = Math.cos(theta);
+    const s = Math.sin(theta);
+
+    // Givens rotation matrix G
+    const G: Mat3 = mat3Identity();
+    G[p*3+p] = c; G[p*3+q] = -s;
+    G[q*3+p] = s; G[q*3+q] = c;
+
+    const Gt = mat3Transpose(G);
+    Bc = mat3Mul(mat3Mul(Gt, Bc), G);
+    J = mat3Mul(J, G);
+  }
+
+  const S: [number,number,number] = [
+    Math.sqrt(Math.max(0, Bc[0])),
+    Math.sqrt(Math.max(0, Bc[4])),
+    Math.sqrt(Math.max(0, Bc[8])),
+  ];
+  const V = J;
+
+  // U = A V S^{-1} (for non-zero singular values)
+  const Sinv: Mat3 = [
+    S[0] > 1e-10 ? 1/S[0] : 0, 0, 0,
+    0, S[1] > 1e-10 ? 1/S[1] : 0, 0,
+    0, 0, S[2] > 1e-10 ? 1/S[2] : 0,
+  ];
+  const U = mat3Mul(mat3Mul(A, V), Sinv);
+
+  return { U, S, V };
+}
+
+/**
+ * Kabsch algorithm: finds optimal rotation + translation to align source points
+ * to target points.
+ *
+ * Returns rotation (quaternion) and translation (world-space delta).
+ * This is the ONLY correct way to solve multi-point rigid alignment.
+ */
+function kabschSolve(
+  srcPts: THREE.Vector3[],
+  tgtPts: THREE.Vector3[]
+): { rotation: THREE.Quaternion; translation: THREE.Vector3; residualError: number } | null {
+  if (srcPts.length < 2 || srcPts.length !== tgtPts.length) return null;
+
+  // Centroids
+  const srcC = srcPts.reduce((a, b) => a.clone().add(b), new THREE.Vector3())
+    .divideScalar(srcPts.length);
+  const tgtC = tgtPts.reduce((a, b) => a.clone().add(b), new THREE.Vector3())
+    .divideScalar(tgtPts.length);
+
+  // Centered points
+  const H = srcPts.map(p => p.clone().sub(srcC));
+  const B = tgtPts.map(p => p.clone().sub(tgtC));
+
+  // Cross-covariance M = H^T B (3×3 matrix)
+  const M: Mat3 = [0,0,0, 0,0,0, 0,0,0];
+  for (let k = 0; k < H.length; k++) {
+    const hArr = [H[k].x, H[k].y, H[k].z];
+    const bArr = [B[k].x, B[k].y, B[k].z];
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        M[i*3+j] += hArr[i] * bArr[j];
+      }
+    }
+  }
+
+  const { U, V } = svd3x3Sym(M);
+
+  // Handle reflection: d = sign(det(V * U^T))
+  const VUt = mat3Mul(V, mat3Transpose(U));
+  const d = mat3Det(VUt) >= 0 ? 1 : -1;
+  const D: Mat3 = [1,0,0, 0,1,0, 0,0,d];
+  const R = mat3Mul(mat3Mul(V, D), mat3Transpose(U));
+
+  // Build rotation matrix and quaternion
+  const m4 = new THREE.Matrix4();
+  m4.set(
+    R[0], R[1], R[2], 0,
+    R[3], R[4], R[5], 0,
+    R[6], R[7], R[8], 0,
+    0,    0,    0,    1
+  );
+  const rotation = new THREE.Quaternion().setFromRotationMatrix(m4);
+
+  // Translation: t = tgtCentroid - R * srcCentroid
+  const rotatedSrcC = new THREE.Vector3(
+    R[0]*srcC.x + R[1]*srcC.y + R[2]*srcC.z,
+    R[3]*srcC.x + R[4]*srcC.y + R[5]*srcC.z,
+    R[6]*srcC.x + R[7]*srcC.y + R[8]*srcC.z
+  );
+  const translation = tgtC.clone().sub(rotatedSrcC);
+
+  // Residual: RMSE after alignment
+  const rotMatrix = new THREE.Matrix3();
+  rotMatrix.set(R[0],R[1],R[2], R[3],R[4],R[5], R[6],R[7],R[8]);
+  let residual = 0;
+  for (let k = 0; k < srcPts.length; k++) {
+    const rp = srcPts[k].clone().applyMatrix3(rotMatrix).add(translation);
+    residual += rp.distanceToSquared(tgtPts[k]);
+  }
+  residual = Math.sqrt(residual / srcPts.length);
+
+  return { rotation, translation, residualError: residual };
+}
+
+// ---------------------------------------------------------------------------
 // Solver: single planar face pair
 // ---------------------------------------------------------------------------
 
@@ -132,6 +296,7 @@ function solvePlanePair(
   return {
     translation: vec3ToTuple(translation),
     rotation: quatToTuple(rotation),
+    solutionType: 'absolute_world',
     approachDirection: vec3ToTuple(approachDirection),
     usedPairs: [pair],
     method: 'plane_align',
@@ -198,7 +363,9 @@ function solvePegHolePair(
   // We want the tip to align with hole center, so:
   // rotatedPegCenter + insertionOffset * (-holeAxis) = holeCenterWorld
   // => translation = holeCenterWorld - insertionOffset * (-holeAxis) - rotatedPegCenter
-  const pegAxisAfterRotation = pegAxisWorld.clone().applyQuaternion(applyToSource ? rotation : new THREE.Quaternion()).normalize();
+  const pegAxisAfterRotation = pegAxisWorld.clone()
+    .applyQuaternion(applyToSource ? rotation : new THREE.Quaternion())
+    .normalize();
   const tipOffset = pegAxisAfterRotation.clone().multiplyScalar(insertionOffset);
 
   const translation = holeCenterWorld.clone()
@@ -216,6 +383,7 @@ function solvePegHolePair(
   return {
     translation: vec3ToTuple(translation),
     rotation: quatToTuple(applyToSource ? rotation : new THREE.Quaternion()),
+    solutionType: 'absolute_world',
     approachDirection: vec3ToTuple(approachDirection),
     usedPairs: [pair],
     method: 'peg_slot',
@@ -325,6 +493,7 @@ function solveTwoPairAlignment(
   return {
     translation: vec3ToTuple(combinedTranslation),
     rotation: quatToTuple(combinedRotation),
+    solutionType: 'absolute_world',
     approachDirection: primarySolution.approachDirection,
     usedPairs: [primaryPair, secondaryPair],
     method: 'point_align',
@@ -424,6 +593,7 @@ function solveGenericAxisAlign(
     return {
       translation: vec3ToTuple(translation),
       rotation: quatToTuple(rotation),
+      solutionType: 'absolute_world',
       approachDirection: vec3ToTuple(tgtAxisWorld.clone().negate()),
       usedPairs: [pair],
       method: 'axis_align',
@@ -433,6 +603,130 @@ function solveGenericAxisAlign(
   } catch (err) {
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Solver: pattern alignment (Kabsch SVD, ≥2 matched pairs)
+// ---------------------------------------------------------------------------
+
+/**
+ * Solve multi-point rigid alignment using the Kabsch algorithm.
+ *
+ * Takes ≥2 matched feature pairs (e.g. peg↔hole pairs in a bolt-circle pattern)
+ * and finds the optimal rotation + translation to align source to target.
+ *
+ * Falls back to single-pair solve if Kabsch fails or < 2 valid pairs.
+ */
+function solvePatternAlign(
+  sourceObj: THREE.Object3D,
+  targetObj: THREE.Object3D,
+  featurePairs: FeaturePair[]
+): AlignmentSolution | null {
+  sourceObj.updateWorldMatrix(true, true);
+  targetObj.updateWorldMatrix(true, true);
+
+  const srcPts: THREE.Vector3[] = [];
+  const tgtPts: THREE.Vector3[] = [];
+  const diagnostics: string[] = [];
+
+  for (const pair of featurePairs) {
+    const sf = pair.sourceFeature;
+    const tf = pair.targetFeature;
+    // Get world positions (prefer cached worldPosition, fallback to local + matrixWorld)
+    const srcWorld = sf.pose.worldPosition
+      ? new THREE.Vector3(...sf.pose.worldPosition)
+      : new THREE.Vector3(...sf.pose.localPosition).applyMatrix4(sourceObj.matrixWorld);
+    const tgtWorld = tf.pose.worldPosition
+      ? new THREE.Vector3(...tf.pose.worldPosition)
+      : new THREE.Vector3(...tf.pose.localPosition).applyMatrix4(targetObj.matrixWorld);
+    srcPts.push(srcWorld);
+    tgtPts.push(tgtWorld);
+  }
+
+  if (srcPts.length < 2) {
+    diagnostics.push('pattern_align fallback: < 2 pairs, using primary-pair solve');
+    const fallback = solveSinglePair(sourceObj, targetObj, featurePairs[0]);
+    if (fallback) {
+      return { ...fallback, diagnostics: [...fallback.diagnostics, ...diagnostics] };
+    }
+    return null;
+  }
+
+  const result = kabschSolve(srcPts, tgtPts);
+  if (!result) {
+    diagnostics.push('Kabsch solve failed — falling back to primary pair');
+    const fallback = solveSinglePair(sourceObj, targetObj, featurePairs[0]);
+    if (fallback) {
+      return { ...fallback, diagnostics: [...fallback.diagnostics, ...diagnostics] };
+    }
+    return null;
+  }
+
+  // Apply solved rotation + translation to source world position to get new world position.
+  // The Kabsch result: R rotates source feature cloud to align with target feature cloud,
+  // and T = tgtCentroid - R * srcCentroid gives the world-space delta.
+  // New world position of source = R * srcWorldPos + T
+  const srcWorldPos = new THREE.Vector3();
+  sourceObj.getWorldPosition(srcWorldPos);
+
+  const rotMatrix = new THREE.Matrix3();
+  const rotQ = result.rotation;
+  // Convert quaternion to rotation matrix elements
+  const m4tmp = new THREE.Matrix4();
+  m4tmp.makeRotationFromQuaternion(rotQ);
+  rotMatrix.setFromMatrix4(m4tmp);
+  const newWorldPos = srcWorldPos.clone().applyMatrix3(rotMatrix).add(result.translation);
+
+  // Convert new world position to parent-local space
+  const parent = sourceObj.parent;
+  let newLocalPos: THREE.Vector3;
+  if (parent) {
+    const parentWorldInv = new THREE.Matrix4().copy(parent.matrixWorld).invert();
+    newLocalPos = newWorldPos.clone().applyMatrix4(parentWorldInv);
+  } else {
+    newLocalPos = newWorldPos;
+  }
+
+  // Compute new world quaternion: newWorldQuat = R * srcWorldQuat
+  const srcWorldQuat = new THREE.Quaternion();
+  sourceObj.getWorldQuaternion(srcWorldQuat);
+  const newWorldQuat = rotQ.clone().multiply(srcWorldQuat);
+
+  // Convert to parent-local quaternion
+  let newLocalQuat: THREE.Quaternion;
+  if (parent) {
+    const parentWorldQuat = new THREE.Quaternion();
+    parent.getWorldQuaternion(parentWorldQuat);
+    newLocalQuat = parentWorldQuat.clone().invert().multiply(newWorldQuat);
+  } else {
+    newLocalQuat = newWorldQuat;
+  }
+
+  // Approach direction = mean of (targetPt - srcPt) directions
+  const approach = new THREE.Vector3();
+  for (let i = 0; i < srcPts.length; i++) {
+    approach.add(tgtPts[i].clone().sub(srcPts[i]));
+  }
+  approach.divideScalar(srcPts.length).normalize();
+
+  diagnostics.push(
+    `pattern_align: used ${featurePairs.length} pairs, residual=${result.residualError.toFixed(4)}m`
+  );
+  if (result.residualError > 0.005) {
+    diagnostics.push(`WARNING: high residual error ${result.residualError.toFixed(4)}m`);
+  }
+
+  return {
+    translation: [newLocalPos.x, newLocalPos.y, newLocalPos.z],
+    rotation: [newLocalQuat.x, newLocalQuat.y, newLocalQuat.z, newLocalQuat.w],
+    solutionType: 'absolute_world',
+    approachDirection: [approach.x, approach.y, approach.z],
+    usedPairs: featurePairs,
+    method: 'pattern_align',
+    residualError: result.residualError,
+    patternPairCount: featurePairs.length,
+    diagnostics,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +829,9 @@ export function estimateInsertionFeasibility(
  * @param featurePairs - Feature pairs from featureMatcher.generateMatingCandidates()
  * @param method - Solver method override ('auto' = dispatch based on feature types)
  * @returns AlignmentSolution or null if solving fails
+ *
+ * NOTE: AlignmentSolution.solutionType is always 'absolute_world'. The translation and
+ * rotation fields represent absolute world pose for the source part, NOT a delta.
  */
 export function solveAlignment(
   sourceObj: THREE.Object3D,
@@ -550,7 +847,36 @@ export function solveAlignment(
 
     const effectiveMethod = method ?? 'auto';
 
-    // Auto dispatch
+    // pattern_align: use Kabsch SVD when ≥2 pairs are provided
+    if (effectiveMethod === 'pattern_align') {
+      return solvePatternAlign(sourceObj, targetObj, featurePairs);
+    }
+
+    // Auto dispatch: use pattern_align for multi-pair peg/hole combos
+    if (effectiveMethod === 'auto' && featurePairs.length >= 2) {
+      const allPegHole = featurePairs.every(p => {
+        const st = p.sourceFeature.type;
+        const tt = p.targetFeature.type;
+        return (
+          (st === 'peg' && (tt === 'cylindrical_hole' || tt === 'blind_hole')) ||
+          ((st === 'cylindrical_hole' || st === 'blind_hole') && tt === 'peg') ||
+          (st === 'cylindrical_hole' && tt === 'cylindrical_hole')
+        );
+      });
+      if (allPegHole) {
+        return solvePatternAlign(sourceObj, targetObj, featurePairs);
+      }
+      // Try two-pair alignment for better constraint (mixed types)
+      const solution = solveTwoPairAlignment(
+        sourceObj,
+        targetObj,
+        featurePairs[0],
+        featurePairs[1]
+      );
+      if (solution) return solution;
+    }
+
+    // Auto dispatch for single pair or plane_align
     if (effectiveMethod === 'auto' || effectiveMethod === 'plane_align') {
       if (featurePairs.length >= 2) {
         // Try two-pair alignment for better constraint
@@ -572,12 +898,6 @@ export function solveAlignment(
 
     if (effectiveMethod === 'axis_align') {
       return solveGenericAxisAlign(sourceObj, targetObj, featurePairs[0]);
-    }
-
-    // pattern_align: TODO(v3-geometry): implement for bolt-circle patterns
-    if (effectiveMethod === 'pattern_align') {
-      console.warn('[featureSolver] pattern_align not yet implemented, falling back to single-pair');
-      return solveSinglePair(sourceObj, targetObj, featurePairs[0]);
     }
 
     // Default fallback

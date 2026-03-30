@@ -16,7 +16,7 @@ import { readFile } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { callAgentLlm } from './agentLlm.js';
-import { findRecipe, getLearningContext } from './mateRecipes.js';
+import { findRecipe, getLearningContext, getDemonstrationLearningContext } from './mateRecipes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROMPTS_DIR = path.resolve(__dirname, '../../../agent-prompts');
@@ -215,13 +215,18 @@ export async function inferMateParams(
     };
   }
 
-  const [systemPromptBase, learningContext] = await Promise.all([
+  const [systemPromptBase, recipeContext, demoContext] = await Promise.all([
     loadSkillPrompt(),
     getLearningContext(),
+    getDemonstrationLearningContext({
+      sourcePartName: input.sourcePart.name,
+      targetPartName: input.targetPart.name,
+    }),
   ]);
-  // Inject learned patterns before the skill docs so they take precedence
-  const systemPrompt = learningContext
-    ? `${learningContext}\n\n---\n\n${systemPromptBase}`
+  // Inject learned patterns + demo context before the skill docs so they take precedence
+  const combinedContext = [recipeContext, demoContext].filter(Boolean).join('\n\n');
+  const systemPrompt = combinedContext
+    ? `${combinedContext}\n\n---\n\n${systemPromptBase}`
     : systemPromptBase;
   const userMessage = buildUserMessage(input);
 

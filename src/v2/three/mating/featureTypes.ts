@@ -135,10 +135,18 @@ export type FeaturePair = {
 
 /** The rigid transform solution that aligns source to target. */
 export type AlignmentSolution = {
-  /** World-space translation to apply to source part */
+  /**
+   * ALWAYS absolute world-space position for the source part after alignment.
+   * NOT a delta. Apply this directly as the part's new world position.
+   */
   translation: [number, number, number];
-  /** World-space rotation quaternion [x, y, z, w] */
+  /**
+   * ALWAYS absolute world-space quaternion [x,y,z,w] for the source part after alignment.
+   * NOT a delta rotation.
+   */
   rotation: [number, number, number, number];
+  /** Marks this as absolute world pose (not a delta transform) */
+  solutionType: 'absolute_world';
   /** Approach direction (unit vector, world space) — direction source moves toward target */
   approachDirection: [number, number, number];
   /** Which feature pairs were used to compute this solution */
@@ -147,6 +155,8 @@ export type AlignmentSolution = {
   method: 'axis_align' | 'point_align' | 'plane_align' | 'pattern_align' | 'peg_slot' | 'socket_insert';
   /** Residual error after solving (meters) */
   residualError: number;
+  /** Number of feature pairs used in pattern_align solve (≥2 when method='pattern_align') */
+  patternPairCount?: number;
   /** Solver diagnostic messages */
   diagnostics: string[];
 };
@@ -341,10 +351,12 @@ export const FeaturePairSchema = z.object({
 export const AlignmentSolutionSchema = z.object({
   translation: Vec3TupleSchema,
   rotation: Vec4TupleSchema,
+  solutionType: z.literal('absolute_world'),
   approachDirection: Vec3TupleSchema,
   usedPairs: z.array(FeaturePairSchema),
   method: z.enum(['axis_align', 'point_align', 'plane_align', 'pattern_align', 'peg_slot', 'socket_insert']),
   residualError: z.number().nonnegative(),
+  patternPairCount: z.number().int().positive().optional(),
   diagnostics: z.array(z.string()),
 });
 

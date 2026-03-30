@@ -19,11 +19,15 @@ Status as of 2026-03-27. Honest assessment of what works and what is heuristic/s
 - Multi-hole per face: implemented. Known weak edge: holes closer than ~5mm may merge.
 
 ### slot
-- **First version.** Uses 2D PCA on all vertices of a planar cluster.
-- Detects the overall shape of the face, not individual slot pockets.
-- Aspect ratio threshold is 2.0 — may produce false positives on elongated flat faces.
-- Depth is estimated as `width * 0.5` — not measured from geometry.
-- `localSecondaryAxis` is the PCA principal axis, not necessarily the slot opening direction.
+- **Two-level detection** implemented (2026-03-30).
+- **Level A** — recess-vertex detection: finds vertices behind a support face, projects to 2D,
+  grid-clusters at 3mm, emits slot if aspect ratio > 1.3 and depth > 0.5mm. Confidence ≤ 0.70.
+  Guards: rejects circular clusters (could be holes), requires width > 1mm, length > 3mm.
+- **Level B** — PCA elongated-face fallback: retained from original, confidence lowered to ≤ 0.35.
+  Only emitted when Level A found no slot on that face.
+- Circular cluster guard: linear fit RMSE vs circle fit RMSE. If circle RMSE < linear RMSE
+  and inlierRatio > 0.6, cluster is treated as hole, not slot.
+- Depth: Level A uses actual max recess distance. Level B still uses `width * 0.5` estimate.
 
 ### peg
 - **Heuristic.** Works for any support face orientation (not just world-up).
@@ -52,7 +56,12 @@ Status as of 2026-03-27. Honest assessment of what works and what is heuristic/s
 - Secondary constraint degeneracy path falls back to primary-only.
 
 ### pattern_align
-- **Stub.** Falls back to single-pair.
+- **Implemented** (2026-03-30). Uses Kabsch SVD on ≥2 matched feature-pair world positions.
+- 3×3 SVD via Jacobi eigendecomposition of A^T A (50 iterations — reliable for 3×3).
+- Reflection detection via `sign(det(V * U^T))`.
+- Falls back to single-pair solve if < 2 valid pairs or Kabsch fails.
+- `AlignmentSolution.solutionType = 'absolute_world'` — output is absolute world pose, not delta.
+- `patternPairCount` field records how many pairs were used.
 
 ---
 
@@ -69,18 +78,19 @@ Status as of 2026-03-27. Honest assessment of what works and what is heuristic/s
 ## Candidate Registry
 
 - Session-scoped, module-level `Map`. Cleared on `resetRuntimeForNewScene`.
-- Keyed by `sourcePartId:targetPartId`. Reverse direction (tgt→src) is not stored.
+- Keyed by **canonical sorted key** (`min(srcId,tgtId):max(srcId,tgtId)`). Both `A:B` and `B:A`
+  lookups resolve to the same candidates (2026-03-30).
 - Candidates expire when the scene loads a new model.
 
 ---
 
 ## VLM Rerank
 
-- `scoreBreakdown.vlmRerank` field exists but is **not populated** by any current code path.
-- `vlm.capture_for_mate` + `structuredMate.ts` run independently and do not feed back
-  into `generateMatingCandidates`.
-- To connect: caller would need to run VLM analysis, parse result, and adjust candidate
-  scores manually.
+- **Integrated** (2026-03-30). `query.generate_candidates` accepts `vlmRerank?: boolean`.
+- When `vlmRerank=true`: top 3 candidates sent to `agent.vlm_rerank_candidates` in wsGateway.
+- LLM asked to score candidates 0–1 and optionally reject. Result merged into `scoreBreakdown.vlmRerank`.
+- Candidate totalScore adjusted: `totalScore += vlmRerank * 0.15`. Candidates re-sorted after rerank.
+- **Failure-safe**: if VLM rerank times out or errors, original candidates returned unmodified.
 
 ---
 
@@ -90,15 +100,16 @@ Status as of 2026-03-27. Honest assessment of what works and what is heuristic/s
   generalizedRule, chosenCandidateId.
 - When `chosenCandidateId` is in registry: serializes feature pairs + solver transform.
 - `chosenFeaturePairs` are **serialized** (plain IDs + scores) — full geometry is not stored.
-- Saved to `data/demonstrations.json` on the server. No indexing or retrieval API beyond
-  `agent.list_demonstrations`.
-- Demonstrations are **not yet injected** into the router agent's context automatically.
+- Saved to `data/demonstrations.json` on the server.
+- **Retrieval prior integrated** (2026-03-30): `findRelevantDemonstrations()` + `getDemonstrationLearningContext()`
+  in `mateRecipes.ts`. Scores on: part-name exact/partial match, feature type overlap, keyword match.
+- Demo context is **automatically injected** into `mateParamsInfer.ts` alongside recipe context.
+- `featureMatcher.ts` accepts `demonstrationPriors` option — boosts `recipePrior` score if top demo > 0.5.
 
 ---
 
 ## Known Not Implemented
 
-- `pattern_align` solver (bolt-circle, 4-hole patterns).
 - `tab` / `socket` / `rail` / `edge_notch` feature extraction (type exists, no extractor).
-- VLM rerank integration with candidate scores.
-- Reverse candidate lookup (target→source direction in registry).
+- Full geometry storage in demonstrations (only serialized IDs + scores).
+- `solveTwoPairAlignment` is still greedy sequential — not proper simultaneous SVD.

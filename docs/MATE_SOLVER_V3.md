@@ -30,7 +30,7 @@ Calls four sub-stages:
 1. `extractPlanarFaceFeatures` — wraps `clusterPlanarFaces`, emits `planar_face`
 2. `extractCircleHoleFeatures` — algebraic circle fit on plane projections, emits `cylindrical_hole`
 3. `extractPegFeatures` — spatial clustering above support plane + circle fit, emits `peg`
-4. `extractSlotFeatures` — stub, returns `[]`
+4. `extractSlotFeatures` — Level A (recess-vertex detection) + Level B (PCA fallback)
 
 **Output**: `AssemblyFeature[]` sorted by confidence descending.
 
@@ -92,11 +92,11 @@ Each `MatingCandidate` has a `scoreBreakdown`:
 | `axisAlignment` | 0.25 | How well axes align |
 | `faceSupportConsistency` | 0.15 | Backward compat: bottom↔top bonus |
 | `pairCompatibility` | 0.10 | Raw pair compatibility score |
-| `symmetryAmbiguityPenalty` | -0.1 | Penalizes planar-only (unconstrained rotation) |
-| `collisionPenalty` | 0 | TODO: not yet implemented |
-| `insertionFeasibility` | 1.0 | TODO: always 1.0 currently |
-| `recipePrior` | 0 | Set by caller if recipe lookup found a match |
-| `vlmRerank` | optional | Set by VLM reranking step (future) |
+| `symmetryAmbiguityPenalty` | -0.1 max | Penalizes planar-only; reduced by 0.1*(n-1) for multi-pair |
+| `collisionPenalty` | 0–1 | AABB overlap check after transform |
+| `insertionFeasibility` | 0–1 | Radius compatibility for peg-hole pairs |
+| `recipePrior` | 0–0.1 | Boosted by demonstration prior when topDemoScore > 0.5 |
+| `vlmRerank` | 0–1 optional | Set by `agent.vlm_rerank_candidates` when `vlmRerank=true` |
 
 `totalScore = clamp(0, 1, weighted sum - symmetryPenalty)`
 
@@ -131,12 +131,30 @@ Each `MatingCandidate` has a `scoreBreakdown`:
 1. Align source feature axis anti-parallel to target feature axis
 2. Translate center-to-center
 
-#### `pattern_align` — bolt-circle pattern (TODO)
-Not yet implemented; falls back to `single pair`.
+#### `pattern_align` — Kabsch SVD multi-point alignment (implemented 2026-03-30)
+Requires ≥2 matched feature pairs (e.g. peg↔hole bolt-circle pattern).
+
+**Algorithm (Kabsch)**:
+1. Collect world positions for each source feature and corresponding target feature
+2. Compute centroids (`srcC`, `tgtC`) and centered point sets (`H`, `B`)
+3. Cross-covariance matrix `M = H^T B` (3×3)
+4. SVD of M via 50-iteration Jacobi eigendecomposition of `M^T M`
+5. Check for reflection: `d = sign(det(V * U^T))`
+6. Rotation: `R = V * diag(1,1,d) * U^T`
+7. Translation: `t = tgtCentroid - R * srcCentroid`
+8. Residual: RMSE of aligned point pairs
+
+**Falls back** to single-pair solve when < 2 valid pairs or decomposition fails.
+
+**`solutionType: 'absolute_world'`**: all `AlignmentSolution` objects mark their
+`translation` and `rotation` as absolute world pose (not a delta). Apply directly
+as the part's new world position/quaternion.
+
+**`patternPairCount`**: records number of pairs used (≥2 when `method='pattern_align'`).
 
 ---
 
-## VLM Reranking (Future)
+## VLM Reranking
 
 After candidate generation, VLM (vision-language model) can rerank candidates by:
 1. Capturing multi-angle renders of source and target parts

@@ -11,7 +11,11 @@ The system learns from human corrections at two levels:
 
 A third level (new in v3):
 3. **DemonstrationRecord** — richer learning signal with scene context, feature pairs,
-   and the human's own words. Used for future imitation learning.
+   and the human's own words.
+
+A fourth level (implemented 2026-03-30):
+4. **Demonstration Retrieval Prior** — scored similarity search against saved demonstrations,
+   injected into LLM prompts and candidate scoring without requiring exact part-name match.
 
 ---
 
@@ -108,17 +112,47 @@ the user explicitly confirms a candidate from `query.generate_candidates`.
 
 ---
 
+## Level 4: Demonstration Retrieval Prior (implemented 2026-03-30)
+
+**API**: `findRelevantDemonstrations()` and `getDemonstrationLearningContext()` in `mateRecipes.ts`
+
+**Scoring algorithm**:
+- Part name exact match (either order): +0.6
+- Part name partial/substring match: +0.3
+- Feature type overlap (fraction of featureTypes in demo's pairs): +0 to +0.3
+- Keyword match in `generalizedRule` or `textExplanation`: +0 to +0.1
+
+**Injection path**: `mateParamsInfer.ts` calls both `getLearningContext()` (recipe patterns)
+and `getDemonstrationLearningContext()` in parallel, combines them, and prepends to the LLM
+system prompt. This means ALL saved demonstrations influence future LLM decisions.
+
+**Candidate scoring**: `featureMatcher.ts` accepts `options.demonstrationPriors`. When the
+highest relevant demo score > 0.5, `scoreBreakdown.recipePrior += 0.1 * topDemoScore`.
+
+**Example injected text**:
+```
+## Relevant Assembly Demonstrations
+(retrieved for: HOR_FAN_LEFT ↔ HOR_FAN_RIGHT)
+
+Demo #1 (score=0.90, part match): HOR_FAN_LEFT ↔ HOR_FAN_RIGHT
+  Reason: Side-by-side fans connect laterally, not top/bottom
+  Rule: When identical parts are horizontally adjacent, use lateral faces
+  Anti-pattern: Do NOT stack (top/bottom)
+```
+
+---
+
 ## Comparison
 
-| Property | Exact Recipe | Generalizable Pattern | Demonstration |
-|----------|-------------|----------------------|---------------|
-| Precision | Exact part pair | Similar situations | Any assembly |
-| LLM bypass | Yes | No (used as context) | No |
-| Feature-level | No | No | Yes (when candidate chosen) |
-| Scene context | No | No | Yes |
-| Human words | Optional | Optional | Required |
-| Storage | mate-recipes.json | (same file) | mate-demonstrations.json |
-| MCP tool | mate.save_recipe | mate.save_recipe | mate.record_demonstration |
+| Property | Exact Recipe | Generalizable Pattern | Demonstration | Retrieval Prior |
+|----------|-------------|----------------------|---------------|-----------------|
+| Precision | Exact part pair | Similar situations | Any assembly | Scored similarity |
+| LLM bypass | Yes | No (used as context) | No | No |
+| Feature-level | No | No | Yes (when candidate chosen) | Optional overlap |
+| Scene context | No | No | Yes | No |
+| Human words | Optional | Optional | Required | Via stored demo |
+| Storage | mate-recipes.json | (same file) | mate-demonstrations.json | (same) |
+| MCP tool | mate.save_recipe | mate.save_recipe | mate.record_demonstration | (automatic) |
 
 ---
 

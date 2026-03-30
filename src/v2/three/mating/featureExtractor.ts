@@ -659,14 +659,46 @@ export function extractPegFeatures(
 }
 
 // ---------------------------------------------------------------------------
-// Stage 4 — Slot detection via 2D PCA
+// Stage 4 — Slot detection: Level A (recess-vertex) + Level B (PCA fallback)
 // ---------------------------------------------------------------------------
 
 /**
- * Stage 4: Detect rectangular slot features on planar faces.
+ * Simple linear fit RMSE for a set of 2D points (tests how "elongated/linear" a cluster is).
+ * If circle RMSE < linear RMSE the cluster is likely circular, not a slot.
+ */
+function linearFitRmse2D(points: Array<[number, number]>): number {
+  if (points.length < 2) return Infinity;
+  const n = points.length;
+  let mx = 0, my = 0;
+  for (const [x, y] of points) { mx += x; my += y; }
+  mx /= n; my /= n;
+  let num = 0, den = 0;
+  for (const [x, y] of points) {
+    const dx = x - mx, dy = y - my;
+    num += dx * dy;
+    den += dx * dx;
+  }
+  const slope = den > 1e-12 ? num / den : 0;
+  const intercept = my - slope * mx;
+  let sumSq = 0;
+  for (const [x, y] of points) {
+    const yHat = slope * x + intercept;
+    sumSq += (y - yHat) ** 2;
+  }
+  return Math.sqrt(sumSq / n);
+}
+
+/**
+ * Stage 4: Detect rectangular slot / pocket features.
  *
- * For each planar cluster, projects to 2D, runs 2D PCA to find elongated
- * sub-regions, then emits slot features for groups with aspect ratio > 2.5.
+ * Level A — Recess-vertex detection (honest, confidence ≤ 0.70):
+ *   For each large planar cluster (support face, area > 0.002m²), finds vertices of the
+ *   SAME object that are recessed BEHIND the face (negative dot product with face normal).
+ *   Projects recessed vertices onto the face plane, grid-clusters in 2D, then for each
+ *   2D cluster with aspect ratio > 1.3 emits a slot feature.
+ *
+ * Level B — PCA elongated-face fallback (weaker, confidence ≤ 0.35):
+ *   Kept for backward compat, but only emitted when no Level-A slot was found on that face.
  */
 export function extractSlotFeatures(
   obj: THREE.Object3D,
@@ -676,6 +708,153 @@ export function extractSlotFeatures(
   try {
     const features: AssemblyFeature[] = [];
     obj.updateWorldMatrix(true, true);
+
+    // Collect all part-local vertices once
+    const allVerts = collectVerticesLocal(obj);
+
+    // Track which planar features already produced Level-A slots
+    const levelAFaceIds = new Set<string>();
+
+    // ── Level A: recess-vertex detection ──────────────────────────────────
+    for (const supportFace of planarFeatures) {
+      if (supportFace.partId !== partId) continue;
+      const faceArea = supportFace.dimensions.area ?? 0;
+      if (faceArea < 0.002) continue; // Only use faces > 2cm²
+
+      const normal = new THREE.Vector3(...supportFace.pose.localAxis);
+      const origin = new THREE.Vector3(...supportFace.pose.localPosition);
+      const planeD = normal.dot(origin);
+
+      // Build tangent frame for 2D projection
+      const uVec = stableTangent(normal);
+      const vVec = new THREE.Vector3().crossVectors(normal, uVec).normalize();
+
+      // Find vertices BEHIND this face (recessed): dot(v, normal) < planeD - epsilon
+      const recessedVerts: Array<{ uv: [number, number]; depth: number }> = [];
+      for (const vert of allVerts) {
+        const d = vert.dot(normal) - planeD;
+        if (d > -0.0005) continue; // not recessed (or on plane)
+        const depth = Math.abs(d);
+        const rel = vert.clone().sub(origin);
+        recessedVerts.push({ uv: [rel.dot(uVec), rel.dot(vVec)], depth });
+      }
+
+      if (recessedVerts.length < 8) continue;
+
+      // Grid-cluster the projected recessed vertices at 3mm
+      const BUCKET_SIZE = 0.003;
+      const pts2d: Array<[number, number]> = recessedVerts.map(r => r.uv);
+      const clusters2d = gridCluster2D(pts2d, BUCKET_SIZE);
+
+      for (const clusterPts of clusters2d) {
+        if (clusterPts.length < 8) continue;
+
+        // Guard: must be wide enough and long enough
+        let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+        for (const [u, v] of clusterPts) {
+          if (u < minU) minU = u;
+          if (u > maxU) maxU = u;
+          if (v < minV) minV = v;
+          if (v > maxV) maxV = v;
+        }
+        const rangeU = maxU - minU;
+        const rangeV = maxV - minV;
+        const slotLength = Math.max(rangeU, rangeV);
+        const slotWidth = Math.min(rangeU, rangeV);
+
+        // Size guards
+        if (slotWidth < 0.001) continue;
+        if (slotLength < 0.003) continue;
+        if (slotLength / Math.max(slotWidth, 1e-9) < 1.3) continue;
+
+        // Guard: check if cluster is circular (then it's a hole, not a slot)
+        const circleFit = fitCircleToPoints2D(clusterPts);
+        if (circleFit) {
+          const linearRmse = linearFitRmse2D(clusterPts);
+          // If circle is a better fit than linear, skip (it's a hole, not a slot)
+          if (circleFit.residual * circleFit.r < linearRmse && circleFit.inlierRatio > 0.6) {
+            continue;
+          }
+        }
+
+        // PCA to get oriented bounding box (aspect ratio and long axis)
+        const pcaResult = pca2D(clusterPts);
+        const aspectRatio = pcaResult.lambda2 > 1e-12
+          ? Math.sqrt(pcaResult.lambda1 / pcaResult.lambda2)
+          : 1;
+        if (aspectRatio < 1.3) continue;
+
+        // Compute length/width from PCA-aligned bounding box
+        const { axis1, axis2, centroid } = pcaResult;
+        let minL = Infinity, maxL = -Infinity, minW = Infinity, maxW = -Infinity;
+        for (const [px, py] of clusterPts) {
+          const dx = px - centroid[0], dy = py - centroid[1];
+          const l = dx * axis1[0] + dy * axis1[1];
+          const w = dx * axis2[0] + dy * axis2[1];
+          if (l < minL) minL = l;
+          if (l > maxL) maxL = l;
+          if (w < minW) minW = w;
+          if (w > maxW) maxW = w;
+        }
+        const length = maxL - minL;
+        const width = maxW - minW;
+
+        if (length < 0.003 || width < 0.001) continue;
+        if (length / Math.max(width, 1e-9) < 1.3) continue;
+
+        // Compute depth: max recess distance in this cluster (by matching 2D positions back)
+        const clusterSet = new Set(clusterPts.map(p => `${p[0].toFixed(6)},${p[1].toFixed(6)}`));
+        let maxDepth = 0;
+        for (const { uv, depth } of recessedVerts) {
+          if (clusterSet.has(`${uv[0].toFixed(6)},${uv[1].toFixed(6)}`)) {
+            if (depth > maxDepth) maxDepth = depth;
+          }
+        }
+        if (maxDepth < 0.0005) continue; // depth guard
+
+        // Slot center in 3D
+        const slotCenter3d = origin.clone()
+          .addScaledVector(uVec, centroid[0])
+          .addScaledVector(vVec, centroid[1]);
+
+        // Long axis in 3D
+        const longAxis3d = uVec.clone().multiplyScalar(axis1[0])
+          .addScaledVector(vVec, axis1[1]).normalize();
+
+        const localPos: [number, number, number] = [slotCenter3d.x, slotCenter3d.y, slotCenter3d.z];
+        const localAxis: [number, number, number] = [normal.x, normal.y, normal.z];
+        const localSecondaryAxis: [number, number, number] = [longAxis3d.x, longAxis3d.y, longAxis3d.z];
+
+        const slotDims: FeatureDimensions = {
+          length,
+          width,
+          depth: maxDepth,
+          tolerance: Math.max(0.0005, width * 0.05),
+        };
+
+        // Confidence: Level A — capped at 0.70 (still heuristic)
+        const confidence = Math.min(0.70,
+          0.45 + 0.05 * Math.min(5, aspectRatio - 1.3) + 0.10 * Math.min(1, maxDepth / 0.005)
+        );
+
+        features.push({
+          id: crypto.randomUUID(),
+          type: 'slot',
+          partId,
+          pose: { localPosition: localPos, localAxis, localSecondaryAxis },
+          dimensions: slotDims,
+          semanticRole: 'receive',
+          supportFaceNormal: supportFace.pose.localAxis,
+          confidence,
+          label: `slot ${(length * 1000).toFixed(1)}×${(width * 1000).toFixed(1)}mm d=${(maxDepth * 1000).toFixed(1)}mm`,
+          extractedBy: 'slot_detect',
+        });
+        levelAFaceIds.add(supportFace.id);
+      }
+    }
+
+    // ── Level B: PCA elongated-face fallback (lower confidence) ───────────
+    // Only emitted when no Level-A slot was found on that face.
     const worldInv = new THREE.Matrix4().copy(obj.matrixWorld).invert();
 
     obj.traverse((child) => {
@@ -709,6 +888,9 @@ export function extractSlotFeatures(
 
       for (const planarFeature of planarFeatures) {
         if (planarFeature.partId !== partId) continue;
+        // Skip if Level A already found a slot on this face
+        if (levelAFaceIds.has(planarFeature.id)) continue;
+
         const normal = new THREE.Vector3(...planarFeature.pose.localAxis);
         const planeOrigin = new THREE.Vector3(...planarFeature.pose.localPosition);
 
@@ -759,7 +941,7 @@ export function extractSlotFeatures(
         const longAxis3d = uVec.clone().multiplyScalar(axis1[0])
           .addScaledVector(vVec, axis1[1]).normalize();
 
-        // Depth estimate: look for opposing face or use width * 0.5
+        // Depth estimate: use width * 0.5 (weak estimate)
         const depth = width * 0.5;
 
         const localPos: [number, number, number] = [slotCenter3d.x, slotCenter3d.y, slotCenter3d.z];
@@ -773,7 +955,8 @@ export function extractSlotFeatures(
           tolerance: Math.max(0.0005, width * 0.05),
         };
 
-        const slotFeature: AssemblyFeature = {
+        // Level B: lower confidence cap (0.35) — weak evidence
+        features.push({
           id: crypto.randomUUID(),
           type: 'slot',
           partId,
@@ -781,11 +964,10 @@ export function extractSlotFeatures(
           dimensions: slotDims,
           semanticRole: 'receive',
           supportFaceNormal: planarFeature.pose.localAxis,
-          confidence: Math.min(0.7, (aspectRatio - 2.0) / 5.0 * 0.5 + 0.2),
-          label: `slot ${(length * 1000).toFixed(1)}×${(width * 1000).toFixed(1)}mm`,
+          confidence: Math.min(0.35, (aspectRatio - 2.0) / 5.0 * 0.2 + 0.15),
+          label: `slot ${(length * 1000).toFixed(1)}×${(width * 1000).toFixed(1)}mm (PCA fallback)`,
           extractedBy: 'slot_detect',
-        };
-        features.push(slotFeature);
+        });
       }
     });
 

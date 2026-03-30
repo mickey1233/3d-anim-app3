@@ -30,7 +30,9 @@ import type { MatingCandidate } from '../three/mating/featureTypes';
 const candidateRegistry = new Map<string, MatingCandidate[]>();
 
 function candidateRegistryKey(srcId: string, tgtId: string): string {
-  return `${srcId}:${tgtId}`;
+  // Canonical order so A:B and B:A find the same candidates (bidirectional lookup)
+  const [a, b] = [srcId, tgtId].sort();
+  return `${a}:${b}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -5208,7 +5210,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
 
   // ── query.generate_candidates ──────────────────────────────────────────────
   if (tool === 'query.generate_candidates') {
-    const input = args as { sourcePart: PartRef; targetPart: PartRef; maxCandidates?: number };
+    const input = args as { sourcePart: PartRef; targetPart: PartRef; maxCandidates?: number; vlmRerank?: boolean };
     const sourcePart = resolvePart(input.sourcePart);
     const targetPart = resolvePart(input.targetPart);
 
@@ -5257,6 +5259,43 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       targetObj
     );
 
+    // Optional VLM rerank: send top 3 candidates to LLM for semantic reranking
+    const vlmRerank = input.vlmRerank === true;
+    if (vlmRerank && candidates.length > 0) {
+      try {
+        const top3 = candidates.slice(0, 3);
+        const rrPayload = {
+          source: sourcePart.partName,
+          target: targetPart.partName,
+          candidates: top3.map(c => ({
+            id: c.id,
+            description: c.description,
+            primaryFeatureTypes: c.featurePairs.length > 0
+              ? [c.featurePairs[0].sourceFeature.type, c.featurePairs[0].targetFeature.type]
+              : [],
+            score: c.totalScore,
+          })),
+        };
+        const rrRes: any = await v2Client.request('agent.vlm_rerank_candidates', rrPayload)
+          .catch(() => null);
+        if (rrRes?.reranked && Array.isArray(rrRes.reranked)) {
+          for (const rr of rrRes.reranked) {
+            const c = candidates.find(x => x.id === rr.candidateId);
+            if (c && typeof rr.semanticScore === 'number') {
+              c.scoreBreakdown.vlmRerank = rr.semanticScore;
+              c.totalScore = Math.min(1, c.totalScore + rr.semanticScore * 0.15);
+              if (rr.reason) c.diagnostics.push(`vlm_rerank: ${rr.reason}`);
+            }
+          }
+          // Re-sort after rerank
+          candidates.sort((a, b) => b.totalScore - a.totalScore);
+        }
+      } catch {
+        // VLM rerank is best-effort — log warning and continue
+        console.warn('[mcpToolExecutor] query.generate_candidates VLM rerank failed — returning original candidates');
+      }
+    }
+
     // Store full candidates in registry for later lookup
     const regKey = candidateRegistryKey(sourcePart.partId, targetPart.partId);
     candidateRegistry.set(regKey, candidates);
@@ -5287,6 +5326,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       debug: {
         sourceFeatureCount: sourceFeatures.length,
         targetFeatureCount: targetFeatures.length,
+        vlmRerank,
       },
     });
   }
