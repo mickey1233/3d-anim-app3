@@ -20,6 +20,8 @@ import { generateMatingCandidates } from '../three/mating/featureMatcher';
 import { solveAlignment } from '../three/mating/featureSolver';
 import { scoreSolvers } from '../three/mating/solverScoring';
 import type { MatingCandidate, DemonstrationPriorScore } from '../three/mating/featureTypes';
+import { groundObjects } from '../three/grounding/objectGrounder';
+import { getAllCards, getCard, registerPartBasic, applyVlmLabel, clearRegistry } from '../three/grounding/partSemanticRegistry';
 
 // ---------------------------------------------------------------------------
 // Candidate registry — session-scoped, cleared on scene reset
@@ -755,6 +757,7 @@ function resetRuntimeForNewScene() {
   runtimeState.rotateSessions.clear();
   runtimeState.interactionMode = 'move';
   candidateRegistry.clear();
+  clearRegistry();
 }
 
 function commitRevision(mutating: boolean) {
@@ -5698,6 +5701,87 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     }
 
     return ok({ demonstrationId, saved }, { mutating: false });
+  }
+
+  // ── query.ground_objects_from_utterance ────────────────────────────────────
+  if (tool === 'query.ground_objects_from_utterance') {
+    const input = args as {
+      utterance: string;
+      selectedPartIds?: string[];
+      parsedSourceConcept?: string;
+      parsedTargetConcept?: string;
+    };
+
+    const result = groundObjects(input.utterance, {
+      selectedPartIds: input.selectedPartIds,
+      parsedConcepts: {
+        sourceConcept: input.parsedSourceConcept,
+        targetConcept: input.parsedTargetConcept,
+      },
+    });
+
+    return ok({
+      ...result,
+      // If exactly resolved, provide a summary for the agent
+      resolved: !result.needsClarification &&
+        result.sourceCandidates.length > 0 &&
+        result.targetCandidates.length > 0,
+      topSource: result.sourceCandidates[0] ?? null,
+      topTarget: result.targetCandidates[0] ?? null,
+    }, { mutating: false, debug: { diagnostics: result.diagnostics } });
+  }
+
+  // ── query.describe_scene_parts ─────────────────────────────────────────────
+  if (tool === 'query.describe_scene_parts') {
+    const input = args as { partIds?: string[]; includeUnlabeled?: boolean };
+    let cards = getAllCards();
+    if (input.partIds?.length) {
+      cards = cards.filter(c => input.partIds!.includes(c.partId));
+    }
+    if (!input.includeUnlabeled) {
+      cards = cards.filter(c => c.vlmCategory !== undefined);
+    }
+    return ok({
+      cards,
+      totalParts: getAllCards().length,
+      labeledParts: getAllCards().filter(c => c.vlmCategory).length,
+    }, { mutating: false });
+  }
+
+  // ── query.refresh_part_semantics ───────────────────────────────────────────
+  if (tool === 'query.refresh_part_semantics') {
+    const input = args as { partIds?: string[] };
+    const store = currentStore();
+    const allParts = Object.values(store.parts.byId);
+    const toRefresh = input.partIds?.length
+      ? allParts.filter(p => input.partIds!.includes(p.id))
+      : allParts;
+
+    const results: Array<{ partId: string; partName: string; status: 'queued' | 'skipped' }> = [];
+
+    for (const part of toRefresh.slice(0, 20)) {
+      // Register basic card (ensures it exists in registry)
+      registerPartBasic({
+        partId: part.id,
+        partName: part.name ?? part.id,
+      });
+
+      // Queue VLM labeling via WS request (non-blocking, best-effort)
+      v2Client.request('agent.label_part', {
+        partId: part.id,
+        partName: part.name ?? part.id,
+        geometrySummary: getCard(part.id)?.geometrySummary,
+      }).then((resp: unknown) => {
+        const r = resp as { label?: { vlmCategory?: string; vlmAliases?: string[]; vlmDescription?: string; vlmRoles?: string[]; confidence?: number } } | null;
+        if (r?.label) {
+          applyVlmLabel(part.id, r.label);
+        }
+      }).catch(() => { /* labeling is best-effort */ });
+
+      results.push({ partId: part.id, partName: part.name ?? part.id, status: 'queued' });
+    }
+
+    return ok({ queued: results.length, results }, { mutating: false });
   }
 
   throw new ToolExecutionError({

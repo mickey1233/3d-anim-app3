@@ -1653,6 +1653,93 @@ export const MCPToolSchemas = {
       diagnostics: z.array(z.string()),
     })),
   },
+
+  /**
+   * query.ground_objects_from_utterance — Map natural language part references to CAD part IDs.
+   * Upstream of assembly pipeline; uses VLM semantic registry + selection fallback.
+   */
+  'query.ground_objects_from_utterance': {
+    args: z.object({
+      utterance: z.string().min(1),
+      selectedPartIds: z.array(z.string()).optional(),
+      /** Pre-parsed concepts from LLM (optional, improves accuracy) */
+      parsedSourceConcept: z.string().optional(),
+      parsedTargetConcept: z.string().optional(),
+    }),
+    result: makeToolResultSchema(z.object({
+      sourceCandidates: z.array(z.object({
+        partId: z.string(),
+        partName: z.string(),
+        semanticLabel: z.string(),
+        score: z.number(),
+        reason: z.string(),
+        matchedSignals: z.array(z.string()),
+      })),
+      targetCandidates: z.array(z.object({
+        partId: z.string(),
+        partName: z.string(),
+        semanticLabel: z.string(),
+        score: z.number(),
+        reason: z.string(),
+        matchedSignals: z.array(z.string()),
+      })),
+      needsClarification: z.boolean(),
+      clarificationQuestion: z.string().optional(),
+      usedSelectionFallback: z.boolean(),
+      usedVlmRegistry: z.boolean(),
+      resolved: z.boolean(),
+      topSource: z.object({ partId: z.string(), partName: z.string(), semanticLabel: z.string(), score: z.number(), reason: z.string(), matchedSignals: z.array(z.string()) }).nullable(),
+      topTarget: z.object({ partId: z.string(), partName: z.string(), semanticLabel: z.string(), score: z.number(), reason: z.string(), matchedSignals: z.array(z.string()) }).nullable(),
+      diagnostics: z.array(z.string()),
+    })),
+  },
+
+  /**
+   * query.describe_scene_parts — Return semantic cards for scene parts.
+   */
+  'query.describe_scene_parts': {
+    args: z.object({
+      partIds: z.array(z.string()).optional(),
+      includeUnlabeled: z.boolean().optional(),
+    }),
+    result: makeToolResultSchema(z.object({
+      cards: z.array(z.object({
+        partId: z.string(),
+        partName: z.string(),
+        displayName: z.string().optional(),
+        geometrySummary: z.object({
+          bboxSize: z.tuple([z.number(), z.number(), z.number()]).optional(),
+          featureTypes: z.array(z.string()).optional(),
+          featureCount: z.number().optional(),
+        }),
+        vlmCategory: z.string().optional(),
+        vlmAliases: z.array(z.string()).optional(),
+        vlmDescription: z.string().optional(),
+        vlmRoles: z.array(z.string()).optional(),
+        confidence: z.number().optional(),
+        lastUpdatedAt: z.string().optional(),
+      })),
+      totalParts: z.number(),
+      labeledParts: z.number(),
+    })),
+  },
+
+  /**
+   * query.refresh_part_semantics — Queue VLM labeling for parts in the registry.
+   */
+  'query.refresh_part_semantics': {
+    args: z.object({
+      partIds: z.array(z.string()).optional(),
+    }),
+    result: makeToolResultSchema(z.object({
+      queued: z.number(),
+      results: z.array(z.object({
+        partId: z.string(),
+        partName: z.string(),
+        status: z.enum(['queued', 'skipped']),
+      })),
+    })),
+  },
 } as const;
 
 export type MCPToolRegistry = typeof MCPToolSchemas;
@@ -1723,6 +1810,9 @@ export const MCPToolNameSchema = z.enum([
   'mate.record_demonstration',
   'action.solve_candidate',
   'action.apply_candidate',
+  'query.ground_objects_from_utterance',
+  'query.describe_scene_parts',
+  'query.refresh_part_semantics',
 ]);
 
 const typedRequestSchemas = [
@@ -1790,6 +1880,9 @@ const typedRequestSchemas = [
   z.object({ tool: z.literal('mate.record_demonstration'), args: z.object({ sourcePartId: z.string(), targetPartId: z.string(), chosenCandidateId: z.string().optional(), textExplanation: z.string().optional(), antiPattern: z.string().optional(), generalizedRule: z.string().optional(), chosenFeaturePairs: z.array(z.object({ sourceFeatureId: z.string(), sourceFeatureType: z.string(), targetFeatureId: z.string(), targetFeatureType: z.string(), compatibilityScore: z.number(), dimensionFitScore: z.number(), axisAlignmentScore: z.number(), notes: z.array(z.string()) })).optional(), finalTransform: z.object({ translation: Vec3Schema, rotation: QuaternionSchema, approachDirection: Vec3Schema, method: z.string(), residualError: z.number() }).optional() }), meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('action.solve_candidate'), args: z.object({ sourcePart: PartRefSchema, targetPart: PartRefSchema, candidateId: z.string() }), meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('action.apply_candidate'), args: z.object({ sourcePart: PartRefSchema, targetPart: PartRefSchema, candidateId: z.string(), commit: z.boolean().optional().default(true), pushHistory: z.boolean().optional().default(true), stepLabel: z.string().optional() }), meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('query.ground_objects_from_utterance'), args: z.object({ utterance: z.string().min(1), selectedPartIds: z.array(z.string()).optional(), parsedSourceConcept: z.string().optional(), parsedTargetConcept: z.string().optional() }), meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('query.describe_scene_parts'), args: z.object({ partIds: z.array(z.string()).optional(), includeUnlabeled: z.boolean().optional() }), meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('query.refresh_part_semantics'), args: z.object({ partIds: z.array(z.string()).optional() }), meta: ToolMetaSchema.optional() }),
 ] as const;
 
 export const MCPToolRequestSchema = z.discriminatedUnion('tool', typedRequestSchemas);

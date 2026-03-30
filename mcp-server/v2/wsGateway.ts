@@ -16,6 +16,7 @@ import { saveRecipe, deleteRecipe, listRecipes, saveDemonstration, listDemonstra
 import type { DemonstrationPriorScore } from '../../shared/schema/assemblySemanticTypes.js';
 import { queryWeather, queryWebSearch } from './web/queryTools.js';
 import { getServerStatus } from './status/serverStatus.js';
+import { labelPart } from './vlm/partLabeler.js';
 
 const ToolProxyResultSchema = z.object({
   proxyId: z.string().min(1),
@@ -685,6 +686,57 @@ export class WsGatewayV2 {
               ...(featureTypeHints ? { featureTypes: featureTypeHints } : {}),
             });
             this.sendResponse(ws, parsed.data.id, true, { scores });
+            return;
+          }
+
+          if (parsed.data.command === 'agent.label_part') {
+            const { partId, partName, geometrySummary } = (parsed.data.args ?? {}) as {
+              partId: string;
+              partName: string;
+              geometrySummary?: { bboxSize?: [number, number, number]; featureTypes?: string[]; featureCount?: number };
+            };
+            try {
+              const label = await labelPart({ partName: partName ?? partId, geometrySummary });
+              this.sendResponse(ws, parsed.data.id, true, { partId, label });
+            } catch {
+              this.sendResponse(ws, parsed.data.id, true, { partId, label: null });
+            }
+            return;
+          }
+
+          if (parsed.data.command === 'agent.parse_grounding_concepts') {
+            const { utterance, scenePartNames } = (parsed.data.args ?? {}) as {
+              utterance: string;
+              scenePartNames?: string[];
+            };
+            try {
+              const { callAgentLlm } = await import('./router/agentLlm.js');
+              const systemPrompt = `You are a CAD assembly intent parser. Extract the source part concept and target part concept from the user's assembly command.
+
+Output ONLY valid JSON:
+{
+  "sourceConcept": "the thing that moves or gets attached, e.g. fan or 風扇",
+  "targetConcept": "the fixed reference part, e.g. chassis or 機殼",
+  "assemblyIntent": "mount|insert|cover|slide|screw|default",
+  "utteranceType": "explicit_names|deictic|conceptual|mixed|unknown",
+  "usesDeictic": false,
+  "confidence": 0.8
+}
+
+If the user uses deictic references (這個, this, etc.), set usesDeictic=true and leave sourceConcept/targetConcept empty.
+Available parts in scene: ${scenePartNames?.slice(0, 20).join(', ') ?? 'unknown'}`;
+
+              const result = await callAgentLlm(systemPrompt, `User command: "${utterance}"\nParse the assembly intent:`);
+              const text = result?.replyText?.trim() ?? '';
+              const s = text.indexOf('{'), e = text.lastIndexOf('}');
+              let parsedConcepts: unknown = null;
+              if (s >= 0 && e > s) {
+                try { parsedConcepts = JSON.parse(text.slice(s, e + 1)); } catch { /* */ }
+              }
+              this.sendResponse(ws, parsed.data.id, true, { concepts: parsedConcepts });
+            } catch {
+              this.sendResponse(ws, parsed.data.id, true, { concepts: null });
+            }
             return;
           }
 
