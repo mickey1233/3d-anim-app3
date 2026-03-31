@@ -112,10 +112,16 @@ function buildClarificationQuestion(
   concept: string,
   candidates: PartGroundingCandidate[]
 ): string {
-  const roleZh = role === 'source' ? '要移動的零件' : '固定的目標零件';
-  const names = candidates.slice(0, 4).map(c => c.partName).join('、');
-  const conceptStr = concept ? `"${concept}"` : '';
-  return `我找到${candidates.length}個可能的${conceptStr}候選：${names}。你要哪一個作為${roleZh}？`;
+  const names = candidates.slice(0, 4).map(c => {
+    const label = c.semanticLabel !== c.partName ? `${c.partName}（${c.semanticLabel}）` : c.partName;
+    return label;
+  }).join('、');
+
+  if (role === 'source') {
+    return `我找到 ${candidates.length} 個可能符合「${concept}」的零件：${names}。你想移動哪一個？`;
+  } else {
+    return `我找到 ${candidates.length} 個可能的「${concept}」：${names}。你要組裝到哪一個上？`;
+  }
 }
 
 // ── Main grounding function ───────────────────────────────────────────────────
@@ -199,12 +205,25 @@ export function groundObjects(utterance: string, options: GroundingOptions = {})
         sourceCandidates: [src],
         targetCandidates: [],
         needsClarification: true,
-        clarificationQuestion: `已選取 "${selectedCards[0].partName}" 作為來源零件。請指定要組裝到哪個目標零件？`,
+        clarificationQuestion: `已辨識「${selectedCards[0].partName}」${selectedCards[0].vlmCategory ? `（${selectedCards[0].vlmCategory}）` : ''}為來源零件。請指定要組裝到哪個目標零件？`,
         usedSelectionFallback: true,
         usedVlmRegistry,
         diagnostics,
       };
     }
+  }
+
+  // Deictic with no selection
+  if (concepts.usesDeictic && selectedSet.size === 0) {
+    return {
+      sourceCandidates: [],
+      targetCandidates: [],
+      needsClarification: true,
+      clarificationQuestion: '你說的「這個」是指哪個零件？請在場景中選取它，或告訴我名稱。',
+      usedSelectionFallback: false,
+      usedVlmRegistry,
+      diagnostics: [...diagnostics, 'Deictic reference but nothing selected'],
+    };
   }
 
   // ── Semantic registry search ──────────────────────────────────────────────
@@ -279,11 +298,11 @@ export function groundObjects(utterance: string, options: GroundingOptions = {})
   let clarificationQuestion: string | undefined;
   if (needsClarification) {
     if (sourceCandidates.length === 0 && concepts.sourceConcept) {
-      clarificationQuestion = `我找不到符合"${concepts.sourceConcept}"的零件。請告訴我更多細節或直接選取零件。`;
+      clarificationQuestion = `我在場景中找不到符合「${concepts.sourceConcept}」的零件。你可以直接選取它，或告訴我更精確的名稱。`;
     } else if (srcAmbiguous && concepts.sourceConcept) {
       clarificationQuestion = buildClarificationQuestion('source', concepts.sourceConcept, sourceCandidates);
     } else if (targetCandidates.length === 0 && concepts.targetConcept) {
-      clarificationQuestion = `我找不到符合"${concepts.targetConcept}"的零件。請告訴我更多細節或直接選取目標零件。`;
+      clarificationQuestion = `我在場景中找不到符合「${concepts.targetConcept}」的零件。你可以直接選取它，或告訴我更精確的名稱。`;
     } else if (tgtAmbiguous && concepts.targetConcept) {
       clarificationQuestion = buildClarificationQuestion('target', concepts.targetConcept ?? '', targetCandidates);
     } else {

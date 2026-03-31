@@ -96,6 +96,27 @@ export function applyVlmLabel(partId: string, label: {
 }
 
 /**
+ * Sync the registry from the current Zustand store state.
+ * Registers basic cards for all parts that aren't already in the registry.
+ * Call this: on scene load, on runtime reset, and lazily before grounding.
+ */
+export function syncRegistryFromStore(parts: Array<{
+  partId: string;
+  name: string;
+  displayName?: string;
+}>): void {
+  for (const part of parts) {
+    if (!registry.has(part.partId)) {
+      registerPartBasic({
+        partId: part.partId,
+        partName: part.name,
+        displayName: part.displayName,
+      });
+    }
+  }
+}
+
+/**
  * Find parts whose VLM labels match a text query.
  * Returns scored candidates.
  */

@@ -1691,6 +1691,11 @@ export const MCPToolSchemas = {
       topSource: z.object({ partId: z.string(), partName: z.string(), semanticLabel: z.string(), score: z.number(), reason: z.string(), matchedSignals: z.array(z.string()) }).nullable(),
       topTarget: z.object({ partId: z.string(), partName: z.string(), semanticLabel: z.string(), score: z.number(), reason: z.string(), matchedSignals: z.array(z.string()) }).nullable(),
       diagnostics: z.array(z.string()),
+      registryStats: z.object({
+        totalParts: z.number(),
+        labeledParts: z.number(),
+        semanticCoverage: z.string(),
+      }).optional(),
     })),
   },
 
@@ -1721,6 +1726,13 @@ export const MCPToolSchemas = {
       })),
       totalParts: z.number(),
       labeledParts: z.number(),
+      registryStats: z.object({
+        registeredParts: z.number(),
+        labeledParts: z.number(),
+        semanticCoverage: z.string(),
+        registryReady: z.boolean(),
+        message: z.string(),
+      }).optional(),
     })),
   },
 
@@ -1738,6 +1750,39 @@ export const MCPToolSchemas = {
         partName: z.string(),
         status: z.enum(['queued', 'skipped']),
       })),
+    })),
+  },
+
+  /**
+   * query.plan_assembly_from_utterance — High-level command: ground objects + generate candidates in one step.
+   * Use this first for all assembly-from-natural-language requests.
+   */
+  'query.plan_assembly_from_utterance': {
+    args: z.object({
+      utterance: z.string().min(1),
+      selectedPartIds: z.array(z.string()).optional(),
+    }),
+    result: makeToolResultSchema(z.object({
+      status: z.enum(['ready', 'needs_clarification', 'resolved_but_objects_not_found']),
+      resolvedSource: z.object({ partId: z.string(), partName: z.string(), semanticLabel: z.string() }).nullable().optional(),
+      resolvedTarget: z.object({ partId: z.string(), partName: z.string(), semanticLabel: z.string() }).nullable().optional(),
+      clarificationQuestion: z.string().nullable().optional(),
+      sourceCandidates: z.array(z.object({ partId: z.string(), partName: z.string(), semanticLabel: z.string(), score: z.number() })).optional(),
+      targetCandidates: z.array(z.object({ partId: z.string(), partName: z.string(), semanticLabel: z.string(), score: z.number() })).optional(),
+      candidateCount: z.number().optional(),
+      topCandidate: z.object({
+        id: z.string(),
+        description: z.string(),
+        totalScore: z.number(),
+        scoreBreakdown: z.record(z.string(), z.unknown()),
+      }).nullable().optional(),
+      solverRecommendation: z.object({
+        recommendedSolver: z.string(),
+        confidence: z.number(),
+      }).optional(),
+      groundingDiagnostics: z.array(z.string()).optional(),
+      usedSelectionFallback: z.boolean().optional(),
+      usedVlmRegistry: z.boolean().optional(),
     })),
   },
 } as const;
@@ -1813,6 +1858,7 @@ export const MCPToolNameSchema = z.enum([
   'query.ground_objects_from_utterance',
   'query.describe_scene_parts',
   'query.refresh_part_semantics',
+  'query.plan_assembly_from_utterance',
 ]);
 
 const typedRequestSchemas = [
@@ -1883,6 +1929,7 @@ const typedRequestSchemas = [
   z.object({ tool: z.literal('query.ground_objects_from_utterance'), args: z.object({ utterance: z.string().min(1), selectedPartIds: z.array(z.string()).optional(), parsedSourceConcept: z.string().optional(), parsedTargetConcept: z.string().optional() }), meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('query.describe_scene_parts'), args: z.object({ partIds: z.array(z.string()).optional(), includeUnlabeled: z.boolean().optional() }), meta: ToolMetaSchema.optional() }),
   z.object({ tool: z.literal('query.refresh_part_semantics'), args: z.object({ partIds: z.array(z.string()).optional() }), meta: ToolMetaSchema.optional() }),
+  z.object({ tool: z.literal('query.plan_assembly_from_utterance'), args: z.object({ utterance: z.string().min(1), selectedPartIds: z.array(z.string()).optional() }), meta: ToolMetaSchema.optional() }),
 ] as const;
 
 export const MCPToolRequestSchema = z.discriminatedUnion('tool', typedRequestSchemas);

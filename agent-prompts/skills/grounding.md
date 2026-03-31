@@ -1,5 +1,27 @@
 # Skill: Object Grounding (Natural Language Part Reference)
 
+## Recommended high-level command (use this first for assembly requests)
+
+When user wants to assemble parts using natural language, use this single tool that handles grounding + assembly planning in one step:
+
+```json
+{
+  "tool": "query.plan_assembly_from_utterance",
+  "args": {
+    "utterance": "<user's exact text>",
+    "selectedPartIds": ["<ids of selected parts if any>"]
+  }
+}
+```
+
+**If `status: "ready"`**: Apply the top candidate using `action.apply_candidate` with `sourcePart: { partId: resolvedSource.partId }` and `targetPart: { partId: resolvedTarget.partId }` and `candidateId: topCandidate.id`.
+
+**If `status: "needs_clarification"`**: Return `clarificationQuestion` to user directly. Do NOT guess.
+
+**If `status: "resolved_but_objects_not_found"`**: Report the resolved parts but explain Three.js objects aren't loaded yet.
+
+---
+
 ## When to use this skill
 
 When the user refers to parts using:
@@ -16,7 +38,7 @@ If user says "mate FAN_LEFT and THERMAL" → both names match parts exactly → 
 If user says "這個"/"this"/"these" AND parts are selected in UI → use selected parts directly.
 
 ### 3. Use grounding tool
-For all other cases where parts need to be resolved from natural language:
+For all other cases where parts need to be resolved from natural language (lower-level alternative to `query.plan_assembly_from_utterance`):
 
 ```json
 {

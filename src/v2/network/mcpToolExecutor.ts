@@ -21,7 +21,8 @@ import { solveAlignment } from '../three/mating/featureSolver';
 import { scoreSolvers } from '../three/mating/solverScoring';
 import type { MatingCandidate, DemonstrationPriorScore } from '../three/mating/featureTypes';
 import { groundObjects } from '../three/grounding/objectGrounder';
-import { getAllCards, getCard, registerPartBasic, applyVlmLabel, clearRegistry } from '../three/grounding/partSemanticRegistry';
+import type { GroundingResult } from '../../../shared/schema/groundingTypes';
+import { getAllCards, getCard, registerPartBasic, applyVlmLabel, clearRegistry, syncRegistryFromStore } from '../three/grounding/partSemanticRegistry';
 
 // ---------------------------------------------------------------------------
 // Candidate registry — session-scoped, cleared on scene reset
@@ -758,6 +759,66 @@ function resetRuntimeForNewScene() {
   runtimeState.interactionMode = 'move';
   candidateRegistry.clear();
   clearRegistry();
+}
+
+/**
+ * Lazily populate the semantic registry from the store if it's empty.
+ * Call before any grounding operation to ensure basic cards exist.
+ */
+function syncRegistryIfEmpty(): void {
+  if (getAllCards().length > 0) return;
+  const store = currentStore();
+  const parts = store.parts.order.map((id) => ({
+    partId: id,
+    name: store.parts.byId[id]?.name ?? id,
+  }));
+  syncRegistryFromStore(parts);
+}
+
+/**
+ * LLM fallback for grounding: if heuristic failed to find candidates,
+ * ask the server to parse concepts from the utterance.
+ * Returns the enriched result, or the original heuristic result on failure.
+ */
+async function enrichGroundingWithLlm(
+  utterance: string,
+  heuristicResult: GroundingResult,
+  selectedPartIds?: string[],
+): Promise<GroundingResult> {
+  const needsLlmFallback =
+    heuristicResult.needsClarification &&
+    !heuristicResult.usedSelectionFallback &&
+    heuristicResult.sourceCandidates.length === 0 &&
+    heuristicResult.targetCandidates.length === 0;
+
+  if (!needsLlmFallback) return heuristicResult;
+
+  try {
+    const allPartNames = getAllCards().map(c => c.partName).slice(0, 30);
+    const conceptResp = await v2Client.request('agent.parse_grounding_concepts', {
+      utterance,
+      scenePartNames: allPartNames,
+    }) as { concepts?: { sourceConcept?: string; targetConcept?: string; assemblyIntent?: string; utteranceType?: string; usesDeictic?: boolean } };
+
+    const concepts = conceptResp?.concepts;
+    if (concepts?.sourceConcept || concepts?.targetConcept) {
+      const enriched = groundObjects(utterance, {
+        selectedPartIds,
+        parsedConcepts: {
+          sourceConcept: concepts.sourceConcept,
+          targetConcept: concepts.targetConcept,
+          assemblyIntent: concepts.assemblyIntent,
+          utteranceType: (concepts.utteranceType as any) ?? 'conceptual',
+          usesDeictic: concepts.usesDeictic ?? false,
+        },
+      });
+      enriched.diagnostics.push('used LLM concept parsing fallback');
+      return enriched;
+    }
+  } catch {
+    heuristicResult.diagnostics.push('LLM concept parsing fallback failed (using heuristic result)');
+  }
+  return heuristicResult;
 }
 
 function commitRevision(mutating: boolean) {
@@ -5712,13 +5773,26 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       parsedTargetConcept?: string;
     };
 
-    const result = groundObjects(input.utterance, {
+    // Ensure registry has basic cards before grounding
+    syncRegistryIfEmpty();
+
+    const heuristicResult = groundObjects(input.utterance, {
       selectedPartIds: input.selectedPartIds,
       parsedConcepts: {
         sourceConcept: input.parsedSourceConcept,
         targetConcept: input.parsedTargetConcept,
       },
     });
+
+    // LLM fallback if heuristic failed
+    const result = await enrichGroundingWithLlm(
+      input.utterance,
+      heuristicResult,
+      input.selectedPartIds,
+    );
+
+    const total = getAllCards().length;
+    const labeled = getAllCards().filter(c => c.vlmCategory !== undefined).length;
 
     return ok({
       ...result,
@@ -5728,12 +5802,19 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         result.targetCandidates.length > 0,
       topSource: result.sourceCandidates[0] ?? null,
       topTarget: result.targetCandidates[0] ?? null,
+      registryStats: {
+        totalParts: total,
+        labeledParts: labeled,
+        semanticCoverage: total > 0 ? Math.round((labeled / total) * 100) + '%' : '0%',
+      },
     }, { mutating: false, debug: { diagnostics: result.diagnostics } });
   }
 
   // ── query.describe_scene_parts ─────────────────────────────────────────────
   if (tool === 'query.describe_scene_parts') {
     const input = args as { partIds?: string[]; includeUnlabeled?: boolean };
+    // Ensure basic cards exist before describing
+    syncRegistryIfEmpty();
     let cards = getAllCards();
     if (input.partIds?.length) {
       cards = cards.filter(c => input.partIds!.includes(c.partId));
@@ -5741,16 +5822,32 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     if (!input.includeUnlabeled) {
       cards = cards.filter(c => c.vlmCategory !== undefined);
     }
+    const total = getAllCards().length;
+    const labeled = getAllCards().filter(c => c.vlmCategory !== undefined).length;
+    const coverage = total > 0 ? labeled / total : 0;
     return ok({
       cards,
-      totalParts: getAllCards().length,
-      labeledParts: getAllCards().filter(c => c.vlmCategory).length,
+      totalParts: total,
+      labeledParts: labeled,
+      registryStats: {
+        registeredParts: total,
+        labeledParts: labeled,
+        semanticCoverage: Math.round(coverage * 100) + '%',
+        registryReady: coverage >= 0.5,
+        message: coverage === 0
+          ? '語意標籤尚未生成。請執行 query.refresh_part_semantics。'
+          : coverage < 0.5
+            ? `僅 ${labeled}/${total} 個零件已標籤，語意匹配準確度可能較低。`
+            : `${labeled}/${total} 個零件已有語意標籤，語意匹配可用。`,
+      },
     }, { mutating: false });
   }
 
   // ── query.refresh_part_semantics ───────────────────────────────────────────
   if (tool === 'query.refresh_part_semantics') {
     const input = args as { partIds?: string[] };
+    // Ensure basic registry cards exist before VLM enrichment
+    syncRegistryIfEmpty();
     const store = currentStore();
     const allParts = Object.values(store.parts.byId);
     const toRefresh = input.partIds?.length
@@ -5782,6 +5879,129 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     }
 
     return ok({ queued: results.length, results }, { mutating: false });
+  }
+
+  // ── query.plan_assembly_from_utterance ────────────────────────────────────
+  if (tool === 'query.plan_assembly_from_utterance') {
+    const input = args as { utterance: string; selectedPartIds?: string[] };
+
+    // Step 1: Ensure registry is populated
+    syncRegistryIfEmpty();
+
+    // Step 2: Ground objects (heuristic + LLM fallback)
+    const heuristicGrounding = groundObjects(input.utterance, {
+      selectedPartIds: input.selectedPartIds,
+    });
+    const groundingResult = await enrichGroundingWithLlm(
+      input.utterance,
+      heuristicGrounding,
+      input.selectedPartIds,
+    );
+
+    // Step 3: If clarification needed, return early
+    if (
+      groundingResult.needsClarification ||
+      groundingResult.sourceCandidates.length === 0 ||
+      groundingResult.targetCandidates.length === 0
+    ) {
+      return ok({
+        status: 'needs_clarification' as const,
+        clarificationQuestion: groundingResult.clarificationQuestion ?? '請問你想組裝哪兩個零件？',
+        sourceCandidates: groundingResult.sourceCandidates.slice(0, 4).map(c => ({
+          partId: c.partId, partName: c.partName, semanticLabel: c.semanticLabel, score: c.score,
+        })),
+        targetCandidates: groundingResult.targetCandidates.slice(0, 4).map(c => ({
+          partId: c.partId, partName: c.partName, semanticLabel: c.semanticLabel, score: c.score,
+        })),
+        groundingDiagnostics: groundingResult.diagnostics,
+        usedSelectionFallback: groundingResult.usedSelectionFallback,
+        usedVlmRegistry: groundingResult.usedVlmRegistry,
+      }, { mutating: false });
+    }
+
+    // Step 4: Resolve Three.js objects for the top candidates
+    const topSource = groundingResult.sourceCandidates[0];
+    const topTarget = groundingResult.targetCandidates[0];
+
+    const sourceObj = getV2ObjectByPartId(topSource.partId);
+    const targetObj = getV2ObjectByPartId(topTarget.partId);
+
+    if (!sourceObj || !targetObj) {
+      return ok({
+        status: 'resolved_but_objects_not_found' as const,
+        resolvedSource: { partId: topSource.partId, partName: topSource.partName, semanticLabel: topSource.semanticLabel },
+        resolvedTarget: { partId: topTarget.partId, partName: topTarget.partName, semanticLabel: topTarget.semanticLabel },
+        clarificationQuestion: null,
+        groundingDiagnostics: [...groundingResult.diagnostics, 'Three.js objects not found for resolved parts'],
+        usedSelectionFallback: groundingResult.usedSelectionFallback,
+        usedVlmRegistry: groundingResult.usedVlmRegistry,
+      }, { mutating: false });
+    }
+
+    // Step 5: Sync transforms from store to Three.js objects
+    const store = currentStore();
+    const syncT = (obj: THREE.Object3D, partId: string) => {
+      const t = store.parts.overridesById[partId] || store.parts.initialTransformById[partId];
+      if (t) {
+        obj.position.set(t.position[0], t.position[1], t.position[2]);
+        obj.quaternion.set(t.quaternion[0], t.quaternion[1], t.quaternion[2], t.quaternion[3]);
+      }
+      obj.updateWorldMatrix(true, true);
+    };
+    syncT(sourceObj, topSource.partId);
+    syncT(targetObj, topTarget.partId);
+
+    // Step 6: Extract features and generate candidates
+    const sourceFeatures = extractFeatures(sourceObj, topSource.partId);
+    const targetFeatures = extractFeatures(targetObj, topTarget.partId);
+
+    let demonstrationPriors: DemonstrationPriorScore[] = [];
+    try {
+      const demoResp = await v2Client.request('agent.find_relevant_demonstrations', {
+        sourceName: topSource.partName,
+        targetName: topTarget.partName,
+        featureTypeHints: [...new Set([...sourceFeatures.map(f => f.type), ...targetFeatures.map(f => f.type)])],
+      }) as { scores?: DemonstrationPriorScore[] };
+      demonstrationPriors = demoResp?.scores ?? [];
+    } catch { /* best-effort */ }
+
+    const candidates = generateMatingCandidates(
+      sourceFeatures, targetFeatures,
+      topSource.partId, topTarget.partId,
+      { maxCandidates: 5, demonstrationPriors },
+      sourceObj, targetObj,
+    );
+
+    // Store candidates in registry for later apply
+    const regKey = candidateRegistryKey(topSource.partId, topTarget.partId);
+    candidateRegistry.set(regKey, candidates);
+
+    // Solver scoring
+    const solverResult = scoreSolvers({ sourceFeatures, targetFeatures, demonstrationPriors, existingCandidates: candidates });
+
+    const topCandidate = candidates[0];
+    return ok({
+      status: 'ready' as const,
+      resolvedSource: { partId: topSource.partId, partName: topSource.partName, semanticLabel: topSource.semanticLabel },
+      resolvedTarget: { partId: topTarget.partId, partName: topTarget.partName, semanticLabel: topTarget.semanticLabel },
+      groundingDiagnostics: groundingResult.diagnostics,
+      candidateCount: candidates.length,
+      topCandidate: topCandidate ? {
+        id: topCandidate.id,
+        description: topCandidate.description,
+        totalScore: topCandidate.totalScore,
+        scoreBreakdown: topCandidate.scoreBreakdown as Record<string, unknown>,
+      } : null,
+      solverRecommendation: {
+        recommendedSolver: solverResult.recommendedSolver,
+        confidence: solverResult.confidence,
+      },
+      usedSelectionFallback: groundingResult.usedSelectionFallback,
+      usedVlmRegistry: groundingResult.usedVlmRegistry,
+    }, {
+      mutating: false,
+      debug: { solverDiagnostics: solverResult.diagnostics },
+    });
   }
 
   throw new ToolExecutionError({
