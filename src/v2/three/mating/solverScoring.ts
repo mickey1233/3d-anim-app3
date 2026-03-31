@@ -20,6 +20,7 @@ import type {
   SolverScoreComponent, AssemblySemanticDescription, DemonstrationPriorScore,
 } from '../../../../shared/schema/assemblySemanticTypes';
 import type { AssemblyFeature, MatingCandidate } from './featureTypes';
+import type { AssemblyPlanConstraints } from '../../three/grounding/assemblyPlanner';
 
 export type SolverScoringInput = {
   sourceFeatures: AssemblyFeature[];
@@ -29,6 +30,8 @@ export type SolverScoringInput = {
   recipePriorSourceFace?: string;
   recipePriorTargetFace?: string;
   existingCandidates?: MatingCandidate[];
+  /** Optional planning constraints from assemblyPlanner (Fix A) */
+  planConstraints?: AssemblyPlanConstraints | null;
   geometrySummary?: {
     sourceBboxSize?: [number, number, number];
     targetBboxSize?: [number, number, number];
@@ -174,11 +177,30 @@ function zeroScores(): Record<SolverFamily, number> {
   return { plane_align: 0, peg_hole: 0, pattern_align: 0, slot_insert: 0, rim_align: 0, rail_slide: 0 };
 }
 
+function scorePlanConstraints(input: SolverScoringInput): Record<SolverFamily, number> {
+  const r = zeroScores();
+  const pc = input.planConstraints;
+  if (!pc) return r;
+  // Boost preferred solver families from planner
+  for (const [i, solver] of pc.preferredSolverFamilies.entries()) {
+    if (solver in r) {
+      r[solver] = Math.min(1, r[solver] + 0.35 * (1 - i * 0.1));
+    }
+  }
+  // Anti-self-stack: penalise plane_align when disallowSameCategorySelfStack
+  if (pc.disallowSameCategorySelfStack) {
+    r.plane_align = Math.max(0, r.plane_align - 0.20);
+    r.pattern_align = Math.min(1, r.pattern_align + 0.25);
+  }
+  return r;
+}
+
 export function scoreSolvers(input: SolverScoringInput): SolverScoringResult {
   const geo  = scoreGeometry(input);
   const feat = scoreFeatures(input);
   const sem  = scoreSemantic(input);
   const demo = scoreDemoPriors(input);
+  const plan = scorePlanConstraints(input);
 
   const rankedSolvers: SolverScore[] = ALL_SOLVERS.map(solver => {
     const components: SolverScoreComponent = {
@@ -186,7 +208,7 @@ export function scoreSolvers(input: SolverScoringInput): SolverScoringResult {
       featureCompatibility:    feat[solver] ?? 0,
       semanticIntentMatch:     sem[solver]  ?? 0,
       demonstrationPrior:      demo[solver] ?? 0,
-      recipePrior:             0,
+      recipePrior:             plan[solver] ?? 0,  // plan constraints reuse recipePrior slot
       symmetryResolutionGain:  0,
       insertionAxisConfidence: 0,
     };

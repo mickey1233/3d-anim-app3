@@ -27,6 +27,7 @@ export function ChatPanel() {
   const cadFileName = useV2Store((s) => s.cadFileName);
   const steps = useV2Store((s) => s.steps);
   const selectionPartId = useV2Store((s) => s.selection.partId);
+  const multiSelectIds = useV2Store((s) => s.multiSelectIds);
   const interactionMode = useV2Store((s) => s.interaction.mode);
   const getPartTransform = useV2Store((s) => s.getPartTransform);
   const wsConnected = useV2Store((s) => s.connection.wsConnected);
@@ -76,6 +77,7 @@ export function ChatPanel() {
       stepCount: steps.list.length,
       currentStepId: steps.currentStepId,
       selectionPartId,
+      multiSelectIds: multiSelectIds.length > 0 ? multiSelectIds : undefined,
       interactionMode,
       parts: parts.order.map((id) => {
         const transform = getPartTransform(id);

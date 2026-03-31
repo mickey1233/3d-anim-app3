@@ -8,6 +8,7 @@ export function PartsListV2() {
   const assemblyGroups = useV2Store((s) => s.assemblyGroups);
   const selectedPartId = useV2Store((s) => s.selection.partId);
   const selectedGroupId = useV2Store((s) => s.selection.groupId);
+  const multiSelectIds = useV2Store((s) => s.multiSelectIds);
   const [query, setQuery] = React.useState('');
   const [collapsedGroups, setCollapsedGroups] = React.useState<Set<string>>(new Set());
 
@@ -50,6 +51,26 @@ export function PartsListV2() {
     });
   };
 
+  const handlePartClick = (e: React.MouseEvent, partId: string) => {
+    const { addToMultiSelect, removeFromMultiSelect, clearMultiSelect } = useV2Store.getState();
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const currentMulti = useV2Store.getState().multiSelectIds;
+      // If nothing multi-selected yet, seed with currently selected part
+      if (currentMulti.length === 0 && selectedPartId && selectedPartId !== partId) {
+        addToMultiSelect(selectedPartId);
+      }
+      if (currentMulti.includes(partId)) {
+        removeFromMultiSelect(partId);
+      } else {
+        addToMultiSelect(partId);
+      }
+    } else {
+      clearMultiSelect();
+      selectPart(partId);
+    }
+  };
+
   const selectGroup = (groupId: string) => {
     const group = assemblyGroups.byId[groupId];
     const firstPartId = group?.partIds[0];
@@ -74,16 +95,19 @@ export function PartsListV2() {
     const part = parts.byId[partId];
     if (!part || !filteredPartIds.has(partId)) return null;
     const active = part.id === selectedPartId && !selectedGroupId;
+    const multiSelected = multiSelectIds.includes(part.id);
     const hasManual = Boolean(parts.manualTransformById[partId]);
 
     return (
       <div key={part.id} className={`flex items-center gap-1 ${indented ? 'pl-4' : ''}`}>
         <button
           type="button"
-          onClick={() => selectPart(part.id)}
+          onClick={(e) => handlePartClick(e, part.id)}
           data-testid="v2-part-item"
           className={`flex-1 flex items-center justify-between gap-2 px-2 py-2 rounded border text-xs ${
-            active
+            multiSelected
+              ? 'bg-purple-500/20 border-purple-400'
+              : active
               ? 'bg-[var(--accent-color)]/15 border-[var(--accent-color)]'
               : 'bg-black/30 border-white/5 hover:bg-white/5'
           }`}
@@ -141,6 +165,18 @@ export function PartsListV2() {
           className="w-full bg-black/40 border border-white/10 rounded pl-7 pr-2 py-1.5 text-xs outline-none focus:border-[var(--accent-color)]"
         />
       </div>
+      {multiSelectIds.length > 0 && (
+        <div className="flex items-center justify-between px-2 py-1 rounded bg-purple-500/15 border border-purple-400/40 text-xs text-purple-300">
+          <span>已選取 {multiSelectIds.length} 個零件 (Ctrl+點擊取消)</span>
+          <button
+            type="button"
+            onClick={() => useV2Store.getState().clearMultiSelect()}
+            className="text-purple-400 hover:text-white ml-2"
+          >
+            ✕
+          </button>
+        </div>
+      )}
       <div className="flex-1 min-h-0 max-h-[60vh] overflow-y-auto custom-scrollbar pr-1 flex flex-col gap-1">
         {/* Assembly groups */}
         {assemblyGroups.order.map((groupId) => {

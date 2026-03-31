@@ -23,6 +23,8 @@ ollama
 assets/
 CAD/
 public/test_model.glb
+public/spark_.glb
+public/spark_0316.glb
 
 # Misc
 *.tgz

@@ -23,6 +23,7 @@ import type { MatingCandidate, DemonstrationPriorScore } from '../three/mating/f
 import { groundObjects } from '../three/grounding/objectGrounder';
 import type { GroundingResult } from '../../../shared/schema/groundingTypes';
 import { getAllCards, getCard, registerPartBasic, applyVlmLabel, clearRegistry, syncRegistryFromStore } from '../three/grounding/partSemanticRegistry';
+import { planAssemblyConstraints, hasExplicitTargetInUtterance } from '../three/grounding/assemblyPlanner';
 
 // ---------------------------------------------------------------------------
 // Candidate registry — session-scoped, cleared on scene reset
@@ -2509,6 +2510,48 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         }
         if (lateralPair) semanticScore -= 0.10; // penalize lateral when intent is default
       }
+
+      // Fix C: Anti-self-stack for fan-like parts.
+      // When source AND target are both fans, penalise top/bottom stacking and
+      // prefer lateral or pattern-align-compatible faces instead.
+      const srcFanLike = /fan|FAN|風扇/i.test(source.partName);
+      const tgtFanLike = /fan|FAN|風扇/i.test(target.partName);
+      if (srcFanLike && tgtFanLike) {
+        if (verticalPair) {
+          semanticScore -= 0.30;
+          tags.push('fan_selfstack_vertical_penalty');
+        }
+        if (lateralPair) {
+          semanticScore += 0.20;
+          tags.push('fan_lateral_bonus');
+        }
+        // Reward methods likely to use hole patterns (fans have mounting holes)
+        if (row.sourceMethod === 'planar_cluster' && row.targetMethod === 'planar_cluster') {
+          semanticScore += 0.10;
+          tags.push('fan_pattern_compatible_methods');
+        }
+      }
+
+      // Fix E: Mount-to-structural-target face preference.
+      // When source is fan-like and target is a structural part (thermal/chassis/board),
+      // prefer target top/front faces and penalise bottom face.
+      const tgtStructural = /thermal|chassis|board|motherboard|base|frame|housing/i.test(target.partName);
+      if (srcFanLike && tgtStructural) {
+        if (row.targetFace === 'bottom') {
+          semanticScore -= 0.12;
+          tags.push('mount_target_bottom_penalty');
+        }
+        if (row.targetFace === 'top') {
+          semanticScore += 0.14;
+          tags.push('mount_target_top_bonus');
+        }
+        // Reward planar_cluster on target (flat mounting surface)
+        if (row.targetMethod === 'planar_cluster') {
+          semanticScore += 0.08;
+          tags.push('mount_planar_cluster_bonus');
+        }
+      }
+
       if (
         preferredSourceFace &&
         preferredTargetFace &&
@@ -5976,8 +6019,27 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const regKey = candidateRegistryKey(topSource.partId, topTarget.partId);
     candidateRegistry.set(regKey, candidates);
 
-    // Solver scoring
-    const solverResult = scoreSolvers({ sourceFeatures, targetFeatures, demonstrationPriors, existingCandidates: candidates });
+    // Fix A: Build planning constraints between grounding and solver scoring
+    const extractedConcepts = (groundingResult as any).parsedConcepts;
+    const targetExplicit = hasExplicitTargetInUtterance(
+      input.utterance,
+      extractedConcepts?.targetConcept,
+    );
+    const planConstraints = planAssemblyConstraints(
+      input.utterance,
+      topSource,
+      topTarget,
+      { targetExplicitlyMentioned: targetExplicit },
+    );
+
+    // Solver scoring with planning constraints
+    const solverResult = scoreSolvers({
+      sourceFeatures,
+      targetFeatures,
+      demonstrationPriors,
+      existingCandidates: candidates,
+      planConstraints,
+    });
 
     const topCandidate = candidates[0];
     return ok({
@@ -5995,6 +6057,13 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       solverRecommendation: {
         recommendedSolver: solverResult.recommendedSolver,
         confidence: solverResult.confidence,
+      },
+      planningConstraints: {
+        mustUseResolvedTarget: planConstraints.mustUseResolvedTarget,
+        sourceEntityType: planConstraints.sourceEntityType,
+        disallowSameCategorySelfStack: planConstraints.disallowSameCategorySelfStack,
+        preferredSolverFamilies: planConstraints.preferredSolverFamilies,
+        planningNotes: planConstraints.planningNotes,
       },
       usedSelectionFallback: groundingResult.usedSelectionFallback,
       usedVlmRegistry: groundingResult.usedVlmRegistry,

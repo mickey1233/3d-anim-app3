@@ -164,7 +164,6 @@ export function groundObjects(utterance: string, options: GroundingOptions = {})
     diagnostics.push(`Deictic reference: using ${selectedCards.length} selected parts`);
 
     if (selectedCards.length >= 2) {
-      // Two selected → auto-assign source and target
       const src: PartGroundingCandidate = {
         partId: selectedCards[0].partId,
         partName: selectedCards[0].partName,
@@ -173,6 +172,35 @@ export function groundObjects(utterance: string, options: GroundingOptions = {})
         reason: 'selected in UI (deictic)',
         matchedSignals: ['selection', 'deictic'],
       };
+
+      // Fix B: if user explicitly names a target (e.g. "mount fans to thermal"),
+      // honour that concept instead of blindly using selection[1] as target.
+      if (concepts.targetConcept) {
+        const targetSearch = findPartsByText(concepts.targetConcept, new Set())
+          .filter(c => c.score >= MIN_SCORE_THRESHOLD && c.partId !== src.partId);
+        if (targetSearch.length > 0) {
+          const tgt: PartGroundingCandidate = {
+            partId: targetSearch[0].partId,
+            partName: targetSearch[0].partName,
+            semanticLabel: targetSearch[0].semanticLabel,
+            score: targetSearch[0].score,
+            reason: `explicit target concept "${concepts.targetConcept}"`,
+            matchedSignals: targetSearch[0].matchedSignals as PartGroundingCandidate['matchedSignals'],
+          };
+          diagnostics.push(`Explicit target "${concepts.targetConcept}" overrides selection[1]; resolved to ${tgt.partName}`);
+          return {
+            sourceCandidates: [src],
+            targetCandidates: [tgt],
+            needsClarification: false,
+            usedSelectionFallback: true,
+            usedVlmRegistry,
+            diagnostics,
+          };
+        }
+        diagnostics.push(`Explicit target "${concepts.targetConcept}" not found; falling back to selection[1]`);
+      }
+
+      // No explicit target concept → use both from selection (original behaviour)
       const tgt: PartGroundingCandidate = {
         partId: selectedCards[1].partId,
         partName: selectedCards[1].partName,

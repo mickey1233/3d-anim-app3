@@ -148,6 +148,7 @@ function buildContextMessage(text: string, ctx: RouterContext): string {
       stepCount: ctx.stepCount ?? 0,
       currentStepId: ctx.currentStepId ?? null,
       selectionPartId: ctx.selectionPartId ?? null,
+      multiSelectIds: ctx.multiSelectIds && ctx.multiSelectIds.length > 0 ? ctx.multiSelectIds : null,
       interactionMode: ctx.interactionMode ?? null,
       iteration: ctx.iteration ?? 1,
       ...(ctx.vlmMateCapture

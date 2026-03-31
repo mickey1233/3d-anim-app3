@@ -40,6 +40,7 @@ export type RouterContext = {
   stepCount?: number;
   currentStepId?: string | null;
   selectionPartId?: string | null;
+  multiSelectIds?: string[];
   interactionMode?: 'select' | 'move' | 'rotate' | 'mate';
   toolResults?: RouterToolResult[];
   iteration?: number;

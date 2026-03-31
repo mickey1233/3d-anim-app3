@@ -34,7 +34,8 @@ const CALL_TIMEOUT_MS = Number(process.env.SMART_CHITCHAT_TIMEOUT_MS || 20_000);
 // ---------------------------------------------------------------------------
 
 const MATE_KEYWORDS = ['mate', 'assemble', 'attach', 'connect', 'join', 'install', 'mount',
-  '組裝', '裝配', '對齊', '安裝', '配合', '接合', '組合'];
+  '組裝', '裝配', '對齊', '安裝', '配合', '接合', '組合',
+  '組起來', '裝起來', '合在一起', '裝在一起', '組在一起', '拼在一起', '結合', '固定'];
 
 function isMateCommand(text: string): boolean {
   const lower = text.toLowerCase();
@@ -235,25 +236,96 @@ export const SmartRouterProvider: RouterProvider = {
     }
 
     // ── Mate fast-path: no LLM needed — instant tool call generation ─────────
+
+    // Fix D helper: find the assembly group a given part belongs to (if any).
+    const getGroupForPart = (partId: string) =>
+      ctx.groups?.find((g) => g.partIds.includes(partId));
+
+    // Fix D helper: build mate args, automatically attaching sourceGroupId when
+    // the source part is a member of an assembly group.
+    const buildMateArgs = (
+      srcId: string,
+      tgtId: string,
+      extra?: Record<string, unknown>,
+    ): Record<string, unknown> => {
+      const srcGroup = getGroupForPart(srcId);
+      return {
+        sourcePart: { partId: srcId },
+        targetPart: { partId: tgtId },
+        ...(srcGroup ? { sourceGroupId: srcGroup.id } : {}),
+        ...extra,
+      };
+    };
+
     if (isMateCommand(text)) {
+      // Case 1: part names mentioned explicitly in text
       const mateRefs = extractMatePartRefs(text, ctx.parts);
       if (mateRefs) {
         const { source, target } = mateRefs;
         const geometryIntent = detectGeometryIntent(text);
-        console.log(`[smart] mate fast-path: ${source.name} → ${target.name} intent=${geometryIntent}`);
+        const srcGroup = getGroupForPart(source.id);
+        const displaySrc = srcGroup
+          ? (ctx.groups?.find(g => g.id === srcGroup.id)?.name ?? source.name)
+          : source.name;
+        console.log(`[smart] mate fast-path (names): ${displaySrc} → ${target.name} intent=${geometryIntent}${srcGroup ? ` [group=${srcGroup.id}]` : ''}`);
         return withMeta(
           {
             toolCalls: [{
               tool: 'action.smart_mate_execute',
-              args: {
-                sourcePart: { partId: source.id },
-                targetPart: { partId: target.id },
-              },
+              args: buildMateArgs(source.id, target.id),
             }],
-            replyText: `正在組裝 ${source.name} → ${target.name}...`,
+            replyText: `正在組裝 ${displaySrc} → ${target.name}...`,
           },
           { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'mate-fast-path' }
         );
+      }
+
+      // Case 2: deictic reference ("這兩個", "them", "these") — use multiSelectIds
+      const isDeictic = /這兩個|這2個|those|these|them|它們|兩個零件/.test(text);
+      const multiIds = ctx.multiSelectIds ?? [];
+      if (isDeictic && multiIds.length >= 2) {
+        const srcPart = ctx.parts.find((p) => p.id === multiIds[0]);
+        const tgtPart = ctx.parts.find((p) => p.id === multiIds[1]);
+        if (srcPart && tgtPart) {
+          const srcGroup = getGroupForPart(srcPart.id);
+          const displaySrc = srcGroup
+            ? (ctx.groups?.find(g => g.id === srcGroup.id)?.name ?? srcPart.name)
+            : srcPart.name;
+          console.log(`[smart] mate fast-path (deictic): ${displaySrc} → ${tgtPart.name}${srcGroup ? ` [group=${srcGroup.id}]` : ''}`);
+          return withMeta(
+            {
+              toolCalls: [{
+                tool: 'action.smart_mate_execute',
+                args: buildMateArgs(srcPart.id, tgtPart.id),
+              }],
+              replyText: `正在組裝 ${displaySrc} → ${tgtPart.name}...`,
+            },
+            { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'mate-fast-path' }
+          );
+        }
+      }
+
+      // Case 3: exactly 2 parts multi-selected and text has mate intent — no explicit names needed
+      if (multiIds.length === 2 && !isDeictic) {
+        const srcPart = ctx.parts.find((p) => p.id === multiIds[0]);
+        const tgtPart = ctx.parts.find((p) => p.id === multiIds[1]);
+        if (srcPart && tgtPart) {
+          const srcGroup = getGroupForPart(srcPart.id);
+          const displaySrc = srcGroup
+            ? (ctx.groups?.find(g => g.id === srcGroup.id)?.name ?? srcPart.name)
+            : srcPart.name;
+          console.log(`[smart] mate fast-path (multi-select): ${displaySrc} → ${tgtPart.name}${srcGroup ? ` [group=${srcGroup.id}]` : ''}`);
+          return withMeta(
+            {
+              toolCalls: [{
+                tool: 'action.smart_mate_execute',
+                args: buildMateArgs(srcPart.id, tgtPart.id),
+              }],
+              replyText: `正在組裝 ${displaySrc} → ${tgtPart.name}...`,
+            },
+            { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'mate-fast-path' }
+          );
+        }
       }
     }
 
