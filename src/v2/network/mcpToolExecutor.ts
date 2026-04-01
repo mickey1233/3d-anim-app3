@@ -4310,6 +4310,13 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
 
     // Propagate rigid body delta to other group members if sourceGroupId specified
     const groupDiagnostics: string[] = [];
+    let groupRigidBodyDiag: {
+      groupRigidBodyApplied: boolean;
+      groupMemberCount: number;
+      updatedMemberCount: number;
+      updatedMemberIds: string[];
+    } | null = null;
+
     if (input.sourceGroupId) {
       const store = currentStore();
       const afterTransform = getPartTransformOrThrow(source.partId);
@@ -4322,6 +4329,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
 
       const memberIds = store.getGroupParts(input.sourceGroupId).filter((id: string) => id !== source.partId);
       groupDiagnostics.push(`group=${input.sourceGroupId} members=${memberIds.length} posDelta=[${posDelta.toArray().map(n=>n.toFixed(3)).join(',')}]`);
+
+      const updatedMemberIds: string[] = [];
 
       for (const memberId of memberIds) {
         // Read member's current world position directly from Three.js (more reliable
@@ -4362,8 +4371,17 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           quaternion: [newQuat.x, newQuat.y, newQuat.z, newQuat.w],
           scale: memberScale,
         });
+        updatedMemberIds.push(memberId);
         groupDiagnostics.push(`  ${memberId}: moved to [${newPos.toArray().map(n=>n.toFixed(3)).join(',')}]`);
       }
+
+      groupRigidBodyDiag = {
+        groupRigidBodyApplied: updatedMemberIds.length > 0,
+        groupMemberCount: memberIds.length,
+        updatedMemberCount: updatedMemberIds.length,
+        updatedMemberIds,
+      };
+      console.log(`[group-rigid] applied=${groupRigidBodyDiag.groupRigidBodyApplied} members=${memberIds.length} updated=${updatedMemberIds.length} ids=[${updatedMemberIds.join(',')}]`);
     }
 
     // ── Group merge policy ─────────────────────────────────────────────────────
@@ -4433,7 +4451,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         committed: true,
         historyId: commitData.historyId,
         transform: commitData.transform,
-        ...(groupDiagnostics.length > 0 ? { groupRigidBody: groupDiagnostics } : {}),
+        ...(groupRigidBodyDiag !== null ? { groupRigidBody: groupRigidBodyDiag } : {}),
         groupPolicy: {
           action: groupMergeResult.action,
           targetMergedIntoGroup: groupMergeResult.targetMergedIntoGroup,
@@ -4463,10 +4481,13 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         ? (input.mode as MateExecMode)
         : undefined;
 
+    const t0 = Date.now();
     let inferred: any = null;
     let inferOrigin: string | null = null;
     let inferConfidence: number | null = null;
+    let captureMs = 0;
     try {
+      const captureStart = Date.now();
       const inferredEnvelope = await runTool('query.mate_vlm_infer' as MCPToolName, {
         sourcePart: { partId: source.partId },
         targetPart: { partId: target.partId },
@@ -4483,6 +4504,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         format: 'jpeg',
       } as any);
       const inferredData = unwrapToolData(inferredEnvelope, 'SOLVER_FAILED') as any;
+      captureMs = Date.now() - captureStart;
       inferred = inferredData?.inferred ?? null;
       inferOrigin = typeof inferred?.origin === 'string' ? inferred.origin : null;
       inferConfidence = typeof inferred?.confidence === 'number' ? inferred.confidence : null;
@@ -4490,6 +4512,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         (inferred as any).actionDescription = inferred.actionDescription;
       }
     } catch {
+      captureMs = Date.now() - t0;
       inferred = null;
     }
 
@@ -4516,12 +4539,14 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     }
 
     // Ask LLM for semantic decisions (intent, mode, face, method).
+    const agentStart = Date.now();
     const agentParams = await callAgentForMateParams({
       userText: instruction,
       sourcePart: { id: source.partId, name: source.partName },
       targetPart: { id: target.partId, name: target.partName },
       geometryHint,
     });
+    const agentMs = Date.now() - agentStart;
 
     // LLM primary; geometry fallback when LLM unavailable.
     const geometryFallbackIntent = agentParams === null && sourceObject && targetObject
@@ -4617,6 +4642,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             constraint: 'free',
           });
 
+    const mateExecStart = Date.now();
     const executed = await runTool('action.mate_execute' as MCPToolName, {
       sourcePart: { partId: source.partId },
       targetPart: { partId: target.partId },
@@ -4646,6 +4672,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       stepLabel: input.stepLabel ?? `Mate ${source.partName} to ${target.partName}`,
     } as any);
     const executedData = unwrapToolData(executed, 'SOLVER_FAILED');
+    const mateExecuteMs = Date.now() - mateExecStart;
+    const totalMs = Date.now() - t0;
 
     return ok(
       {
@@ -4666,6 +4694,13 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         committed: executedData.committed,
         ...(executedData.historyId ? { historyId: executedData.historyId } : {}),
         ...(executedData.transform ? { transform: executedData.transform } : {}),
+        timing: {
+          captureMs,
+          agentMs,
+          mateExecuteMs,
+          totalMs,
+        },
+        ...(executedData.groupRigidBody ? { groupRigidBody: executedData.groupRigidBody } : {}),
       },
       {
         mutating: false,
@@ -4677,6 +4712,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             `infer_confidence=${inferConfidence !== null ? inferConfidence.toFixed(2) : 'n/a'}`,
             `llm_confidence=${agentParams?.confidence ?? 'n/a'}`,
             `instruction_method=${instructionMethod ?? 'none'}`,
+            `timing: capture=${captureMs}ms agent=${agentMs}ms mateExec=${mateExecuteMs}ms total=${totalMs}ms`,
           ],
           llmReasoning: agentParams?.reasoning,
           sourceFaceId: chosenSourceFace,
@@ -4707,6 +4743,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       || `Mate ${(input.sourcePart?.partName ?? input.sourcePart?.partId ?? 'part')} → ${(input.targetPart?.partName ?? input.targetPart?.partId ?? 'part')}`;
 
     // Step 1: run smart_mate_execute
+    const demoT0 = Date.now();
+    const mateStart = Date.now();
     const mateEnvelope = await runTool('action.smart_mate_execute' as MCPToolName, {
       sourcePart: input.sourcePart,
       targetPart: input.targetPart,
@@ -4719,12 +4757,16 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       commit: true,
     } as any);
     const mateData = unwrapToolData(mateEnvelope, 'SOLVER_FAILED') as any;
+    const mateExecuteMs = Date.now() - mateStart;
 
     // Step 2: auto-add a step capturing the current scene state
     let stepResult: any = null;
+    let stepMs = 0;
     if (autoStep) {
+      const stepStart = Date.now();
       const stepEnvelope = await runTool('steps.add' as MCPToolName, { label, select: true } as any);
       stepResult = unwrapToolData(stepEnvelope, 'INTERNAL_ERROR') as any;
+      stepMs = Date.now() - stepStart;
     }
 
     return ok(
@@ -4736,10 +4778,20 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         ...(mateData.transform ? { transform: mateData.transform } : {}),
         ...(autoStep && stepResult ? { step: stepResult.step } : {}),
         autoStepCreated: autoStep,
+        timing: {
+          mateExecuteMs,
+          stepMs,
+          totalMs: Date.now() - demoT0,
+          ...(mateData.timing ? { mateStageTiming: mateData.timing } : {}),
+        },
+        ...(mateData.groupRigidBody ? { groupRigidBody: mateData.groupRigidBody } : {}),
       },
       {
         mutating: true,
-        debug: { notes: [`demo_mate_and_apply: mate committed, step auto-created=${autoStep}`] },
+        debug: { notes: [
+          `demo_mate_and_apply: mate committed, step auto-created=${autoStep}`,
+          `timing: mateExec=${mateExecuteMs}ms step=${stepMs}ms`,
+        ]},
       }
     );
   }

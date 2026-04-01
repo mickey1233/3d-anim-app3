@@ -47,12 +47,32 @@ function hasModuleKeyword(text: string): boolean {
   return MODULE_KEYWORDS.some((p) => p.test(text));
 }
 
-/** True if the utterance mentions the given name as an exact token (case-insensitive). */
+// ---------------------------------------------------------------------------
+// Fuzzy name normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a name for fuzzy comparison.
+ * Strips spaces, underscores, hyphens; lowercases.
+ * Allows group1 == group_1 == group-1 == group 1 == Group 1
+ */
+function normalizeName(s: string): string {
+  return s.toLowerCase().replace(/[\s_\-]/g, '');
+}
+
+/** True if the utterance contains `name` either as an exact or fuzzy match. */
 function nameAppearsInText(name: string, text: string): boolean {
   if (!name || !text) return false;
+  // Exact (case-insensitive, token-boundary)
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`(?:^|[\\s,，.。「」『』（）()|/\\\\])${escaped}(?:$|[\\s,，.。「」『』（）()|/\\\\])`, 'i').test(text)
-    || text.toLowerCase().includes(name.toLowerCase());
+  if (
+    new RegExp(`(?:^|[\\s,，.。「」『』（）()|/\\\\])${escaped}(?:$|[\\s,，.。「」『』（）()|/\\\\])`, 'i').test(text) ||
+    text.toLowerCase().includes(name.toLowerCase())
+  ) return true;
+  // Fuzzy: normalized name appears in normalized text
+  const normN = normalizeName(name);
+  const normT = normalizeName(text);
+  return normN.length >= 3 && normT.includes(normN);
 }
 
 // ---------------------------------------------------------------------------
@@ -373,14 +393,20 @@ export function resolveEntityPairFromContext(
   }
 
   // ── Step 2: Find target — first part name in text NOT in source members ──
+  // Uses nameAppearsInText (which includes fuzzy normalization) for matching.
 
   const lowerText = text.toLowerCase();
+  const normText = normalizeName(text);
   let targetPart: { id: string; name: string } | null = null;
 
-  // Sort parts by where their name appears in text (earlier mention = likely target)
+  // Sort parts by where their name (or normalized name) appears in text
   const textMatches = ctx.parts
     .filter((p) => !sourceMemberIds.has(p.id))
-    .map((p) => ({ p, idx: lowerText.indexOf(p.name.toLowerCase()) }))
+    .map((p) => {
+      const exactIdx = lowerText.indexOf(p.name.toLowerCase());
+      const fuzzyIdx = exactIdx >= 0 ? exactIdx : normText.indexOf(normalizeName(p.name));
+      return { p, idx: Math.max(exactIdx, fuzzyIdx) };
+    })
     .filter((x) => x.idx >= 0)
     .sort((a, b) => a.idx - b.idx);
 

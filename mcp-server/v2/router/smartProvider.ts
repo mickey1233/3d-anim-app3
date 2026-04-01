@@ -546,7 +546,10 @@ export const SmartRouterProvider: RouterProvider = {
       const result = await Promise.race([
         agentPromise,
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`agent timeout after ${timeoutMs}ms`)), timeoutMs)
+          setTimeout(
+            () => reject(new Error(`stage=router_agent timeout after ${timeoutMs}ms (isMate=${isMate})`)),
+            timeoutMs
+          )
         ),
       ]);
       const fastMs = Date.now() - fastStart;
@@ -554,10 +557,16 @@ export const SmartRouterProvider: RouterProvider = {
       return withMeta(result as RouterRoute, { ...baseMeta, route: 'fast-model', fastMs, model: resolvedModelName('fast-model') });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[smart] agent failed: ${msg}`);
+      const isTimeout = msg.includes('timeout');
+      console.warn(`[smart] agent failed${isTimeout ? ' (TIMEOUT)' : ''}: ${msg}`);
       if (isMate) {
         return withMeta(
-          { toolCalls: [], replyText: '無法解析組裝指令，請明確指定來源和目標零件名稱（例如：「把風扇裝到 THERMAL 上」）。' },
+          {
+            toolCalls: [],
+            replyText: isTimeout
+              ? `組裝指令路由超時（>${MATE_AGENT_TIMEOUT_MS}ms），請明確指定來源和目標零件名稱（例如：「把風扇裝到 THERMAL 上」）。`
+              : '無法解析組裝指令，請明確指定來源和目標零件名稱（例如：「把風扇裝到 THERMAL 上」）。',
+          },
           { ...baseMeta, route: 'fast-model', reason: `mate_agent_failed: ${msg}` }
         );
       }
