@@ -438,9 +438,20 @@ type AgentMateParams = {
   reasoning?: string;
 };
 
+// Demo fast-path: in-memory cache for repeated source-target mate param results.
+// Keyed by "sourceName|targetName" (canonical order — sorted alphabetically).
+const _mateParamsCache = new Map<string, AgentMateParams>();
+const DEMO_FAST_PATH = import.meta.env.VITE_DEMO_FAST_PATH === 'true';
+
+function _mateParamsCacheKey(srcName: string, tgtName: string): string {
+  return [srcName, tgtName].sort().join('|');
+}
+
 /**
  * Calls the backend agent.infer_mate_params WS command with geometry context.
  * Returns LLM-inferred assembly parameters, or null on failure.
+ * When VITE_DEMO_FAST_PATH=true, skips LLM and returns null immediately so
+ * geometry inference handles the decision (much faster for live demos).
  */
 async function callAgentForMateParams(params: {
   userText: string;
@@ -448,6 +459,14 @@ async function callAgentForMateParams(params: {
   targetPart: { id: string; name: string };
   geometryHint?: Record<string, unknown>;
 }): Promise<AgentMateParams | null> {
+  // Fast-path: skip LLM entirely → geometry inference takes over
+  if (DEMO_FAST_PATH) return null;
+
+  // Cache check: if we've already inferred for this part pair, reuse
+  const cacheKey = _mateParamsCacheKey(params.sourcePart.name, params.targetPart.name);
+  const cached = _mateParamsCache.get(cacheKey);
+  if (cached) return cached;
+
   try {
     const raw: any = await v2Client.request('agent.infer_mate_params', {
       userText: params.userText,
@@ -466,7 +485,7 @@ async function callAgentForMateParams(params: {
     ];
     const VALID_INTENTS: MateIntentKind[] = ['default', 'cover', 'insert', 'twist_insert', 'arc_cover'];
 
-    return {
+    const result: AgentMateParams = {
       intent: VALID_INTENTS.includes(inference.intent) ? inference.intent : 'default',
       mode: VALID_MODES.includes(inference.mode) ? inference.mode : 'translate',
       sourceFace: VALID_FACES.includes(inference.sourceFace) ? inference.sourceFace : 'bottom',
@@ -477,6 +496,9 @@ async function callAgentForMateParams(params: {
         ? Math.min(1, Math.max(0, inference.confidence)) : 0.5,
       ...(typeof inference.reasoning === 'string' ? { reasoning: inference.reasoning } : {}),
     };
+    // Cache successful result for repeated calls with the same part pair
+    _mateParamsCache.set(cacheKey, result);
+    return result;
   } catch {
     return null;
   }
@@ -2511,6 +2533,33 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         if (lateralPair) semanticScore -= 0.10; // penalize lateral when intent is default
       }
 
+      // Issue 1: Rotation-aware scoring.
+      // When parts have a significant rotation mismatch, the world-space face name
+      // (top/bottom/left/right) from bbox analysis is unreliable — the part's local
+      // "top" may point sideways in world space.  Reduce face-name vertical bias and
+      // instead reward methods that anchor on physical geometry (planar_cluster / obb_pca).
+      if (hasRotationMismatch) {
+        // Discount the generic vertical preference — geometry is warped
+        if (verticalPair && geometryIntent === 'default') {
+          semanticScore -= 0.08;
+          tags.push('rotation_mismatch_vertical_discount');
+        }
+        // Prefer geometry-driven methods (they are rotation-invariant)
+        const usesGeomMethod = (row.sourceMethod === 'planar_cluster' || row.sourceMethod === 'obb_pca') &&
+          (row.targetMethod === 'planar_cluster' || row.targetMethod === 'obb_pca');
+        if (usesGeomMethod) {
+          semanticScore += 0.12;
+          tags.push('rotation_mismatch_geom_method_bonus');
+        }
+        // For fan-like parts specifically, prefer pattern/hole alignment when rotated
+        if (/fan|FAN|風扇/i.test(source.partName) || /fan|FAN|風扇/i.test(target.partName)) {
+          if (row.sourceMethod === 'planar_cluster' && row.targetMethod === 'planar_cluster') {
+            semanticScore += 0.08;
+            tags.push('rotation_mismatch_fan_pattern_bonus');
+          }
+        }
+      }
+
       // Fix C: Anti-self-stack for fan-like parts.
       // When source AND target are both fans, penalise top/bottom stacking and
       // prefer lateral or pattern-align-compatible faces instead.
@@ -4106,6 +4155,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           }
         }
       }
+    }
+
+    // Capture source pre-preview transform NOW (before generate_transform_plan moves it)
+    // so group delta propagation at commit time gets the correct "before" position.
+    if (input.sourceGroupId) {
+      ensurePreviewBeforeTransform(source.partId);
     }
 
     const generated = await runTool('action.generate_transform_plan' as MCPToolName, {
