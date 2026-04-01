@@ -3459,6 +3459,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     }
 
     currentStore().setPartOverride(part.partId, nextTransform);
+    // Keep manualTransformById in sync so baseManualTransforms is correct when adding steps later
+    currentStore().setManualTransform(part.partId, nextTransform);
     clearPreviewState(part.partId);
     return ok(
       {
@@ -3521,6 +3523,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     }
 
     currentStore().setPartOverride(part.partId, nextTransform);
+    currentStore().setManualTransform(part.partId, nextTransform);
     clearPreviewState(part.partId);
     return ok(
       {
@@ -4645,6 +4648,20 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const partId = runtimeState.preview.partId;
     const current = getPartTransformOrThrow(partId);
     currentStore().setPartOverride(partId, current);
+
+    // For non-mate operations (translate/rotate/align previews), the committed position
+    // is a user-intentional placement → update manualTransformById so that steps added
+    // later use this as the correct start position, not the original import position.
+    // Mate commits (operation='mate'|'both'|'twist') must NOT update manualTransformById
+    // because the before-mate position (captured in previewBeforeTransformByPartId) is
+    // what the step's start should be.
+    const committedPlan = runtimeState.plans.get(runtimeState.preview.planId);
+    const isMoveOp = committedPlan &&
+      !['mate', 'both', 'twist'].includes(committedPlan.operation as string);
+    if (isMoveOp) {
+      currentStore().setManualTransform(partId, current);
+    }
+
     runtimeState.previewBeforeTransformByPartId.delete(partId);
 
     const historyId = `history-${crypto.randomUUID()}`;
