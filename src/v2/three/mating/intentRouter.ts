@@ -35,6 +35,48 @@ import type { SolverFamily } from '../../../../shared/schema/assemblySemanticTyp
 // Text-based intent detection
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Explicit-target pattern — must be tested BEFORE assemble_together to avoid
+// false positives on "把X裝起來" vs "把X裝到Y上".
+// ---------------------------------------------------------------------------
+
+/**
+ * Text has an explicit external target syntax: 裝到…上 / 固定到 / mount to / etc.
+ * When this is true, the intent is mount_to_target, not assemble_together.
+ */
+const EXPLICIT_TARGET_PATTERNS = [
+  /裝(?:到|上).{0,30}上|固定到|安裝到|鎖到|鎖上.{0,20}上|接到|掛到/,
+  /(?:mount|attach|install|fix|connect)\b.{0,40}?\b(?:to|on|onto|into)\b/i,
+];
+
+function hasExplicitTarget(text: string): boolean {
+  return EXPLICIT_TARGET_PATTERNS.some(p => p.test(text));
+}
+
+// ---------------------------------------------------------------------------
+// Intent pattern tables
+// ---------------------------------------------------------------------------
+
+/**
+ * Grouping / peer-assembly patterns.
+ * Signal: verb + 起來 (attach-into-unit), "組成一組/模組", or English equivalents.
+ * ONLY fires when hasExplicitTarget() is false.
+ */
+const ASSEMBLE_TOGETHER_PATTERNS = [
+  // 組起來 / 裝起來 (without an explicit 到X上 target)
+  /[組裝]起來/,
+  // 組在一起 / 裝在一起
+  /[組裝]在一起/,
+  // 組成（一組|模組|群組|子組合|一個模組）
+  /組成(?:一組|模組|群組|子組合|一個)?(?:模組|群組|組合|單元)?/,
+  // 先組 / 先裝 + 起來
+  /先[組裝].{0,8}起來/,
+  // English
+  /assemble\s+(?:these|them|together)|group\s+(?:these|them|into|together)/i,
+  /form\s+(?:a\s+)?(?:module|group|subassembly|unit)/i,
+  /put\s+(?:these|them)\s+together/i,
+];
+
 const MOUNT_PATTERNS = [
   /mount|fasten|fix|attach|install|bolt|screw|lock/i,
   /固定|鎖(?:到|上|緊)|裝(?:到|上)|安裝|鎖螺絲|螺絲|鎖付|鎖合/,
@@ -55,6 +97,13 @@ const COVER_PATTERNS = [
 
 function detectTextIntent(text: string): AssemblyIntentKind | null {
   if (!text) return null;
+  // assemble_together must be checked BEFORE mount/cover because "裝起來" would
+  // also partially match mount patterns.  The explicit-target guard is the separator.
+  if (ASSEMBLE_TOGETHER_PATTERNS.some(p => p.test(text)) && !hasExplicitTarget(text)) {
+    return 'assemble_together';
+  }
+  // mount_to_target: explicit target + mounting verb
+  if (hasExplicitTarget(text) && MOUNT_PATTERNS.some(p => p.test(text))) return 'mount_to_target';
   if (MOUNT_PATTERNS.some(p => p.test(text))) return 'mount';
   if (INSERT_PATTERNS.some(p => p.test(text))) return 'insert';
   if (COVER_PATTERNS.some(p => p.test(text))) return 'cover';
@@ -84,6 +133,34 @@ type IntentConfig = {
 };
 
 const INTENT_CONFIG: Record<AssemblyIntentKind, IntentConfig> = {
+  /**
+   * Peer grouping: no external target, no geometry solver needed.
+   * The feature mode is 'fallback_generic' because grouping is handled entirely
+   * by the fast-path router — the solver path never runs for this intent.
+   */
+  assemble_together: {
+    featureMode: 'fallback_generic',
+    preferredFeatureTypes: [],
+    preferredSolverFamilies: [],
+    adjustments: { featureMethodBonus: 0, bboxFallbackPenalty: 0, verticalPairBonus: 0, lateralPairPenalty: 0 },
+  },
+
+  /**
+   * Mount to external structural target — same geometry preferences as 'mount'
+   * but semantically distinct (explicit external target required).
+   */
+  mount_to_target: {
+    featureMode: 'hole_pattern',
+    preferredFeatureTypes: ['cylindrical_hole', 'blind_hole', 'peg', 'support_pad'],
+    preferredSolverFamilies: ['pattern_align', 'peg_hole', 'plane_align'],
+    adjustments: {
+      featureMethodBonus:   0.28,
+      bboxFallbackPenalty: -0.22,
+      verticalPairBonus:    0.08,
+      lateralPairPenalty:  -0.08,
+    },
+  },
+
   mount: {
     featureMode: 'hole_pattern',
     // Holes, pegs, standoffs — physical fastening features

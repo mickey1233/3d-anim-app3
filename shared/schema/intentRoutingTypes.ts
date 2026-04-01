@@ -48,6 +48,17 @@ export type FeatureMode =
 // ---------------------------------------------------------------------------
 
 export type AssemblyIntentKind =
+  /**
+   * Peer parts grouped into a movable subassembly — NO external target.
+   * Trigger: 組起來 / 裝起來 (no 到X上) / group these / assemble together
+   */
+  | 'assemble_together'
+  /**
+   * Source entity mounted onto an external structural target.
+   * Trigger: 裝到X上 / 固定到 / mount to / attach to
+   */
+  | 'mount_to_target'
+  /** Legacy alias for mount_to_target — kept so existing code compiles unchanged. */
   | 'mount'    // fasten, 固定, 鎖, 裝到, mount, install
   | 'insert'   // 插入, 卡進, 裝進, insert, plug, fit
   | 'cover'    // 蓋上, 覆蓋, cover, place_on, stack

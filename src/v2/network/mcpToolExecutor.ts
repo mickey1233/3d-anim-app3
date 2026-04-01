@@ -4744,6 +4744,114 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     );
   }
 
+  // ── action.group_as_module ─────────────────────────────────────────────────
+  // Groups a set of peer parts into a movable assembly group (subassembly/module).
+  // This is the execution target for `assemble_together` intent.
+  // Does NOT mate parts geometrically — only creates/extends the logical group.
+  if ((tool as string) === 'action.group_as_module') {
+    const input = args as {
+      partIds?: string[];
+      parts?: { partId?: string; partName?: string }[];
+      groupName?: string;
+      addStep?: boolean;
+      stepLabel?: string;
+    };
+
+    // Resolve part IDs from either partIds array or PartRef objects
+    const resolvedIds: string[] = [];
+    if (Array.isArray(input.partIds)) {
+      resolvedIds.push(...input.partIds.filter((id: string) => currentStore().parts.byId[id]));
+    } else if (Array.isArray(input.parts)) {
+      for (const ref of input.parts) {
+        try { resolvedIds.push(resolvePart(ref as PartRef).partId); } catch { /* skip invalid */ }
+      }
+    }
+
+    const uniqueIds = [...new Set(resolvedIds)];
+    if (uniqueIds.length < 2) {
+      throw new ToolExecutionError({
+        code: 'INVALID_ARGUMENT',
+        message: `action.group_as_module requires at least 2 valid parts, got ${uniqueIds.length}`,
+        suggestedToolCalls: [{ tool: 'query.scene_state', args: {} }],
+      });
+    }
+
+    const store = currentStore();
+
+    // Determine if any part already belongs to an existing group
+    const existingGroupIds = [...new Set(
+      uniqueIds.map((id) => store.getGroupForPart(id)).filter(Boolean) as string[]
+    )];
+
+    let groupId: string;
+    let action: 'created' | 'extended' | 'merged';
+
+    if (existingGroupIds.length === 0) {
+      // All standalone — create a brand new group
+      groupId = store.createAssemblyGroup(uniqueIds);
+      action = 'created';
+    } else if (existingGroupIds.length === 1) {
+      // One existing group — add the remaining parts to it
+      groupId = existingGroupIds[0];
+      const alreadyMembers = new Set(store.getGroupParts(groupId));
+      uniqueIds.filter((id) => !alreadyMembers.has(id))
+        .forEach((id) => store.addPartToGroup(groupId, id));
+      action = 'extended';
+    } else {
+      // Multiple existing groups — merge all into the first, then add remaining parts
+      groupId = existingGroupIds[0];
+      for (let i = 1; i < existingGroupIds.length; i++) {
+        store.mergeAssemblyGroups(groupId, existingGroupIds[i]);
+      }
+      const alreadyMembers = new Set(store.getGroupParts(groupId));
+      uniqueIds.filter((id) => !alreadyMembers.has(id))
+        .forEach((id) => store.addPartToGroup(groupId, id));
+      action = 'merged';
+    }
+
+    // Optionally rename the group
+    const groupNameRaw = typeof input.groupName === 'string' ? input.groupName.trim() : '';
+    if (groupNameRaw) {
+      store.renameAssemblyGroup(groupId, groupNameRaw);
+    }
+
+    const finalMembers = store.getGroupParts(groupId);
+    const finalName = store.assemblyGroups.byId[groupId]?.name ?? groupId;
+
+    console.log(`[group_as_module] action=${action} groupId=${groupId} name="${finalName}" members=[${finalMembers.join(',')}]`);
+
+    // Optionally add an assembly step
+    let stepResult: unknown = null;
+    const addStep = input.addStep !== false;
+    if (addStep) {
+      const stepLabel = (typeof input.stepLabel === 'string' && input.stepLabel.trim())
+        ? input.stepLabel.trim()
+        : `Group: ${finalName}`;
+      const stepEnvelope = await runTool('steps.add' as MCPToolName, { label: stepLabel, select: true } as any);
+      try { stepResult = (unwrapToolData(stepEnvelope, 'INTERNAL_ERROR') as any)?.step ?? null; } catch { /* best-effort */ }
+    }
+
+    return ok(
+      {
+        groupId,
+        groupName: finalName,
+        memberPartIds: finalMembers,
+        action,
+        stepCreated: addStep,
+        ...(stepResult ? { step: stepResult } : {}),
+        diagnostics: {
+          normalizedIntent: 'assemble_together',
+          usedFastPath: true,
+          usedGroupingPath: true,
+          sourceResolvedAs: 'group',
+          sourceEntityId: groupId,
+          candidatePeerPartIds: uniqueIds,
+        },
+      },
+      { mutating: true }
+    );
+  }
+
   if (tool === 'preview.transform_plan') {
     const input = args as any;
     const plan = input.plan ?? runtimeState.plans.get(input.planId);

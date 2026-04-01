@@ -42,16 +42,57 @@ const CALL_TIMEOUT_MS = Number(process.env.SMART_CHITCHAT_TIMEOUT_MS || 20_000);
 const MATE_AGENT_TIMEOUT_MS = Number(process.env.MATE_FAST_TIMEOUT_MS || 8_000);
 
 // ---------------------------------------------------------------------------
-// Mate fast-path: resolve mate commands without LLM (instant, no timeout)
+// Assembly intent classification — server-side, no LLM
 // ---------------------------------------------------------------------------
 
-const MATE_KEYWORDS = ['mate', 'assemble', 'attach', 'connect', 'join', 'install', 'mount',
+// Explicit external-target syntax: "裝到X上" / "mount to" / "attach onto"
+// Presence of this pattern separates mount_to_target from assemble_together.
+const EXPLICIT_TARGET_RE = [
+  /裝(?:到|上).{0,30}上|固定到|安裝到|鎖到|鎖上.{0,20}上|接到|掛到/,
+  /(?:mount|attach|install|fix|connect)\b.{0,40}?\b(?:to|on|onto|into)\b/i,
+];
+function hasExplicitTarget(text: string): boolean {
+  return EXPLICIT_TARGET_RE.some((p) => p.test(text));
+}
+
+// Peer-grouping / assemble-together patterns (fires only when no explicit target)
+const ASSEMBLE_TOGETHER_RE = [
+  /[組裝]起來/,
+  /[組裝]在一起/,
+  /組成(?:一組|模組|群組|子組合|一個)?(?:模組|群組|組合|單元)?/,
+  /先[組裝].{0,8}起來/,
+  /assemble\s+(?:these|them|together)|group\s+(?:these|them|into|together)/i,
+  /form\s+(?:a\s+)?(?:module|group|subassembly|unit)/i,
+  /put\s+(?:these|them)\s+together/i,
+];
+
+/**
+ * Returns the normalized top-level assembly intent.
+ *   'assemble_together' — peer grouping, no external target
+ *   'mount_to_target'   — source → external structural target
+ *   'other'             — everything else (handled by existing mate fast-path / agent)
+ */
+function classifyAssemblyIntent(text: string): 'assemble_together' | 'mount_to_target' | 'other' {
+  const hasGrouping = ASSEMBLE_TOGETHER_RE.some((p) => p.test(text));
+  const hasTarget   = hasExplicitTarget(text);
+  if (hasGrouping && !hasTarget) return 'assemble_together';
+  if (hasTarget) return 'mount_to_target';
+  return 'other';
+}
+
+// ---------------------------------------------------------------------------
+// Mate/assembly command detection
+// ---------------------------------------------------------------------------
+
+const ASSEMBLY_KEYWORDS = [
+  'mate', 'assemble', 'attach', 'connect', 'join', 'install', 'mount',
   '組裝', '裝配', '對齊', '安裝', '配合', '接合', '組合',
-  '組起來', '裝起來', '合在一起', '裝在一起', '組在一起', '拼在一起', '結合', '固定'];
+  '組起來', '裝起來', '合在一起', '裝在一起', '組在一起', '拼在一起', '結合', '固定',
+];
 
 function isMateCommand(text: string): boolean {
   const lower = text.toLowerCase();
-  return MATE_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()));
+  return ASSEMBLY_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()));
 }
 
 function detectGeometryIntent(text: string): 'insert' | 'cover' | 'default' {
@@ -59,6 +100,54 @@ function detectGeometryIntent(text: string): 'insert' | 'cover' | 'default' {
   if (/insert|plug|插入|嵌入/.test(lower)) return 'insert';
   if (/cover|cap|lid|蓋上|覆蓋/.test(lower)) return 'cover';
   return 'default';
+}
+
+// ---------------------------------------------------------------------------
+// Peer-part resolution for assemble_together
+// ---------------------------------------------------------------------------
+
+/**
+ * Find candidate peer parts to group from context.
+ * Priority:
+ *   1. multiSelectIds (2+ parts selected — most explicit)
+ *   2. Named parts found in text (2+ part names)
+ *   3. Selected part + its "peers" (parts with the same prefix/category in text context)
+ *
+ * Returns at least 2 parts, or null if insufficient context.
+ */
+function resolvePeerParts(
+  text: string,
+  ctx: RouterContext,
+): { id: string; name: string }[] | null {
+  const multiIds = ctx.multiSelectIds ?? [];
+
+  // 1. Multi-select (most reliable)
+  if (multiIds.length >= 2) {
+    const parts = multiIds.map((id) => ctx.parts.find((p) => p.id === id)).filter(Boolean) as { id: string; name: string }[];
+    if (parts.length >= 2) return parts;
+  }
+
+  // 2. All part names found in text (2+)
+  const lowerText = text.toLowerCase();
+  const namedParts = ctx.parts
+    .filter((p) => lowerText.includes(p.name.toLowerCase()))
+    .sort((a, b) => lowerText.indexOf(a.name.toLowerCase()) - lowerText.indexOf(b.name.toLowerCase()));
+  if (namedParts.length >= 2) return namedParts;
+
+  // 3. Selected part + semantic peers (same name prefix or already grouped peer)
+  if (ctx.selectionPartId) {
+    const selected = ctx.parts.find((p) => p.id === ctx.selectionPartId);
+    if (selected) {
+      // Find parts with same prefix (e.g. HOR_FAN_LEFT and HOR_FAN_RIGHT share HOR_FAN)
+      const prefix = selected.name.replace(/[_\-]?(LEFT|RIGHT|TOP|BOTTOM|A|B|1|2|3|4)$/i, '');
+      const peers = ctx.parts.filter(
+        (p) => p.id !== selected.id && p.name.toUpperCase().startsWith(prefix.toUpperCase())
+      );
+      if (peers.length >= 1) return [selected, ...peers];
+    }
+  }
+
+  return null;
 }
 
 function extractMatePartRefs(
@@ -247,6 +336,46 @@ export const SmartRouterProvider: RouterProvider = {
       );
     }
 
+    // ── Assemble-together fast path ───────────────────────────────────────────
+    //
+    // Handles utterances where the user wants to GROUP peer parts into a movable
+    // subassembly WITHOUT mounting onto an external target.
+    //
+    // Fires BEFORE the mate fast-path to prevent misclassification.
+    {
+      const assemblyIntent = classifyAssemblyIntent(text);
+      if (assemblyIntent === 'assemble_together') {
+        const peerParts = resolvePeerParts(text, ctx);
+        if (peerParts && peerParts.length >= 2) {
+          const partIds = peerParts.map((p) => p.id);
+          const partNames = peerParts.map((p) => p.name).join(' + ');
+          console.log(`[smart] assemble_together fast-path: peers=[${partNames}] count=${partIds.length}`);
+          return withMeta(
+            {
+              toolCalls: [{
+                tool: 'action.group_as_module',
+                args: {
+                  partIds,
+                  addStep: true,
+                  stepLabel: `Group: ${partNames}`,
+                },
+              }],
+              replyText: `正在將 ${partNames} 組成模組...`,
+            },
+            {
+              ...baseMeta,
+              route: 'fast-model',
+              fastMs: 0,
+              model: 'grouping-fast-path',
+              reason: `assemble_together: peers=[${partNames}] normalizedIntent=assemble_together usedFastPath=true usedGroupingPath=true candidatePeerPartIds=${partIds.join(',')}`,
+            }
+          );
+        }
+        // Not enough context for deterministic grouping — fall through to agent
+        console.warn(`[smart] assemble_together detected but insufficient peer context — delegating to agent`);
+      }
+    }
+
     // ── Mate fast-path: deterministic, zero-LLM, instant ─────────────────────
     //
     // Priority order (highest first):
@@ -267,8 +396,15 @@ export const SmartRouterProvider: RouterProvider = {
       fastPathKind: string,
       diagFields: Record<string, unknown>,
     ): RouterRoute => {
-      const diag = Object.entries(diagFields).map(([k, v]) => `${k}=${v}`).join(' ');
-      console.log(`[smart] mate fast-path(${fastPathKind}): ${displaySrc} → ${displayTgt} ${diag}`);
+      const allDiag = {
+        normalizedIntent: classifyAssemblyIntent(text) === 'mount_to_target' ? 'mount_to_target' : 'mount',
+        usedFastPath: true,
+        usedGroupingPath: false,
+        mountedRelationRecorded: true,
+        ...diagFields,
+      };
+      const diagStr = Object.entries(allDiag).map(([k, v]) => `${k}=${v}`).join(' ');
+      console.log(`[smart] mate fast-path(${fastPathKind}): ${displaySrc} → ${displayTgt} ${diagStr}`);
       return withMeta(
         {
           toolCalls: [{ tool: 'action.demo_mate_and_apply', args: mateArgs }],
@@ -279,7 +415,7 @@ export const SmartRouterProvider: RouterProvider = {
           route: 'fast-model',
           fastMs: 0,
           model: 'mate-fast-path',
-          reason: `fast_path:${fastPathKind}`,
+          reason: diagStr,
         }
       );
     };

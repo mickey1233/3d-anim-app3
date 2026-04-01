@@ -337,6 +337,8 @@ export type V2State = {
   recordMountedRelation: (relation: MountedRelation) => void;
   /** Return all relations involving a given source ID (group or part). */
   getMountedRelationsForSource: (sourceId: string) => MountedRelation[];
+  /** Rename an assembly group. */
+  renameAssemblyGroup: (groupId: string, name: string) => void;
   addVlmImages: (files: File[]) => void;
   moveVlmImage: (id: string, dir: -1 | 1) => void;
   removeVlmImage: (id: string) => void;
@@ -1013,6 +1015,18 @@ export const useV2Store = create<V2State>((set, get) => ({
   getMountedRelationsForSource: (sourceId) => {
     return get().mountedRelations.filter((r) => r.sourceId === sourceId);
   },
+
+  renameAssemblyGroup: (groupId, name) =>
+    set((state) => {
+      const group = state.assemblyGroups.byId[groupId];
+      if (!group) return {};
+      return {
+        assemblyGroups: {
+          ...state.assemblyGroups,
+          byId: { ...state.assemblyGroups.byId, [groupId]: { ...group, name } },
+        },
+      };
+    }),
 
   addVlmImages: (files) =>
     set((state) => ({
