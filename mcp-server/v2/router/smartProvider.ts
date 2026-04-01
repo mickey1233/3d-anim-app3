@@ -20,7 +20,12 @@
 import { AgentRouterProvider } from './agentProvider.js';
 import { CodexRouterProvider } from './codexProvider.js';
 import { type DocChunk, retrieveDocs } from './docsRetrieval.js';
-import { resolveEntityPair, buildMateArgsFromResolution } from './entityResolutionScorer.js';
+import {
+  resolveEntityPair,
+  resolveEntityPairFromContext,
+  buildMateArgsFromResolution,
+  buildMateArgsFromContext,
+} from './entityResolutionScorer.js';
 import { decideRoute, type RouteMeta } from './routeDecision.js';
 import type { RouterContext, RouterProvider, RouterRoute } from './types.js';
 
@@ -29,6 +34,12 @@ const CODEX_ENABLED = process.env.SMART_CODEX_ENABLE !== '0';
 const OLLAMA_BASE_URL = (process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/$/, '');
 const OLLAMA_MODEL = process.env.ROUTER_LLM_MODEL || process.env.OLLAMA_MODEL || 'qwen3:30b';
 const CALL_TIMEOUT_MS = Number(process.env.SMART_CHITCHAT_TIMEOUT_MS || 20_000);
+/**
+ * If the slow agent exceeds this threshold for a mate command, we abort and
+ * return an error instead of hanging the UI. Set via MATE_FAST_TIMEOUT_MS env var.
+ * Default: 8 s — enough for fast local LLMs but short enough to avoid demo timeouts.
+ */
+const MATE_AGENT_TIMEOUT_MS = Number(process.env.MATE_FAST_TIMEOUT_MS || 8_000);
 
 // ---------------------------------------------------------------------------
 // Mate fast-path: resolve mate commands without LLM (instant, no timeout)
@@ -236,115 +247,184 @@ export const SmartRouterProvider: RouterProvider = {
       );
     }
 
-    // ── Mate fast-path: no LLM needed — instant tool call generation ─────────
+    // ── Mate fast-path: deterministic, zero-LLM, instant ─────────────────────
+    //
+    // Priority order (highest first):
+    //   Case 0 — context-aware: group/part selected + target found in text  ← NEW
+    //   Case 1 — both names in text (original)
+    //   Case 2 — deictic + multi-select
+    //   Case 3 — exactly 2 multi-selected parts
+    //
+    // All cases produce action.demo_mate_and_apply with full diagnostics.
+    // If the text is clearly a mate command and all fast paths miss, we still
+    // run the agent but cap it at MATE_AGENT_TIMEOUT_MS to prevent hangs.
 
-    // Helper: resolve source display name from scored resolution
-    const resolvedDisplayName = (
-      srcId: string,
-      resolution: ReturnType<typeof resolveEntityPair>,
-    ): string => {
-      const top = resolution.sourceEntityCandidates[0];
-      if (!top) return ctx.parts.find(p => p.id === srcId)?.name ?? srcId;
-      if (top.entityType === 'group') return top.displayName;
-      return top.displayName;
+    // Shared emit helper — fires action.demo_mate_and_apply with diagnostics
+    const emitMate = (
+      mateArgs: Record<string, unknown>,
+      displaySrc: string,
+      displayTgt: string,
+      fastPathKind: string,
+      diagFields: Record<string, unknown>,
+    ): RouterRoute => {
+      const diag = Object.entries(diagFields).map(([k, v]) => `${k}=${v}`).join(' ');
+      console.log(`[smart] mate fast-path(${fastPathKind}): ${displaySrc} → ${displayTgt} ${diag}`);
+      return withMeta(
+        {
+          toolCalls: [{ tool: 'action.demo_mate_and_apply', args: mateArgs }],
+          replyText: `正在組裝 ${displaySrc} → ${displayTgt}...`,
+        },
+        {
+          ...baseMeta,
+          route: 'fast-model',
+          fastMs: 0,
+          model: 'mate-fast-path',
+          reason: `fast_path:${fastPathKind}`,
+        }
+      );
     };
 
     if (isMateCommand(text)) {
-      // Case 1: part names mentioned explicitly in text
+      const multiIds = ctx.multiSelectIds ?? [];
+
+      // ── Case 0: Context-aware — selected group/part + target from text ──────
+      // Handles "把風扇模組裝到 THERMAL 上" even when the source name is not
+      // a part name (it's a group name or implicit from selection).
+      // This is the PRIMARY fast path for group-based assembly commands.
+      {
+        const ctxResolution = resolveEntityPairFromContext(text, ctx);
+        if (ctxResolution) {
+          const mateArgs = buildMateArgsFromContext(ctxResolution);
+          const srcDisplay = ctxResolution.source.displayName;
+          return emitMate(mateArgs, srcDisplay, ctxResolution.targetName, 'context-aware', {
+            usedFastPath: true,
+            sourceResolvedAs: ctxResolution.source.kind,
+            sourceEntityId: ctxResolution.source.kind === 'group'
+              ? ctxResolution.source.groupId
+              : ctxResolution.source.partId,
+            sourceGroupId: ctxResolution.sourceGroupId ?? 'none',
+            targetPartId: ctxResolution.targetPartId,
+            sourceResolvedBy: ctxResolution.sourceResolvedBy,
+            diag: ctxResolution.diagnostics.join(' | '),
+          });
+        }
+      }
+
+      // ── Case 1: Both part names explicitly in text ───────────────────────────
       const mateRefs = extractMatePartRefs(text, ctx.parts);
       if (mateRefs) {
         const { source, target } = mateRefs;
-        const geometryIntent = detectGeometryIntent(text);
         const resolution = resolveEntityPair(source.id, target.id, text, ctx);
 
         if (resolution.needsClarification && resolution.clarificationQuestion) {
-          console.log(`[smart] mate fast-path (names) → clarification needed`);
+          console.log(`[smart] mate fast-path(names) → clarification needed`);
           return withMeta(
             { toolCalls: [], replyText: resolution.clarificationQuestion },
             { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'entity-resolution' }
           );
         }
 
-        const displaySrc = resolvedDisplayName(source.id, resolution);
+        const top = resolution.sourceEntityCandidates[0];
+        const displaySrc = top?.displayName ?? source.name;
         const mateArgs = buildMateArgsFromResolution(source.id, target.id, resolution);
-        console.log(`[smart] mate fast-path (names): ${displaySrc} → ${target.name} intent=${geometryIntent} src=${resolution.sourceResolvedAs} diag=[${resolution.diagnostics.join(' | ')}]`);
-        return withMeta(
-          {
-            toolCalls: [{ tool: 'action.demo_mate_and_apply', args: mateArgs }],
-            replyText: `正在組裝 ${displaySrc} → ${target.name}...`,
-          },
-          { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'mate-fast-path' }
-        );
+        return emitMate(mateArgs, displaySrc, target.name, 'names', {
+          usedFastPath: true,
+          sourceResolvedAs: resolution.sourceResolvedAs ?? 'part',
+          sourceEntityId: top?.entityId ?? source.id,
+          sourceGroupId: top?.entityType === 'group' ? top.entityId : 'none',
+          targetPartId: target.id,
+        });
       }
 
-      // Case 2: deictic reference ("這兩個", "them", "these") — use multiSelectIds
+      // ── Case 2: Deictic + multi-select ───────────────────────────────────────
       const isDeictic = /這兩個|這2個|those|these|them|它們|兩個零件/.test(text);
-      const multiIds = ctx.multiSelectIds ?? [];
       if (isDeictic && multiIds.length >= 2) {
         const srcPart = ctx.parts.find((p) => p.id === multiIds[0]);
         const tgtPart = ctx.parts.find((p) => p.id === multiIds[1]);
         if (srcPart && tgtPart) {
           const resolution = resolveEntityPair(srcPart.id, tgtPart.id, text, ctx);
-
           if (resolution.needsClarification && resolution.clarificationQuestion) {
-            console.log(`[smart] mate fast-path (deictic) → clarification needed`);
             return withMeta(
               { toolCalls: [], replyText: resolution.clarificationQuestion },
               { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'entity-resolution' }
             );
           }
-
-          const displaySrc = resolvedDisplayName(srcPart.id, resolution);
-          const mateArgs = buildMateArgsFromResolution(srcPart.id, tgtPart.id, resolution);
-          console.log(`[smart] mate fast-path (deictic): ${displaySrc} → ${tgtPart.name} src=${resolution.sourceResolvedAs}`);
-          return withMeta(
+          const top = resolution.sourceEntityCandidates[0];
+          return emitMate(
+            buildMateArgsFromResolution(srcPart.id, tgtPart.id, resolution),
+            top?.displayName ?? srcPart.name,
+            tgtPart.name,
+            'deictic',
             {
-              toolCalls: [{ tool: 'action.demo_mate_and_apply', args: mateArgs }],
-              replyText: `正在組裝 ${displaySrc} → ${tgtPart.name}...`,
-            },
-            { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'mate-fast-path' }
+              usedFastPath: true,
+              sourceResolvedAs: resolution.sourceResolvedAs ?? 'part',
+              sourceEntityId: top?.entityId ?? srcPart.id,
+              sourceGroupId: top?.entityType === 'group' ? top.entityId : 'none',
+              targetPartId: tgtPart.id,
+            }
           );
         }
       }
 
-      // Case 3: exactly 2 parts multi-selected and text has mate intent — no explicit names needed
+      // ── Case 3: Exactly 2 multi-selected parts ───────────────────────────────
       if (multiIds.length === 2 && !isDeictic) {
         const srcPart = ctx.parts.find((p) => p.id === multiIds[0]);
         const tgtPart = ctx.parts.find((p) => p.id === multiIds[1]);
         if (srcPart && tgtPart) {
           const resolution = resolveEntityPair(srcPart.id, tgtPart.id, text, ctx);
-
           if (resolution.needsClarification && resolution.clarificationQuestion) {
-            console.log(`[smart] mate fast-path (multi-select) → clarification needed`);
             return withMeta(
               { toolCalls: [], replyText: resolution.clarificationQuestion },
               { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'entity-resolution' }
             );
           }
-
-          const displaySrc = resolvedDisplayName(srcPart.id, resolution);
-          const mateArgs = buildMateArgsFromResolution(srcPart.id, tgtPart.id, resolution);
-          console.log(`[smart] mate fast-path (multi-select): ${displaySrc} → ${tgtPart.name} src=${resolution.sourceResolvedAs}`);
-          return withMeta(
+          const top = resolution.sourceEntityCandidates[0];
+          return emitMate(
+            buildMateArgsFromResolution(srcPart.id, tgtPart.id, resolution),
+            top?.displayName ?? srcPart.name,
+            tgtPart.name,
+            'multi-select',
             {
-              toolCalls: [{ tool: 'action.demo_mate_and_apply', args: mateArgs }],
-              replyText: `正在組裝 ${displaySrc} → ${tgtPart.name}...`,
-            },
-            { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'mate-fast-path' }
+              usedFastPath: true,
+              sourceResolvedAs: resolution.sourceResolvedAs ?? 'part',
+              sourceEntityId: top?.entityId ?? srcPart.id,
+              sourceGroupId: top?.entityType === 'group' ? top.entityId : 'none',
+              targetPartId: tgtPart.id,
+            }
           );
         }
       }
+
+      // ── Mate fail-fast: all fast paths missed — run agent with timeout ────────
+      // Prevents hangs on commands like "幫我裝風扇" where no target name is known.
+      console.warn(`[smart] mate fast-path: all cases missed — falling through to agent (cap=${MATE_AGENT_TIMEOUT_MS}ms) text="${text.slice(0, 60)}"`);
     }
 
     // ── Layer 2: Agent (CAD docs + tool routing) ──────────────────────────────
+    // For mate commands: enforce a short timeout to prevent demo hangs.
+    const isMate = isMateCommand(text);
     try {
       const fastStart = Date.now();
-      const result = await AgentRouterProvider.route(text, ctx);
+      const agentPromise = AgentRouterProvider.route(text, ctx);
+      const timeoutMs = isMate ? MATE_AGENT_TIMEOUT_MS : CALL_TIMEOUT_MS;
+      const result = await Promise.race([
+        agentPromise,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`agent timeout after ${timeoutMs}ms`)), timeoutMs)
+        ),
+      ]);
       const fastMs = Date.now() - fastStart;
       console.log(`[smart] agent ok (${fastMs}ms)`);
-      return withMeta(result, { ...baseMeta, route: 'fast-model', fastMs, model: resolvedModelName('fast-model') });
+      return withMeta(result as RouterRoute, { ...baseMeta, route: 'fast-model', fastMs, model: resolvedModelName('fast-model') });
     } catch (err) {
-      console.warn('[smart] agent failed:', err instanceof Error ? err.message : err);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[smart] agent failed: ${msg}`);
+      if (isMate) {
+        return withMeta(
+          { toolCalls: [], replyText: '無法解析組裝指令，請明確指定來源和目標零件名稱（例如：「把風扇裝到 THERMAL 上」）。' },
+          { ...baseMeta, route: 'fast-model', reason: `mate_agent_failed: ${msg}` }
+        );
+      }
     }
 
     return withMeta(

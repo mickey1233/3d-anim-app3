@@ -279,6 +279,182 @@ export function resolveEntityPair(
 // Convenience: extract mate args from resolution result
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Context-aware resolution: source from selection/group, target from text
+// ---------------------------------------------------------------------------
+
+export type ContextResolutionSource =
+  | { kind: 'group'; groupId: string; representativePartId: string; displayName: string }
+  | { kind: 'part';  partId: string; displayName: string };
+
+export type ContextResolutionResult = {
+  source: ContextResolutionSource;
+  targetPartId: string;
+  targetName: string;
+  sourceGroupId: string | null;
+  /** How source was resolved. */
+  sourceResolvedBy: 'group_name_in_text' | 'selected_group' | 'selected_part' | 'first_part_in_text';
+  /** How target was resolved. */
+  targetResolvedBy: 'part_name_in_text';
+  diagnostics: string[];
+};
+
+/**
+ * Context-aware resolution for mate commands.
+ *
+ * Source resolution priority (highest → lowest):
+ *   1. Group name explicitly appears in text → use that group
+ *   2. Selected part is in a group + utterance has group/module/collective signal → use group
+ *   3. Selected part is in a group (no special signal) → use group (group wins by default when selected)
+ *   4. Selected part has no group → use selected part
+ *   5. First part name found in text that is NOT the target → use that part
+ *
+ * Target resolution:
+ *   - First part name in text that is NOT a member of the resolved source group
+ *
+ * Returns null when no target can be identified.
+ */
+export function resolveEntityPairFromContext(
+  text: string,
+  ctx: RouterContext,
+): ContextResolutionResult | null {
+  const diagnostics: string[] = [];
+  const groups = ctx.groups ?? [];
+
+  // ── Step 1: Resolve source ──────────────────────────────────────────────
+
+  let source: ContextResolutionSource | null = null;
+  let sourceResolvedBy: ContextResolutionResult['sourceResolvedBy'] | null = null;
+  let sourceMemberIds = new Set<string>();
+
+  // 1a. Group name appears explicitly in text
+  for (const group of groups) {
+    if (nameAppearsInText(group.name, text)) {
+      source = {
+        kind: 'group',
+        groupId: group.id,
+        representativePartId: group.partIds[0] ?? '',
+        displayName: group.name,
+      };
+      sourceResolvedBy = 'group_name_in_text';
+      sourceMemberIds = new Set(group.partIds);
+      diagnostics.push(`source: group_name_in_text group=${group.name}(${group.id})`);
+      break;
+    }
+  }
+
+  // 1b. Selected part drives group resolution
+  if (!source && ctx.selectionPartId) {
+    const selectedGroup = groups.find((g) => g.partIds.includes(ctx.selectionPartId!));
+    if (selectedGroup) {
+      // When selection is in a group, always use the group as source (group-first policy).
+      // The group is what the user intends to move.
+      source = {
+        kind: 'group',
+        groupId: selectedGroup.id,
+        representativePartId: ctx.selectionPartId,
+        displayName: selectedGroup.name,
+      };
+      sourceResolvedBy = hasPluralLanguage(text) || hasModuleKeyword(text)
+        ? 'selected_group'
+        : 'selected_group';
+      sourceMemberIds = new Set(selectedGroup.partIds);
+      diagnostics.push(`source: selected_group group=${selectedGroup.name}(${selectedGroup.id}) signal=${hasPluralLanguage(text) ? 'plural' : hasModuleKeyword(text) ? 'module' : 'default'}`);
+    } else {
+      // Selected part, no group
+      const part = ctx.parts.find((p) => p.id === ctx.selectionPartId);
+      if (part) {
+        source = { kind: 'part', partId: part.id, displayName: part.name };
+        sourceResolvedBy = 'selected_part';
+        sourceMemberIds = new Set([part.id]);
+        diagnostics.push(`source: selected_part part=${part.name}(${part.id})`);
+      }
+    }
+  }
+
+  // ── Step 2: Find target — first part name in text NOT in source members ──
+
+  const lowerText = text.toLowerCase();
+  let targetPart: { id: string; name: string } | null = null;
+
+  // Sort parts by where their name appears in text (earlier mention = likely target)
+  const textMatches = ctx.parts
+    .filter((p) => !sourceMemberIds.has(p.id))
+    .map((p) => ({ p, idx: lowerText.indexOf(p.name.toLowerCase()) }))
+    .filter((x) => x.idx >= 0)
+    .sort((a, b) => a.idx - b.idx);
+
+  if (textMatches.length > 0 && textMatches[0]) {
+    targetPart = { id: textMatches[0].p.id, name: textMatches[0].p.name };
+    diagnostics.push(`target: part_name_in_text part=${targetPart.name}(${targetPart.id})`);
+  }
+
+  if (!targetPart) {
+    diagnostics.push('target: not found in text');
+    return null;
+  }
+
+  // ── Step 3: Fallback source — first part name in text not equal to target ──
+
+  if (!source) {
+    const srcMatch = ctx.parts
+      .filter((p) => p.id !== targetPart!.id)
+      .map((p) => ({ p, idx: lowerText.indexOf(p.name.toLowerCase()) }))
+      .filter((x) => x.idx >= 0)
+      .sort((a, b) => a.idx - b.idx)[0];
+
+    if (srcMatch) {
+      const owningGroup = groups.find((g) => g.partIds.includes(srcMatch.p.id));
+      if (owningGroup) {
+        source = {
+          kind: 'group',
+          groupId: owningGroup.id,
+          representativePartId: srcMatch.p.id,
+          displayName: owningGroup.name,
+        };
+        sourceResolvedBy = 'first_part_in_text';
+        diagnostics.push(`source: first_part_in_text→group group=${owningGroup.name}`);
+      } else {
+        source = { kind: 'part', partId: srcMatch.p.id, displayName: srcMatch.p.name };
+        sourceResolvedBy = 'first_part_in_text';
+        diagnostics.push(`source: first_part_in_text→part part=${srcMatch.p.name}`);
+      }
+    }
+  }
+
+  if (!source) {
+    diagnostics.push('source: not found');
+    return null;
+  }
+
+  return {
+    source,
+    targetPartId: targetPart.id,
+    targetName: targetPart.name,
+    sourceGroupId: source.kind === 'group' ? source.groupId : null,
+    sourceResolvedBy: sourceResolvedBy!,
+    targetResolvedBy: 'part_name_in_text',
+    diagnostics,
+  };
+}
+
+/**
+ * Build mate tool args directly from a ContextResolutionResult.
+ */
+export function buildMateArgsFromContext(
+  ctx: ContextResolutionResult,
+): Record<string, unknown> {
+  const repPartId = ctx.source.kind === 'group'
+    ? ctx.source.representativePartId
+    : ctx.source.partId;
+
+  return {
+    sourcePart: { partId: repPartId },
+    targetPart: { partId: ctx.targetPartId },
+    ...(ctx.sourceGroupId ? { sourceGroupId: ctx.sourceGroupId } : {}),
+  };
+}
+
 /**
  * Build mate tool args from a resolved entity pair.
  * Mirrors the existing `buildMateArgs` pattern in smartProvider but uses scored resolution.
