@@ -24,6 +24,7 @@ import { groundObjects } from '../three/grounding/objectGrounder';
 import type { GroundingResult } from '../../../shared/schema/groundingTypes';
 import { getAllCards, getCard, registerPartBasic, applyVlmLabel, clearRegistry, syncRegistryFromStore } from '../three/grounding/partSemanticRegistry';
 import { planAssemblyConstraints, hasExplicitTargetInUtterance } from '../three/grounding/assemblyPlanner';
+import { routeAssemblyIntent, applyRoutingAdjustments, detectFallbackUsed } from '../three/mating/intentRouter';
 
 // ---------------------------------------------------------------------------
 // Candidate registry — session-scoped, cleared on scene reset
@@ -2391,6 +2392,16 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       targetFace: 'top',
     };
 
+    // Feature-First Intent Router: map instruction + geometry intent → preferred feature paths.
+    // The routing decision biases candidateRows scoring (additive, never replaces existing signals).
+    const intentRouting = routeAssemblyIntent({
+      instruction,
+      sourceName: source.partName,
+      targetName: target.partName,
+      geometryIntent,
+    });
+    console.log(`[intent-router] intent=${intentRouting.assemblyIntent} mode=${intentRouting.usedFeatureMode} diag=[${intentRouting.routingDiagnostics.join(' | ')}]`);
+
     const geometrySourceFace = preferredSourceFace || (rankingTop?.sourceFace as StoreFaceId | undefined) || (expectedFromCenters.sourceFace as StoreFaceId) || 'bottom';
     const geometryTargetFace = preferredTargetFace || (rankingTop?.targetFace as StoreFaceId | undefined) || (expectedFromCenters.targetFace as StoreFaceId) || 'top';
     const geometrySourceMethod = normalizeAnchorMethod(
@@ -2628,6 +2639,23 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         semanticScore += 0.35;
         tags.push('explicit_face_match');
       }
+
+      // Feature-First Intent Router adjustments (additive, never replaces existing signals).
+      // mount → rewards feature-extracting methods; penalizes bbox-only anchor.
+      // insert → same but with insert-specific weights.
+      // cover → modest extra vertical bonus; smaller bbox penalty.
+      // default → no change (fallback_generic = zero delta).
+      {
+        const { delta, tags: routeTags } = applyRoutingAdjustments(
+          intentRouting,
+          { sourceMethod: row.sourceMethod, targetMethod: row.targetMethod },
+          verticalPair,
+          lateralPair,
+        );
+        if (delta !== 0) semanticScore += delta;
+        tags.push(...routeTags);
+      }
+
       return [
         {
           candidateIndex: rankIndex,
@@ -2643,6 +2671,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       ];
     });
     const candidateRowsBySemantic = [...candidateRows].sort((a, b) => b.semanticScore - a.semanticScore);
+
+    // Post-sort: detect whether the top candidate used feature-extracting methods or fell back to bbox.
+    intentRouting.fallbackUsed = detectFallbackUsed(candidateRowsBySemantic[0]);
+    if (intentRouting.fallbackUsed && intentRouting.usedFeatureMode !== 'fallback_generic') {
+      console.log(`[intent-router] fallback_used=true — top candidate is bbox-based despite intent=${intentRouting.assemblyIntent}`);
+    }
 
     // Fix B post-sort: ensure feature_first_mount wins over planar_fallback when both exist.
     // If the top candidate has planar_fallback_penalty but a feature_first_mount candidate
@@ -2674,6 +2708,15 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         sourceMethod: explicitSourceMethod ?? null,
         targetMethod: explicitTargetMethod ?? null,
         preferredMode: preferredMode ?? null,
+      },
+      intentRouting: {
+        assemblyIntent: intentRouting.assemblyIntent,
+        usedFeatureMode: intentRouting.usedFeatureMode,
+        preferredFeatureTypes: intentRouting.preferredFeatureTypes,
+        preferredSolverFamilies: intentRouting.preferredSolverFamilies,
+        fallbackAllowed: intentRouting.fallbackAllowed,
+        fallbackUsed: intentRouting.fallbackUsed ?? false,
+        routingDiagnostics: intentRouting.routingDiagnostics,
       },
       geometry: {
         intent: geometryIntent,
@@ -6205,6 +6248,24 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       { targetExplicitlyMentioned: targetExplicit },
     );
 
+    // Intent routing: merge preferred solver families from Feature-First Intent Router
+    // into planConstraints so scorePlanConstraints() can boost the right solver family.
+    const smartMateRouting = routeAssemblyIntent({
+      instruction: input.utterance,
+      sourceName: topSource.partName,
+      targetName: topTarget.partName,
+      geometryIntent: 'default', // geometry intent not yet computed at this stage
+    });
+    if (smartMateRouting.preferredSolverFamilies.length > 0 && planConstraints) {
+      // Merge: prepend routing-preferred solvers before planner-preferred ones
+      const merged = [
+        ...smartMateRouting.preferredSolverFamilies,
+        ...planConstraints.preferredSolverFamilies,
+      ].filter((v, i, arr) => arr.indexOf(v) === i); // deduplicate, keep order
+      planConstraints.preferredSolverFamilies = merged;
+    }
+    console.log(`[intent-router/smart_mate] intent=${smartMateRouting.assemblyIntent} mode=${smartMateRouting.usedFeatureMode} preferredSolvers=[${planConstraints?.preferredSolverFamilies.join(', ')}]`);
+
     // Solver scoring with planning constraints
     const solverResult = scoreSolvers({
       sourceFeatures,
@@ -6237,6 +6298,14 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         disallowSameCategorySelfStack: planConstraints.disallowSameCategorySelfStack,
         preferredSolverFamilies: planConstraints.preferredSolverFamilies,
         planningNotes: planConstraints.planningNotes,
+      },
+      intentRouting: {
+        assemblyIntent: smartMateRouting.assemblyIntent,
+        usedFeatureMode: smartMateRouting.usedFeatureMode,
+        preferredFeatureTypes: smartMateRouting.preferredFeatureTypes,
+        preferredSolverFamilies: smartMateRouting.preferredSolverFamilies,
+        fallbackAllowed: smartMateRouting.fallbackAllowed,
+        routingDiagnostics: smartMateRouting.routingDiagnostics,
       },
       usedSelectionFallback: groundingResult.usedSelectionFallback,
       usedVlmRegistry: groundingResult.usedVlmRegistry,

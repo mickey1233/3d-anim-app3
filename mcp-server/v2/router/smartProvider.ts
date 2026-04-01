@@ -20,6 +20,7 @@
 import { AgentRouterProvider } from './agentProvider.js';
 import { CodexRouterProvider } from './codexProvider.js';
 import { type DocChunk, retrieveDocs } from './docsRetrieval.js';
+import { resolveEntityPair, buildMateArgsFromResolution } from './entityResolutionScorer.js';
 import { decideRoute, type RouteMeta } from './routeDecision.js';
 import type { RouterContext, RouterProvider, RouterRoute } from './types.js';
 
@@ -237,24 +238,15 @@ export const SmartRouterProvider: RouterProvider = {
 
     // ── Mate fast-path: no LLM needed — instant tool call generation ─────────
 
-    // Fix D helper: find the assembly group a given part belongs to (if any).
-    const getGroupForPart = (partId: string) =>
-      ctx.groups?.find((g) => g.partIds.includes(partId));
-
-    // Fix D helper: build mate args, automatically attaching sourceGroupId when
-    // the source part is a member of an assembly group.
-    const buildMateArgs = (
+    // Helper: resolve source display name from scored resolution
+    const resolvedDisplayName = (
       srcId: string,
-      tgtId: string,
-      extra?: Record<string, unknown>,
-    ): Record<string, unknown> => {
-      const srcGroup = getGroupForPart(srcId);
-      return {
-        sourcePart: { partId: srcId },
-        targetPart: { partId: tgtId },
-        ...(srcGroup ? { sourceGroupId: srcGroup.id } : {}),
-        ...extra,
-      };
+      resolution: ReturnType<typeof resolveEntityPair>,
+    ): string => {
+      const top = resolution.sourceEntityCandidates[0];
+      if (!top) return ctx.parts.find(p => p.id === srcId)?.name ?? srcId;
+      if (top.entityType === 'group') return top.displayName;
+      return top.displayName;
     };
 
     if (isMateCommand(text)) {
@@ -263,17 +255,22 @@ export const SmartRouterProvider: RouterProvider = {
       if (mateRefs) {
         const { source, target } = mateRefs;
         const geometryIntent = detectGeometryIntent(text);
-        const srcGroup = getGroupForPart(source.id);
-        const displaySrc = srcGroup
-          ? (ctx.groups?.find(g => g.id === srcGroup.id)?.name ?? source.name)
-          : source.name;
-        console.log(`[smart] mate fast-path (names): ${displaySrc} → ${target.name} intent=${geometryIntent}${srcGroup ? ` [group=${srcGroup.id}]` : ''}`);
+        const resolution = resolveEntityPair(source.id, target.id, text, ctx);
+
+        if (resolution.needsClarification && resolution.clarificationQuestion) {
+          console.log(`[smart] mate fast-path (names) → clarification needed`);
+          return withMeta(
+            { toolCalls: [], replyText: resolution.clarificationQuestion },
+            { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'entity-resolution' }
+          );
+        }
+
+        const displaySrc = resolvedDisplayName(source.id, resolution);
+        const mateArgs = buildMateArgsFromResolution(source.id, target.id, resolution);
+        console.log(`[smart] mate fast-path (names): ${displaySrc} → ${target.name} intent=${geometryIntent} src=${resolution.sourceResolvedAs} diag=[${resolution.diagnostics.join(' | ')}]`);
         return withMeta(
           {
-            toolCalls: [{
-              tool: 'action.demo_mate_and_apply',
-              args: buildMateArgs(source.id, target.id),
-            }],
+            toolCalls: [{ tool: 'action.demo_mate_and_apply', args: mateArgs }],
             replyText: `正在組裝 ${displaySrc} → ${target.name}...`,
           },
           { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'mate-fast-path' }
@@ -287,17 +284,22 @@ export const SmartRouterProvider: RouterProvider = {
         const srcPart = ctx.parts.find((p) => p.id === multiIds[0]);
         const tgtPart = ctx.parts.find((p) => p.id === multiIds[1]);
         if (srcPart && tgtPart) {
-          const srcGroup = getGroupForPart(srcPart.id);
-          const displaySrc = srcGroup
-            ? (ctx.groups?.find(g => g.id === srcGroup.id)?.name ?? srcPart.name)
-            : srcPart.name;
-          console.log(`[smart] mate fast-path (deictic): ${displaySrc} → ${tgtPart.name}${srcGroup ? ` [group=${srcGroup.id}]` : ''}`);
+          const resolution = resolveEntityPair(srcPart.id, tgtPart.id, text, ctx);
+
+          if (resolution.needsClarification && resolution.clarificationQuestion) {
+            console.log(`[smart] mate fast-path (deictic) → clarification needed`);
+            return withMeta(
+              { toolCalls: [], replyText: resolution.clarificationQuestion },
+              { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'entity-resolution' }
+            );
+          }
+
+          const displaySrc = resolvedDisplayName(srcPart.id, resolution);
+          const mateArgs = buildMateArgsFromResolution(srcPart.id, tgtPart.id, resolution);
+          console.log(`[smart] mate fast-path (deictic): ${displaySrc} → ${tgtPart.name} src=${resolution.sourceResolvedAs}`);
           return withMeta(
             {
-              toolCalls: [{
-                tool: 'action.demo_mate_and_apply',
-                args: buildMateArgs(srcPart.id, tgtPart.id),
-              }],
+              toolCalls: [{ tool: 'action.demo_mate_and_apply', args: mateArgs }],
               replyText: `正在組裝 ${displaySrc} → ${tgtPart.name}...`,
             },
             { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'mate-fast-path' }
@@ -310,17 +312,22 @@ export const SmartRouterProvider: RouterProvider = {
         const srcPart = ctx.parts.find((p) => p.id === multiIds[0]);
         const tgtPart = ctx.parts.find((p) => p.id === multiIds[1]);
         if (srcPart && tgtPart) {
-          const srcGroup = getGroupForPart(srcPart.id);
-          const displaySrc = srcGroup
-            ? (ctx.groups?.find(g => g.id === srcGroup.id)?.name ?? srcPart.name)
-            : srcPart.name;
-          console.log(`[smart] mate fast-path (multi-select): ${displaySrc} → ${tgtPart.name}${srcGroup ? ` [group=${srcGroup.id}]` : ''}`);
+          const resolution = resolveEntityPair(srcPart.id, tgtPart.id, text, ctx);
+
+          if (resolution.needsClarification && resolution.clarificationQuestion) {
+            console.log(`[smart] mate fast-path (multi-select) → clarification needed`);
+            return withMeta(
+              { toolCalls: [], replyText: resolution.clarificationQuestion },
+              { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'entity-resolution' }
+            );
+          }
+
+          const displaySrc = resolvedDisplayName(srcPart.id, resolution);
+          const mateArgs = buildMateArgsFromResolution(srcPart.id, tgtPart.id, resolution);
+          console.log(`[smart] mate fast-path (multi-select): ${displaySrc} → ${tgtPart.name} src=${resolution.sourceResolvedAs}`);
           return withMeta(
             {
-              toolCalls: [{
-                tool: 'action.demo_mate_and_apply',
-                args: buildMateArgs(srcPart.id, tgtPart.id),
-              }],
+              toolCalls: [{ tool: 'action.demo_mate_and_apply', args: mateArgs }],
               replyText: `正在組裝 ${displaySrc} → ${tgtPart.name}...`,
             },
             { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'mate-fast-path' }
