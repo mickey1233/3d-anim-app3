@@ -89,10 +89,13 @@ export function ChatPanel() {
           bboxSize: [Math.abs(scale[0]), Math.abs(scale[1]), Math.abs(scale[2])] as [number, number, number],
         };
       }),
-      groups: assemblyGroups.order
-        .map((id) => assemblyGroups.byId[id])
-        .filter(Boolean)
-        .map((g) => ({ id: g.id, name: g.name, partIds: g.partIds })),
+      // Read assemblyGroups fresh from the store (not the closure) so that groups
+      // created by previous mate operations are included even if sendMessage was
+      // memoized before those groups existed.
+      groups: (() => {
+        const ag = useV2Store.getState().assemblyGroups;
+        return ag.order.map((id) => ag.byId[id]).filter(Boolean).map((g) => ({ id: g.id, name: g.name, partIds: g.partIds }));
+      })(),
       steps: steps.list.map((s, i) => ({ id: s.id, index: i, label: s.label })),
     };
     try {

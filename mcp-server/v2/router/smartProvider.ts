@@ -271,7 +271,7 @@ export const SmartRouterProvider: RouterProvider = {
         return withMeta(
           {
             toolCalls: [{
-              tool: 'action.smart_mate_execute',
+              tool: 'action.demo_mate_and_apply',
               args: buildMateArgs(source.id, target.id),
             }],
             replyText: `正在組裝 ${displaySrc} → ${target.name}...`,
@@ -295,7 +295,7 @@ export const SmartRouterProvider: RouterProvider = {
           return withMeta(
             {
               toolCalls: [{
-                tool: 'action.smart_mate_execute',
+                tool: 'action.demo_mate_and_apply',
                 args: buildMateArgs(srcPart.id, tgtPart.id),
               }],
               replyText: `正在組裝 ${displaySrc} → ${tgtPart.name}...`,
@@ -318,7 +318,7 @@ export const SmartRouterProvider: RouterProvider = {
           return withMeta(
             {
               toolCalls: [{
-                tool: 'action.smart_mate_execute',
+                tool: 'action.demo_mate_and_apply',
                 args: buildMateArgs(srcPart.id, tgtPart.id),
               }],
               replyText: `正在組裝 ${displaySrc} → ${tgtPart.name}...`,

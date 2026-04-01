@@ -2601,6 +2601,24 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         }
       }
 
+      // Fix B: Feature-first mount path for fan → structural target.
+      // When a fan is mounted onto a thermal/chassis/board, require the solver to
+      // anchor on actual geometric clusters (planar_cluster / obb_pca) rather than
+      // bounding-box faces (object_aabb / geometry_aabb). This ensures alignment to
+      // screw-hole / standoff / peg regions rather than generic flat faces.
+      if (srcFanLike && tgtStructural) {
+        const srcFeatureMethod = row.sourceMethod === 'planar_cluster' || row.sourceMethod === 'obb_pca';
+        const tgtFeatureMethod = row.targetMethod === 'planar_cluster' || row.targetMethod === 'obb_pca';
+        if (srcFeatureMethod && tgtFeatureMethod) {
+          semanticScore += 0.25;
+          tags.push('feature_first_mount');
+        } else if (row.targetMethod === 'object_aabb' || row.targetMethod === 'geometry_aabb') {
+          // Generic bbox anchor on target — would align to flat face centroid, not features
+          semanticScore -= 0.22;
+          tags.push('planar_fallback_penalty');
+        }
+      }
+
       if (
         preferredSourceFace &&
         preferredTargetFace &&
@@ -2625,6 +2643,22 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       ];
     });
     const candidateRowsBySemantic = [...candidateRows].sort((a, b) => b.semanticScore - a.semanticScore);
+
+    // Fix B post-sort: ensure feature_first_mount wins over planar_fallback when both exist.
+    // If the top candidate has planar_fallback_penalty but a feature_first_mount candidate
+    // exists, swap the feature candidate to top so the solver uses the geometric anchor.
+    const srcFanForMount = /fan|FAN|風扇/i.test(source.partName);
+    const tgtStructForMount = /thermal|chassis|board|motherboard|base|frame|housing|cover/i.test(target.partName);
+    if (srcFanForMount && tgtStructForMount && candidateRowsBySemantic.length > 1) {
+      const topHasPlanarFallback = candidateRowsBySemantic[0].tags.includes('planar_fallback_penalty');
+      if (topHasPlanarFallback) {
+        const featureIdx = candidateRowsBySemantic.findIndex(c => c.tags.includes('feature_first_mount'));
+        if (featureIdx > 0) {
+          const [featureCand] = candidateRowsBySemantic.splice(featureIdx, 1);
+          candidateRowsBySemantic.unshift(featureCand);
+        }
+      }
+    }
 
     const store = currentStore();
     const partsCtx = store.parts.order.map((id) => ({ id, name: store.parts.byId[id]?.name || id }));
@@ -4232,6 +4266,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const commitData = unwrapToolData(committed, 'PREVIEW_NOT_FOUND');
 
     // Propagate rigid body delta to other group members if sourceGroupId specified
+    const groupDiagnostics: string[] = [];
     if (input.sourceGroupId) {
       const store = currentStore();
       const afterTransform = getPartTransformOrThrow(source.partId);
@@ -4240,33 +4275,51 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       const beforeQuat = new THREE.Quaternion(...sourceBeforeTransform.quaternion);
       const afterQuat = new THREE.Quaternion(...afterTransform.quaternion);
       const rotDelta = afterQuat.clone().multiply(beforeQuat.clone().invert());
+      const posDelta = afterPos.clone().sub(beforePos);
 
       const memberIds = store.getGroupParts(input.sourceGroupId).filter((id: string) => id !== source.partId);
+      groupDiagnostics.push(`group=${input.sourceGroupId} members=${memberIds.length} posDelta=[${posDelta.toArray().map(n=>n.toFixed(3)).join(',')}]`);
+
       for (const memberId of memberIds) {
-        const memberTransform = store.getPartTransform(memberId);
-        if (!memberTransform) continue;
-        const memberPos = new THREE.Vector3(...memberTransform.position);
-        const memberQuat = new THREE.Quaternion(...memberTransform.quaternion);
+        // Read member's current world position directly from Three.js (more reliable
+        // than the store for parts that haven't been re-committed since their last move).
+        const memberObj = getV2ObjectByPartId(memberId);
+        if (!memberObj) {
+          groupDiagnostics.push(`  ${memberId}: object not found in scene — skipped`);
+          continue;
+        }
+        memberObj.updateWorldMatrix(true, false);
+        const memberPos = new THREE.Vector3();
+        const memberQuat = new THREE.Quaternion();
+        memberObj.getWorldPosition(memberPos);
+        memberObj.getWorldQuaternion(memberQuat);
+
+        // Rigid body delta: rotate the relative position around the pre-mate source pos,
+        // then translate to the post-mate source pos.
         const relPos = memberPos.clone().sub(beforePos);
         relPos.applyQuaternion(rotDelta);
         const newPos = afterPos.clone().add(relPos);
         const newQuat = rotDelta.clone().multiply(memberQuat);
-        // Physically move the Three.js object (store.setPartOverride only updates records, not the scene)
-        const memberObj = getV2Scene()?.getObjectByProperty('uuid', memberId);
-        if (memberObj) {
-          memberObj.position.set(newPos.x, newPos.y, newPos.z);
-          memberObj.quaternion.set(newQuat.x, newQuat.y, newQuat.z, newQuat.w);
-        }
+
+        const memberScale = (store.getPartTransform(memberId) ?? getPartTransformOrThrow(memberId)).scale;
+
+        // Apply to Three.js object immediately (drives the visual)
+        memberObj.position.set(newPos.x, newPos.y, newPos.z);
+        memberObj.quaternion.set(newQuat.x, newQuat.y, newQuat.z, newQuat.w);
+        memberObj.updateMatrixWorld(true);
+
+        // Persist to Zustand store so snapshots / step playback use the correct position
         store.setPartOverride(memberId, {
           position: [newPos.x, newPos.y, newPos.z],
           quaternion: [newQuat.x, newQuat.y, newQuat.z, newQuat.w],
-          scale: memberTransform.scale,
+          scale: memberScale,
         });
         store.setManualTransform(memberId, {
           position: [newPos.x, newPos.y, newPos.z],
           quaternion: [newQuat.x, newQuat.y, newQuat.z, newQuat.w],
-          scale: memberTransform.scale,
+          scale: memberScale,
         });
+        groupDiagnostics.push(`  ${memberId}: moved to [${newPos.toArray().map(n=>n.toFixed(3)).join(',')}]`);
       }
     }
 
@@ -4295,6 +4348,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         committed: true,
         historyId: commitData.historyId,
         transform: commitData.transform,
+        ...(groupDiagnostics.length > 0 ? { groupRigidBody: groupDiagnostics } : {}),
       },
       { mutating: false, debug: plan.debug }
     );
@@ -4548,6 +4602,53 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             mode: explicitMode ?? null,
           },
         } as any,
+      }
+    );
+  }
+
+  // ── action.demo_mate_and_apply ───────────────────────────────────────────────
+  // One-command demo path: mate + commit + auto-create step.
+  // Eliminates the need for separate "add step" and "run" commands in demos.
+  if ((tool as string) === 'action.demo_mate_and_apply') {
+    const input = args as any;
+    const autoStep = input.autoStep !== false;  // default true
+    const label = String(input.stepLabel || '').trim()
+      || `Mate ${(input.sourcePart?.partName ?? input.sourcePart?.partId ?? 'part')} → ${(input.targetPart?.partName ?? input.targetPart?.partId ?? 'part')}`;
+
+    // Step 1: run smart_mate_execute
+    const mateEnvelope = await runTool('action.smart_mate_execute' as MCPToolName, {
+      sourcePart: input.sourcePart,
+      targetPart: input.targetPart,
+      instruction: input.instruction ?? '',
+      ...(input.sourceGroupId ? { sourceGroupId: input.sourceGroupId } : {}),
+      ...(input.sourceFace ? { sourceFace: input.sourceFace } : {}),
+      ...(input.targetFace ? { targetFace: input.targetFace } : {}),
+      ...(input.mode ? { mode: input.mode } : {}),
+      durationMs: input.durationMs ?? 800,
+      commit: true,
+    } as any);
+    const mateData = unwrapToolData(mateEnvelope, 'SOLVER_FAILED') as any;
+
+    // Step 2: auto-add a step capturing the current scene state
+    let stepResult: any = null;
+    if (autoStep) {
+      const stepEnvelope = await runTool('steps.add' as MCPToolName, { label, select: true } as any);
+      stepResult = unwrapToolData(stepEnvelope, 'INTERNAL_ERROR') as any;
+    }
+
+    return ok(
+      {
+        source: mateData.source,
+        target: mateData.target,
+        committed: mateData.committed,
+        chosen: mateData.chosen,
+        ...(mateData.transform ? { transform: mateData.transform } : {}),
+        ...(autoStep && stepResult ? { step: stepResult.step } : {}),
+        autoStepCreated: autoStep,
+      },
+      {
+        mutating: true,
+        debug: { notes: [`demo_mate_and_apply: mate committed, step auto-created=${autoStep}`] },
       }
     );
   }
