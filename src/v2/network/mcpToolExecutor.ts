@@ -4366,21 +4366,63 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       }
     }
 
-    // Auto-group source and target after successful mate
-    {
+    // ── Group merge policy ─────────────────────────────────────────────────────
+    // A group represents a rigid movable SOURCE subassembly only.
+    // The target part/group is the STRUCTURAL anchor — never pollute source group
+    // with target membership, and never add a standalone source into the target group.
+    //
+    // Policy:
+    //   srcGroup + external target  → record MountedRelation, DON'T touch group
+    //   external source + tgtGroup  → record MountedRelation, DON'T touch group
+    //   both in different groups    → merge (two peer subassemblies joining)
+    //   neither grouped             → create new group (first assembly of two standalone parts)
+    const groupMergeResult = (() => {
       const store = currentStore();
       const srcGroupId = store.getGroupForPart(source.partId);
       const tgtGroupId = store.getGroupForPart(target.partId);
+
+      const relation = {
+        sourceId: srcGroupId ?? source.partId,
+        sourceKind: (srcGroupId ? 'group' : 'part') as 'group' | 'part',
+        targetPartId: target.partId,
+        targetGroupId: tgtGroupId ?? undefined,
+        historyId: commitData.historyId,
+        timestamp: Date.now(),
+      };
+
       if (srcGroupId && tgtGroupId && srcGroupId !== tgtGroupId) {
-        store.mergeAssemblyGroups(srcGroupId, tgtGroupId);
-      } else if (srcGroupId) {
-        store.addPartToGroup(srcGroupId, target.partId);
-      } else if (tgtGroupId) {
-        store.addPartToGroup(tgtGroupId, source.partId);
-      } else {
-        store.createAssemblyGroup([source.partId, target.partId]);
+        // Two peer subassemblies — merge them into one movable unit
+        const mergedId = store.mergeAssemblyGroups(srcGroupId, tgtGroupId);
+        const resultMembers = store.getGroupParts(mergedId);
+        store.recordMountedRelation(relation);
+        console.log(`[group-policy] merged groups ${srcGroupId}+${tgtGroupId} → ${mergedId} members=[${resultMembers.join(',')}]`);
+        return { action: 'merge', mergedGroupId: mergedId, sourceGroupMembers: resultMembers, targetMergedIntoGroup: false };
       }
-    }
+
+      if (srcGroupId && !tgtGroupId) {
+        // Source is a group (movable subassembly), target is external structural part.
+        // Record the relation but do NOT add target to the source group.
+        store.recordMountedRelation(relation);
+        const sourceGroupMembers = store.getGroupParts(srcGroupId);
+        console.log(`[group-policy] mounted group ${srcGroupId} onto standalone target ${target.partId} — group preserved, target NOT added. members=[${sourceGroupMembers.join(',')}]`);
+        return { action: 'relation_only', sourceGroupId: srcGroupId, sourceGroupMembers, targetMergedIntoGroup: false };
+      }
+
+      if (!srcGroupId && tgtGroupId) {
+        // Source is standalone, target is in a group (structural assembly).
+        // Target group is the anchor — do NOT add standalone source into target group.
+        store.recordMountedRelation(relation);
+        console.log(`[group-policy] mounted standalone source ${source.partId} onto group ${tgtGroupId} — no group mutation.`);
+        return { action: 'relation_only', targetGroupId: tgtGroupId, targetMergedIntoGroup: false };
+      }
+
+      // Neither in a group: first assembly of two standalone parts → create a new group
+      const newGroupId = store.createAssemblyGroup([source.partId, target.partId]);
+      store.recordMountedRelation({ ...relation, sourceId: newGroupId, sourceKind: 'group' });
+      const newGroupMembers = store.getGroupParts(newGroupId);
+      console.log(`[group-policy] created new group ${newGroupId} for first-time assembly members=[${newGroupMembers.join(',')}]`);
+      return { action: 'created', newGroupId, sourceGroupMembers: newGroupMembers, targetMergedIntoGroup: true };
+    })();
 
     return ok(
       {
@@ -4392,6 +4434,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         historyId: commitData.historyId,
         transform: commitData.transform,
         ...(groupDiagnostics.length > 0 ? { groupRigidBody: groupDiagnostics } : {}),
+        groupPolicy: {
+          action: groupMergeResult.action,
+          targetMergedIntoGroup: groupMergeResult.targetMergedIntoGroup,
+          sourceGroupMembers: groupMergeResult.sourceGroupMembers ?? null,
+          mountedRelationRecorded: groupMergeResult.action === 'relation_only' || groupMergeResult.action === 'merge',
+        },
       },
       { mutating: false, debug: plan.debug }
     );

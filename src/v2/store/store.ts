@@ -13,6 +13,26 @@ export type AssemblyGroup = {
   partIds: string[];
 };
 
+/**
+ * Records a directed assembly relation: source entity was mounted onto targetPartId.
+ * Used instead of adding the target into the source group membership.
+ * A group's partIds always represent only the movable subassembly — never the structural target.
+ */
+export type MountedRelation = {
+  /** The source group ID (if source was a group) or source part ID. */
+  sourceId: string;
+  /** 'group' when source was an assembly group; 'part' when standalone. */
+  sourceKind: 'group' | 'part';
+  /** The target part ID that was assembled onto. */
+  targetPartId: string;
+  /** The target group ID if the target was part of a group. */
+  targetGroupId?: string;
+  /** The historyId from the mate commit, for cross-referencing. */
+  historyId?: string;
+  /** Unix timestamp (ms) of the mount event. */
+  timestamp: number;
+};
+
 export type PartTransform = {
   position: [number, number, number];
   quaternion: [number, number, number, number];
@@ -139,6 +159,7 @@ type Snapshot = {
     byId: Record<string, AssemblyGroup>;
     order: string[];
   };
+  mountedRelations: MountedRelation[];
 };
 
 export type V2State = {
@@ -155,6 +176,11 @@ export type V2State = {
     byId: Record<string, AssemblyGroup>;
     order: string[];
   };
+  /**
+   * Directed assembly relations: source (group or part) mounted_to target.
+   * Does NOT affect group membership — groups remain pure movable subassemblies.
+   */
+  mountedRelations: MountedRelation[];
   selection: { partId: string | null; groupId?: string; source: 'dropdown' | 'canvas' | 'list' | 'command' | 'system' };
   multiSelectIds: string[];
   steps: Snapshot['steps'];
@@ -307,6 +333,10 @@ export type V2State = {
   removePartFromGroup: (partId: string) => void;
   getGroupForPart: (partId: string) => string | null;
   getGroupParts: (groupId: string) => string[];
+  /** Record a directed mounted_to relation without mutating group membership. */
+  recordMountedRelation: (relation: MountedRelation) => void;
+  /** Return all relations involving a given source ID (group or part). */
+  getMountedRelationsForSource: (sourceId: string) => MountedRelation[];
   addVlmImages: (files: File[]) => void;
   moveVlmImage: (id: string, dir: -1 | 1) => void;
   removeVlmImage: (id: string) => void;
@@ -333,6 +363,7 @@ const takeSnapshot = (state: V2State): Snapshot => ({
     ),
     order: [...state.assemblyGroups.order],
   },
+  mountedRelations: [...state.mountedRelations],
 });
 
 const applySnapshot = (state: V2State, snap: Snapshot): Partial<V2State> => ({
@@ -342,6 +373,7 @@ const applySnapshot = (state: V2State, snap: Snapshot): Partial<V2State> => ({
   vlm: { ...state.vlm, result: snap.vlm.result, analyzing: snap.vlm.analyzing },
   parts: { ...state.parts, overridesById: { ...snap.parts.overridesById } },
   assemblyGroups: snap.assemblyGroups,
+  mountedRelations: snap.mountedRelations,
 });
 
 const cloneTransform = (t: PartTransform): PartTransform => ({
@@ -404,6 +436,7 @@ export const useV2Store = create<V2State>((set, get) => ({
   cadFileName: '',
   parts: { byId: {}, order: [], initialTransformById: {}, overridesById: {}, manualTransformById: {} },
   assemblyGroups: { byId: {}, order: [] },
+  mountedRelations: [],
   selection: { partId: null, source: 'system' },
   multiSelectIds: [],
   steps: { list: [], currentStepId: null },
@@ -493,6 +526,7 @@ export const useV2Store = create<V2State>((set, get) => ({
         manualTransformById: {},
       },
       assemblyGroups: { byId: {}, order: [] },
+      mountedRelations: [],
       history: { past: [], future: [], lastCommand: undefined },
     })),
 
@@ -504,6 +538,7 @@ export const useV2Store = create<V2State>((set, get) => ({
       selection: { partId: null, source: 'system' },
       parts: { byId: {}, order: [], initialTransformById: {}, overridesById: {}, manualTransformById: {} },
       assemblyGroups: { byId: {}, order: [] },
+      mountedRelations: [],
       markers: {},
       steps: { list: [], currentStepId: null },
       vlm: { images: [], result: undefined, analyzing: false },
@@ -970,6 +1005,13 @@ export const useV2Store = create<V2State>((set, get) => ({
   getGroupParts: (groupId) => {
     const state = get();
     return state.assemblyGroups.byId[groupId]?.partIds ?? [];
+  },
+
+  recordMountedRelation: (relation) =>
+    set((state) => ({ mountedRelations: [...state.mountedRelations, relation] })),
+
+  getMountedRelationsForSource: (sourceId) => {
+    return get().mountedRelations.filter((r) => r.sourceId === sourceId);
   },
 
   addVlmImages: (files) =>
