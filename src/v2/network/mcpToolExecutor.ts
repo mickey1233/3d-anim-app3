@@ -4453,6 +4453,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       groupDiagnostics.push(`group=${input.sourceGroupId} members=${memberIds.length} posDelta=[${posDelta.toArray().map(n=>n.toFixed(3)).join(',')}]`);
 
       const updatedMemberIds: string[] = [];
+      const batchUpdates: Array<{ partId: string; override: PartTransform; manual: PartTransform }> = [];
 
       for (const memberId of memberIds) {
         // Read member's current world position directly from Three.js (more reliable
@@ -4482,19 +4483,27 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         memberObj.quaternion.set(newQuat.x, newQuat.y, newQuat.z, newQuat.w);
         memberObj.updateMatrixWorld(true);
 
-        // Persist to Zustand store so snapshots / step playback use the correct position
-        store.setPartOverride(memberId, {
-          position: [newPos.x, newPos.y, newPos.z],
-          quaternion: [newQuat.x, newQuat.y, newQuat.z, newQuat.w],
-          scale: memberScale,
-        });
-        store.setManualTransform(memberId, {
-          position: [newPos.x, newPos.y, newPos.z],
-          quaternion: [newQuat.x, newQuat.y, newQuat.z, newQuat.w],
-          scale: memberScale,
+        // Collect for batch store write (done AFTER loop — 1 Zustand notify vs N×2)
+        batchUpdates.push({
+          partId: memberId,
+          override: {
+            position: [newPos.x, newPos.y, newPos.z],
+            quaternion: [newQuat.x, newQuat.y, newQuat.z, newQuat.w],
+            scale: memberScale,
+          },
+          manual: {
+            position: [newPos.x, newPos.y, newPos.z],
+            quaternion: [newQuat.x, newQuat.y, newQuat.z, newQuat.w],
+            scale: memberScale,
+          },
         });
         updatedMemberIds.push(memberId);
         groupDiagnostics.push(`  ${memberId}: moved to [${newPos.toArray().map(n=>n.toFixed(3)).join(',')}]`);
+      }
+
+      // Single batched Zustand write for all group members → 1 React re-render instead of N×2
+      if (batchUpdates.length > 0) {
+        store.batchSetPartOverridesAndManual(batchUpdates);
       }
 
       const skippedMemberIds = memberIds.filter((id: string) => !updatedMemberIds.includes(id));

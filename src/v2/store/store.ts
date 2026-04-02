@@ -348,6 +348,8 @@ export type V2State = {
   resetToManualTransforms: () => void;
   getPartTransform: (partId: string) => PartTransform | null;
   setManualTransform: (partId: string, transform: PartTransform) => void;
+  /** Batch update overrides + manual transforms for multiple parts in ONE Zustand notify (no history entry). */
+  batchSetPartOverridesAndManual: (updates: Array<{ partId: string; override: PartTransform; manual: PartTransform }>) => void;
   resetPartToInitial: (partId: string) => void;
   resetPartToManual: (partId: string) => void;
   createAssemblyGroup: (partIds: string[]) => string;
@@ -951,6 +953,20 @@ export const useV2Store = create<V2State>((set, get) => ({
       ...state,
       parts: { ...state.parts, manualTransformById: { ...state.parts.manualTransformById, [partId]: transform } },
     })),
+
+  batchSetPartOverridesAndManual: (updates) =>
+    set((state) => {
+      const nextOverrides = { ...state.parts.overridesById };
+      const nextManual = { ...state.parts.manualTransformById };
+      for (const { partId, override, manual } of updates) {
+        nextOverrides[partId] = override;
+        nextManual[partId] = manual;
+      }
+      return {
+        ...state,
+        parts: { ...state.parts, overridesById: nextOverrides, manualTransformById: nextManual },
+      };
+    }),
 
   resetPartToInitial: (partId) =>
     get().dispatch('reset_part_to_initial', (state) => {

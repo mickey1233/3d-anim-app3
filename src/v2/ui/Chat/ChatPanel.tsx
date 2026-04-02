@@ -115,6 +115,36 @@ export function ChatPanel() {
       setPendingTick(0);
       setPendingSince(Date.now());
       const res: any = await v2Client.request('router_execute', { text, context: ctx }, { timeoutMs: 120_000 });
+
+      // ── Browser-side UI timing ─────────────────────────────────────────────
+      // t0 = when WS response (with tool results) arrived back in the browser.
+      // Tool execution already completed inside v2Client.request() above.
+      const wsResponseT = performance.now();
+      const wsRoundTripMs = Math.round(wsResponseT - startedAt);
+
+      // Measure how long Zustand state mutations take (synchronous store writes
+      // triggered by setPartOverride calls during tool execution already happened,
+      // but appendChatMessage is the last synchronous store write here).
+      const storeUpdateT = performance.now();
+      // (appendMessage call below triggers the last store write for this command)
+
+      // Schedule rAF to capture when the browser next paints after the store update.
+      // This is the closest measurable proxy for React re-render + paint completion.
+      const rafScheduledT = performance.now();
+      window.requestAnimationFrame(() => {
+        const rafT = performance.now();
+        const uiTiming = {
+          wsRoundTripMs,
+          storeMutationMs: Math.round(storeUpdateT - wsResponseT),
+          reactRenderMs: Math.round(rafT - rafScheduledT),
+          uiTotalMs: Math.round(rafT - startedAt),
+        };
+        console.log('[ui-timing]', JSON.stringify(uiTiming));
+        // Expose for Playwright tests and debugging
+        (window as any).__UI_TIMING__ = uiTiming;
+      });
+      // ──────────────────────────────────────────────────────────────────────
+
       const reportedMs = Number(res?.meta?.timings?.totalMs);
       const measuredMs = Math.round(performance.now() - startedAt);
       setLastLatencyMs(Number.isFinite(reportedMs) ? Math.max(0, Math.floor(reportedMs)) : measuredMs);
