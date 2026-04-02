@@ -69,7 +69,72 @@ export const ENTITY_SCORE = {
    * Part name exactly matches a token in the utterance (base score for part candidates).
    */
   partNameMatchBonus: 0.15,
+
+  /**
+   * Entity matches a stored recent referent AND utterance has a deictic pronoun
+   * ("它", "this", "them", "那個" etc.) → boost the referent entity.
+   */
+  recentReferentBonus: 0.30,
+
+  /**
+   * Only one valid target remains after excluding source members — the sole
+   * remaining candidate is almost certainly the target.
+   */
+  soleRemainingTargetBonus: 0.20,
 } as const;
+
+// ---------------------------------------------------------------------------
+// Confidence types
+// ---------------------------------------------------------------------------
+
+/** Three-state confidence result for an assembly command. */
+export type ConfidenceState = 'high' | 'medium' | 'low';
+
+/**
+ * What kind of ambiguity caused a non-high confidence state.
+ * Drives targeted clarification question generation.
+ */
+export type AmbiguityType =
+  | 'part_vs_group'           // top-2 source candidates are competing part vs group
+  | 'multiple_source_peers'   // top-2 source candidates are same type
+  | 'multiple_target_peers'   // top-2 target candidates both have positive signal
+  | 'target_unclear'          // source resolved but target has no signal
+  | 'source_unclear'          // source cannot be resolved
+  | 'both_unclear';           // neither source nor target has any signal
+
+/** Full confidence assessment for an assembly utterance. */
+export type ConfidenceAssessment = {
+  state: ConfidenceState;
+  sourceCandidates: EntityResolutionCandidate[];
+  targetCandidates: EntityResolutionCandidate[];
+  /** Normalized assembly intent (mount / insert / cover / default). */
+  normalizedIntent: string;
+  ambiguityType: AmbiguityType | null;
+  clarificationQuestion: string | null;
+  /** One-line summary for diagnostics / response metadata. */
+  confidenceSummary: string;
+  usedSelectionSignal: boolean;
+  usedRecentReferent: boolean;
+  diagnostics: string[];
+};
+
+// ---------------------------------------------------------------------------
+// Recent referents (stored per session, used for pronoun resolution)
+// ---------------------------------------------------------------------------
+
+/**
+ * A recently-used entity in an assembly command.
+ * Stored on the frontend store and sent in RouterContext so the server
+ * can resolve deictic pronouns like "它", "this", "them".
+ */
+export type RecentReferent = {
+  entityId: string;
+  entityType: 'part' | 'group';
+  displayName: string;
+  memberPartIds: string[];
+  role: 'source' | 'target';
+  timestamp: number;
+};
 
 // ---------------------------------------------------------------------------
 // Full resolution result

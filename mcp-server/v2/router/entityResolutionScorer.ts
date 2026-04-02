@@ -21,6 +21,9 @@ import type { RouterContext } from './types.js';
 import {
   type EntityResolutionCandidate,
   type EntityResolutionResult,
+  type ConfidenceState,
+  type AmbiguityType,
+  type ConfidenceAssessment,
   ENTITY_SCORE,
 } from '../../../shared/schema/entityResolutionTypes.js';
 
@@ -501,5 +504,312 @@ export function buildMateArgsFromResolution(
     targetPart: { partId: targetPartId },
     ...(sourceGroupId ? { sourceGroupId } : {}),
     ...extra,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Deictic pronoun detection (for recent-referent signal)
+// ---------------------------------------------------------------------------
+
+const DEICTIC_PATTERNS = [
+  /它|他|那個|這個|這件|那件|這塊|那塊|這零件|那零件/,
+  /\b(?:it|this|that|them|those|these|the\s+part|the\s+one)\b/i,
+];
+
+export function hasDicticLanguage(text: string): boolean {
+  return DEICTIC_PATTERNS.some((p) => p.test(text));
+}
+
+// ---------------------------------------------------------------------------
+// Full-scene candidate ranking (works without pre-selected partId)
+// ---------------------------------------------------------------------------
+
+const HIGH_CONFIDENCE_GAP   = 0.18;  // source top-1 must beat top-2 by this
+const MIN_POSITIVE_SCORE    = 0.01;  // at least one positive signal must have fired
+const HIGH_TARGET_MIN_SCORE = 0.01;  // target must have at least one signal
+
+/**
+ * Rank ALL parts and groups in the scene as potential source candidates,
+ * and ALL non-source parts as potential target candidates.
+ *
+ * Works without a pre-selected partId — applies every available signal:
+ * selection, group membership, name in text, deictic+recentReferent,
+ * sole-remaining-target bonus.
+ *
+ * Returns the top-4 source and top-4 target candidates sorted by score.
+ */
+export function rankAllCandidates(
+  text: string,
+  ctx: RouterContext,
+): {
+  sourceCandidates: EntityResolutionCandidate[];
+  targetCandidates: EntityResolutionCandidate[];
+  usedSelectionSignal: boolean;
+  usedRecentReferent: boolean;
+} {
+  const groups = ctx.groups ?? [];
+  const deictic = hasDicticLanguage(text);
+  const recentSource = ctx.recentReferents?.lastSource ?? null;
+  const recentTarget = ctx.recentReferents?.lastTarget ?? null;
+
+  let usedRecentReferent = false;
+  const usedSelectionSignal =
+    ctx.selectionPartId != null || (ctx.multiSelectIds?.length ?? 0) > 0;
+
+  // ── Source candidates ────────────────────────────────────────────────────
+
+  const rawSourceCandidates: EntityResolutionCandidate[] = [];
+
+  // Score every group
+  for (const group of groups) {
+    const cand = buildGroupCandidate(group, text, ctx);
+    // Deictic + recent referent
+    if (deictic && recentSource && recentSource.entityId === group.id) {
+      cand.score += ENTITY_SCORE.recentReferentBonus;
+      cand.signals.push(`recentReferentBonus(+${ENTITY_SCORE.recentReferentBonus})`);
+      usedRecentReferent = true;
+    }
+    rawSourceCandidates.push(cand);
+  }
+
+  // Score every part
+  for (const part of ctx.parts) {
+    const cand = buildPartCandidate(part, text, ctx);
+    const owningGroups = groups.filter((g) => g.partIds.includes(part.id));
+    if (owningGroups.length > 0) applyChildNameBonus(cand, text);
+    // Deictic + recent referent
+    if (deictic && recentSource && recentSource.entityId === part.id) {
+      cand.score += ENTITY_SCORE.recentReferentBonus;
+      cand.signals.push(`recentReferentBonus(+${ENTITY_SCORE.recentReferentBonus})`);
+      usedRecentReferent = true;
+    }
+    rawSourceCandidates.push(cand);
+  }
+
+  rawSourceCandidates.sort((a, b) => b.score - a.score);
+  const sourceCandidates = rawSourceCandidates.slice(0, 4);
+  const sourceMemberIds = new Set(sourceCandidates[0]?.memberPartIds ?? []);
+
+  // ── Target candidates ────────────────────────────────────────────────────
+
+  const rawTargetCandidates: EntityResolutionCandidate[] = ctx.parts
+    .filter((p) => !sourceMemberIds.has(p.id))
+    .map((p) => {
+      const cand = buildPartCandidate(p, text, ctx);
+      // Deictic + recent target referent
+      if (deictic && recentTarget && recentTarget.entityId === p.id) {
+        cand.score += ENTITY_SCORE.recentReferentBonus;
+        cand.signals.push(`recentReferentBonus(+${ENTITY_SCORE.recentReferentBonus})`);
+        usedRecentReferent = true;
+      }
+      return cand;
+    });
+
+  // Sole-remaining-target bonus: if only 1 valid target remains, it's likely the target
+  if (rawTargetCandidates.length === 1 && rawTargetCandidates[0]) {
+    rawTargetCandidates[0].score += ENTITY_SCORE.soleRemainingTargetBonus;
+    rawTargetCandidates[0].signals.push(`soleRemainingTargetBonus(+${ENTITY_SCORE.soleRemainingTargetBonus})`);
+  }
+
+  rawTargetCandidates.sort((a, b) => b.score - a.score);
+  const targetCandidates = rawTargetCandidates.slice(0, 4);
+
+  return { sourceCandidates, targetCandidates, usedSelectionSignal, usedRecentReferent };
+}
+
+// ---------------------------------------------------------------------------
+// Targeted clarification question generator
+// ---------------------------------------------------------------------------
+
+function buildTargetedClarification(
+  ambiguityType: AmbiguityType | null,
+  sourceCandidates: EntityResolutionCandidate[],
+  targetCandidates: EntityResolutionCandidate[],
+): string {
+  const src1 = sourceCandidates[0];
+  const src2 = sourceCandidates[1];
+  const tgt1 = targetCandidates[0];
+  const tgt2 = targetCandidates[1];
+
+  switch (ambiguityType) {
+    case 'part_vs_group': {
+      const groupCand = [src1, src2].find((c) => c?.entityType === 'group');
+      const partCand  = [src1, src2].find((c) => c?.entityType === 'part');
+      if (groupCand && partCand) {
+        return `你說的「${partCand.displayName}」，是單一零件，還是目前的「${groupCand.displayName}」模組？`;
+      }
+      break;
+    }
+    case 'multiple_source_peers': {
+      if (src1 && src2) {
+        return `我找到兩個可能的來源：「${src1.displayName}」、「${src2.displayName}」。你要哪一個？`;
+      }
+      break;
+    }
+    case 'multiple_target_peers': {
+      if (tgt1 && tgt2) {
+        return `目標不確定，找到兩個可能：「${tgt1.displayName}」、「${tgt2.displayName}」。你要裝到哪一個上？`;
+      }
+      break;
+    }
+    case 'target_unclear': {
+      const srcLabel = src1 ? `「${src1.displayName}」` : '這個零件';
+      const suggestions = targetCandidates
+        .filter((c) => c.score >= 0)
+        .slice(0, 3)
+        .map((c) => `「${c.displayName}」`)
+        .join('、');
+      if (suggestions) {
+        return `你要把 ${srcLabel} 裝到哪個零件上？（場景中有：${suggestions}）`;
+      }
+      return `你要把 ${srcLabel} 裝到哪個零件上？`;
+    }
+    case 'source_unclear': {
+      const suggestions = sourceCandidates
+        .filter((c) => c.score >= 0)
+        .slice(0, 3)
+        .map((c) => `「${c.displayName}」`)
+        .join('、');
+      if (suggestions) {
+        return `你想組裝哪個零件或模組？（場景中有：${suggestions}）`;
+      }
+      return '你想組裝哪個零件或模組？請告訴我來源零件名稱。';
+    }
+    case 'both_unclear':
+    default:
+      return '請告訴我你想組裝哪兩個零件或模組（例如：「把 A 裝到 B 上」）。';
+  }
+  return '請告訴我來源和目標零件，我才能繼續。';
+}
+
+// ---------------------------------------------------------------------------
+// Confidence assessment
+// ---------------------------------------------------------------------------
+
+/**
+ * Full confidence assessment for an assembly utterance.
+ *
+ * Confidence states:
+ *   HIGH   — top source beats runner by ≥ HIGH_CONFIDENCE_GAP and target
+ *             has a positive score (or sole remaining target). → execute.
+ *   MEDIUM — source is identifiable but target is unclear, or small gap between
+ *             top candidates. → ask targeted clarification.
+ *   LOW    — source cannot be identified at all. → ask user to specify.
+ *
+ * @param text             Full utterance
+ * @param ctx              RouterContext (includes recentReferents)
+ * @param normalizedIntent 'mount' | 'mount_to_target' | 'insert' | 'cover' | 'default'
+ */
+export function assessConfidence(
+  text: string,
+  ctx: RouterContext,
+  normalizedIntent = 'default',
+): ConfidenceAssessment {
+  const diagnostics: string[] = [];
+  const { sourceCandidates, targetCandidates, usedSelectionSignal, usedRecentReferent } =
+    rankAllCandidates(text, ctx);
+
+  const srcTop    = sourceCandidates[0] ?? null;
+  const srcRunner = sourceCandidates[1] ?? null;
+  const tgtTop    = targetCandidates[0] ?? null;
+  const tgtRunner = targetCandidates[1] ?? null;
+
+  const srcGap = srcTop && srcRunner
+    ? srcTop.score - srcRunner.score
+    : srcTop ? Infinity : 0;
+  const tgtGap = tgtTop && tgtRunner
+    ? tgtTop.score - tgtRunner.score
+    : tgtTop ? Infinity : 0;
+
+  const srcOk = srcTop != null && srcTop.score > MIN_POSITIVE_SCORE;
+  const tgtOk = tgtTop != null && tgtTop.score > HIGH_TARGET_MIN_SCORE;
+
+  diagnostics.push(
+    `src top=${srcTop?.displayName}(${srcTop?.score.toFixed(2)}) runner=${srcRunner?.displayName}(${srcRunner?.score.toFixed(2) ?? 'none'}) gap=${srcGap === Infinity ? '∞' : srcGap.toFixed(2)}`,
+    `tgt top=${tgtTop?.displayName}(${tgtTop?.score.toFixed(2)}) runner=${tgtRunner?.displayName}(${tgtRunner?.score.toFixed(2) ?? 'none'}) gap=${tgtGap === Infinity ? '∞' : tgtGap.toFixed(2)}`,
+    `usedSelection=${usedSelectionSignal} usedReferent=${usedRecentReferent}`,
+  );
+
+  let state: ConfidenceState;
+  let ambiguityType: AmbiguityType | null = null;
+
+  if (!srcOk && !tgtOk) {
+    state = 'low';
+    ambiguityType = 'both_unclear';
+  } else if (!srcOk) {
+    state = 'low';
+    ambiguityType = 'source_unclear';
+  } else if (!tgtOk) {
+    // Source is identifiable, target is not → MEDIUM (ask which target)
+    state = 'medium';
+    ambiguityType = 'target_unclear';
+  } else if (srcGap >= HIGH_CONFIDENCE_GAP && tgtGap >= HIGH_CONFIDENCE_GAP) {
+    state = 'high';
+  } else {
+    state = 'medium';
+    // Classify the ambiguity type
+    if (srcGap < HIGH_CONFIDENCE_GAP && srcTop && srcRunner &&
+        srcTop.entityType !== srcRunner.entityType) {
+      ambiguityType = 'part_vs_group';
+    } else if (srcGap < HIGH_CONFIDENCE_GAP) {
+      ambiguityType = 'multiple_source_peers';
+    } else {
+      ambiguityType = 'multiple_target_peers';
+    }
+  }
+
+  const clarificationQuestion =
+    state !== 'high' ? buildTargetedClarification(ambiguityType, sourceCandidates, targetCandidates) : null;
+
+  const confidenceSummary = [
+    `state=${state}`,
+    ambiguityType ? `ambiguity=${ambiguityType}` : '',
+    `src=${srcTop?.displayName ?? 'none'}(${srcTop?.score.toFixed(2) ?? '0'})`,
+    `tgt=${tgtTop?.displayName ?? 'none'}(${tgtTop?.score.toFixed(2) ?? '0'})`,
+    `gap_src=${srcGap === Infinity ? '∞' : srcGap.toFixed(2)}`,
+    `gap_tgt=${tgtGap === Infinity ? '∞' : tgtGap.toFixed(2)}`,
+  ].filter(Boolean).join(' ');
+
+  diagnostics.push(`confidenceSummary: ${confidenceSummary}`);
+
+  return {
+    state,
+    sourceCandidates,
+    targetCandidates,
+    normalizedIntent,
+    ambiguityType,
+    clarificationQuestion,
+    confidenceSummary,
+    usedSelectionSignal,
+    usedRecentReferent,
+    diagnostics,
+  };
+}
+
+/**
+ * Build mate args from a HIGH-confidence assessment result.
+ * Returns null if the assessment is not high confidence.
+ */
+export function buildMateArgsFromAssessment(
+  assessment: ConfidenceAssessment,
+): Record<string, unknown> | null {
+  if (assessment.state !== 'high') return null;
+
+  const srcTop = assessment.sourceCandidates[0];
+  const tgtTop = assessment.targetCandidates[0];
+  if (!srcTop || !tgtTop) return null;
+
+  const repPartId = srcTop.memberPartIds[0];
+  if (!repPartId) return null;
+
+  const targetPartId = tgtTop.entityType === 'part'
+    ? tgtTop.entityId
+    : tgtTop.memberPartIds[0];
+  if (!targetPartId) return null;
+
+  return {
+    sourcePart: { partId: repPartId },
+    targetPart: { partId: targetPartId },
+    ...(srcTop.entityType === 'group' ? { sourceGroupId: srcTop.entityId } : {}),
   };
 }

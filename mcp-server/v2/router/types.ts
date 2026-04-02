@@ -1,4 +1,5 @@
 import type { ToolCall } from '../../../shared/schema/index.js';
+import type { RecentReferent } from '../../../shared/schema/entityResolutionTypes.js';
 
 export type RouterToolResult = {
   tool: string;
@@ -46,6 +47,15 @@ export type RouterContext = {
   iteration?: number;
   /** Injected by wsGateway when MATE_VLM_ENABLE=1: result of vlm.capture_for_mate. */
   vlmMateCapture?: VlmMateCapture | null;
+  /**
+   * Recent entity referents from the frontend store.
+   * Populated by the frontend (ChatPanel) and used by entityResolutionScorer
+   * to resolve deictic pronouns like "它", "this", "them", "那個".
+   */
+  recentReferents?: {
+    lastSource: RecentReferent | null;
+    lastTarget: RecentReferent | null;
+  } | null;
 };
 
 /** Optional metadata attached by smartProvider to describe which layer handled the request. */

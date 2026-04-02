@@ -181,6 +181,15 @@ export type V2State = {
    * Does NOT affect group membership — groups remain pure movable subassemblies.
    */
   mountedRelations: MountedRelation[];
+  /**
+   * Recent entity referents for deictic pronoun resolution ("它", "this", "them").
+   * Updated after every successful mate operation.
+   * Sent to the router in RouterContext.recentReferents.
+   */
+  recentReferents: {
+    lastSource: { entityId: string; entityType: 'part' | 'group'; displayName: string; memberPartIds: string[]; role: 'source'; timestamp: number } | null;
+    lastTarget: { entityId: string; entityType: 'part' | 'group'; displayName: string; memberPartIds: string[]; role: 'target'; timestamp: number } | null;
+  };
   selection: { partId: string | null; groupId?: string; source: 'dropdown' | 'canvas' | 'list' | 'command' | 'system' };
   multiSelectIds: string[];
   steps: Snapshot['steps'];
@@ -335,6 +344,11 @@ export type V2State = {
   getGroupParts: (groupId: string) => string[];
   /** Record a directed mounted_to relation without mutating group membership. */
   recordMountedRelation: (relation: MountedRelation) => void;
+  /** Update the recent referent for source or target after a successful mate. */
+  setRecentReferent: (
+    role: 'source' | 'target',
+    entity: { entityId: string; entityType: 'part' | 'group'; displayName: string; memberPartIds: string[] },
+  ) => void;
   /** Return all relations involving a given source ID (group or part). */
   getMountedRelationsForSource: (sourceId: string) => MountedRelation[];
   /** Rename an assembly group. */
@@ -439,6 +453,7 @@ export const useV2Store = create<V2State>((set, get) => ({
   parts: { byId: {}, order: [], initialTransformById: {}, overridesById: {}, manualTransformById: {} },
   assemblyGroups: { byId: {}, order: [] },
   mountedRelations: [],
+  recentReferents: { lastSource: null, lastTarget: null },
   selection: { partId: null, source: 'system' },
   multiSelectIds: [],
   steps: { list: [], currentStepId: null },
@@ -529,6 +544,7 @@ export const useV2Store = create<V2State>((set, get) => ({
       },
       assemblyGroups: { byId: {}, order: [] },
       mountedRelations: [],
+      recentReferents: { lastSource: null, lastTarget: null },
       history: { past: [], future: [], lastCommand: undefined },
     })),
 
@@ -541,6 +557,7 @@ export const useV2Store = create<V2State>((set, get) => ({
       parts: { byId: {}, order: [], initialTransformById: {}, overridesById: {}, manualTransformById: {} },
       assemblyGroups: { byId: {}, order: [] },
       mountedRelations: [],
+      recentReferents: { lastSource: null, lastTarget: null },
       markers: {},
       steps: { list: [], currentStepId: null },
       vlm: { images: [], result: undefined, analyzing: false },
@@ -1015,6 +1032,18 @@ export const useV2Store = create<V2State>((set, get) => ({
   getMountedRelationsForSource: (sourceId) => {
     return get().mountedRelations.filter((r) => r.sourceId === sourceId);
   },
+
+  setRecentReferent: (role, entity) =>
+    set((state) => ({
+      recentReferents: {
+        ...state.recentReferents,
+        [role === 'source' ? 'lastSource' : 'lastTarget']: {
+          ...entity,
+          role,
+          timestamp: Date.now(),
+        },
+      },
+    })),
 
   renameAssemblyGroup: (groupId, name) =>
     set((state) => {

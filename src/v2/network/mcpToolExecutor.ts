@@ -4442,6 +4442,38 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       return { action: 'created', newGroupId, sourceGroupMembers: newGroupMembers, targetMergedIntoGroup: true };
     })();
 
+    // ── Record recent referents for pronoun resolution ─────────────────────
+    // After a successful mate, store source and target as referents so
+    // follow-up commands like "把它再移一點" can resolve without pre-selection.
+    {
+      const s = currentStore();
+      const srcGroupId = s.getGroupForPart(source.partId);
+      if (srcGroupId) {
+        const grp = s.assemblyGroups.byId[srcGroupId];
+        if (grp) {
+          s.setRecentReferent('source', {
+            entityId: srcGroupId,
+            entityType: 'group',
+            displayName: grp.name,
+            memberPartIds: grp.partIds,
+          });
+        }
+      } else {
+        s.setRecentReferent('source', {
+          entityId: source.partId,
+          entityType: 'part',
+          displayName: source.partName,
+          memberPartIds: [source.partId],
+        });
+      }
+      s.setRecentReferent('target', {
+        entityId: target.partId,
+        entityType: 'part',
+        displayName: target.partName,
+        memberPartIds: [target.partId],
+      });
+    }
+
     return ok(
       {
         source,
@@ -4559,7 +4591,6 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       (typeof inferred?.mode === 'string' && ['translate', 'twist', 'both'].includes(inferred.mode)
         ? (inferred.mode as MateExecMode)
         : agentParams?.mode ?? (intentKind === 'cover' ? 'both' : 'translate'));
-    const operation = mode === 'both' ? 'both' : mode === 'twist' ? 'twist' : 'mate';
     const mateMode = input.mateMode ?? (mode === 'both' ? 'face_insert_arc' : 'face_flush');
     const pathPreferenceRaw = (input.pathPreference as 'auto' | 'line' | 'arc' | 'screw' | undefined) ?? 'auto';
     const pathPreference =

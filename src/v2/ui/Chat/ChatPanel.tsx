@@ -24,6 +24,7 @@ export function ChatPanel() {
   const appendChatMessage = useV2Store((s) => s.appendChatMessage);
   const parts = useV2Store((s) => s.parts);
   const assemblyGroups = useV2Store((s) => s.assemblyGroups);
+  const recentReferents = useV2Store((s) => s.recentReferents);
   const cadFileName = useV2Store((s) => s.cadFileName);
   const steps = useV2Store((s) => s.steps);
   const selectionPartId = useV2Store((s) => s.selection.partId);
@@ -97,6 +98,10 @@ export function ChatPanel() {
         return ag.order.map((id) => ag.byId[id]).filter(Boolean).map((g) => ({ id: g.id, name: g.name, partIds: g.partIds }));
       })(),
       steps: steps.list.map((s, i) => ({ id: s.id, index: i, label: s.label })),
+      // Recent referents for pronoun resolution ("它", "this part", etc.)
+      recentReferents: (recentReferents.lastSource || recentReferents.lastTarget)
+        ? recentReferents
+        : undefined,
     };
     try {
       const startedAt = performance.now();
@@ -145,6 +150,7 @@ export function ChatPanel() {
     helpText,
     interactionMode,
     parts,
+    recentReferents,
     selectionPartId,
     steps.currentStepId,
     steps.list.length,

@@ -25,6 +25,8 @@ import {
   resolveEntityPairFromContext,
   buildMateArgsFromResolution,
   buildMateArgsFromContext,
+  assessConfidence,
+  buildMateArgsFromAssessment,
 } from './entityResolutionScorer.js';
 import { decideRoute, type RouteMeta } from './routeDecision.js';
 import type { RouterContext, RouterProvider, RouterRoute } from './types.js';
@@ -526,6 +528,66 @@ export const SmartRouterProvider: RouterProvider = {
               sourceEntityId: top?.entityId ?? srcPart.id,
               sourceGroupId: top?.entityType === 'group' ? top.entityId : 'none',
               targetPartId: tgtPart.id,
+            }
+          );
+        }
+      }
+
+      // ── Case 4: Confidence-based inference (no selection, no names required) ──
+      // Runs when Cases 0-3 all miss. Ranks ALL entities, checks confidence,
+      // and either executes (HIGH), asks clarification (MEDIUM), or asks
+      // the user to specify more clearly (LOW).
+      {
+        const normalizedIntent = classifyAssemblyIntent(text) === 'mount_to_target'
+          ? 'mount_to_target'
+          : detectGeometryIntent(text) === 'insert' ? 'insert'
+          : detectGeometryIntent(text) === 'cover' ? 'cover'
+          : 'mount';
+        const assessment = assessConfidence(text, ctx, normalizedIntent);
+        console.log(`[smart] case4-confidence: ${assessment.confidenceSummary}`);
+
+        if (assessment.state === 'high') {
+          const mateArgs = buildMateArgsFromAssessment(assessment);
+          if (mateArgs) {
+            const srcCand = assessment.sourceCandidates[0]!;
+            const tgtCand = assessment.targetCandidates[0]!;
+            return emitMate(mateArgs, srcCand.displayName, tgtCand.displayName, 'confidence-inferred', {
+              usedFastPath: true,
+              usedContextAwareFastPath: true,
+              usedSelectionSignal: assessment.usedSelectionSignal,
+              usedRecentReferent: assessment.usedRecentReferent,
+              confidenceState: 'high',
+              ambiguityType: 'none',
+              sourceResolvedAs: srcCand.entityType,
+              sourceEntityId: srcCand.entityId,
+              sourceGroupId: srcCand.entityType === 'group' ? srcCand.entityId : 'none',
+              targetPartId: tgtCand.entityId,
+              diag: assessment.diagnostics.join(' | '),
+            });
+          }
+        }
+
+        if (assessment.state === 'medium' || assessment.state === 'low') {
+          const q = assessment.clarificationQuestion ?? '請告訴我你想組裝哪兩個零件（來源和目標）。';
+          const diagFields = {
+            confidenceState: assessment.state,
+            ambiguityType: assessment.ambiguityType ?? 'unknown',
+            clarificationNeeded: true,
+            usedSelectionSignal: assessment.usedSelectionSignal,
+            usedRecentReferent: assessment.usedRecentReferent,
+            sourceCandidates: assessment.sourceCandidates.slice(0, 2).map(c => `${c.displayName}(${c.score.toFixed(2)})`).join(','),
+            targetCandidates: assessment.targetCandidates.slice(0, 2).map(c => `${c.displayName}(${c.score.toFixed(2)})`).join(','),
+          };
+          const diagStr = Object.entries(diagFields).map(([k, v]) => `${k}=${v}`).join(' ');
+          console.log(`[smart] case4-clarification needed: ${diagStr}`);
+          return withMeta(
+            { toolCalls: [], replyText: q },
+            {
+              ...baseMeta,
+              route: 'fast-model',
+              fastMs: 0,
+              model: 'confidence-grounding',
+              reason: diagStr,
             }
           );
         }
