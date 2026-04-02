@@ -350,6 +350,13 @@ export type V2State = {
   setManualTransform: (partId: string, transform: PartTransform) => void;
   /** Batch update overrides + manual transforms for multiple parts in ONE Zustand notify (no history entry). */
   batchSetPartOverridesAndManual: (updates: Array<{ partId: string; override: PartTransform; manual: PartTransform }>) => void;
+  /** Dispatch group mate: ONE history entry + ONE notify for source override + all member overrides+manual. */
+  dispatchBatchGroupMate: (
+    label: string,
+    sourcePartId: string,
+    sourceOverride: PartTransform,
+    memberUpdates: Array<{ partId: string; override: PartTransform; manual: PartTransform }>
+  ) => void;
   resetPartToInitial: (partId: string) => void;
   resetPartToManual: (partId: string) => void;
   createAssemblyGroup: (partIds: string[]) => string;
@@ -964,6 +971,19 @@ export const useV2Store = create<V2State>((set, get) => ({
       }
       return {
         ...state,
+        parts: { ...state.parts, overridesById: nextOverrides, manualTransformById: nextManual },
+      };
+    }),
+
+  dispatchBatchGroupMate: (label, sourcePartId, sourceOverride, memberUpdates) =>
+    get().dispatch(label, (state) => {
+      const nextOverrides = { ...state.parts.overridesById, [sourcePartId]: sourceOverride };
+      const nextManual = { ...state.parts.manualTransformById };
+      for (const { partId, override, manual } of memberUpdates) {
+        nextOverrides[partId] = override;
+        nextManual[partId] = manual;
+      }
+      return {
         parts: { ...state.parts, overridesById: nextOverrides, manualTransformById: nextManual },
       };
     }),

@@ -13,6 +13,7 @@ import { getV2Camera, getV2ObjectByPartId, getV2Renderer, getV2Scene, getV2Viewp
 import { computeCaptureSize, dataUrlFromPixels } from '../three/captureUtils';
 import { captureMultiAngles, DEFAULT_ANGLES } from '../three/captureMultiAngle';
 import { resolveAnchor, resolveAnchorFromObjectList } from '../three/mating/anchorMethods';
+import type { Anchor } from '../three/anchors/types';
 import { solveMateTopBottom, applyMateTransform } from '../three/mating/solver';
 import { clusterPlanarFaces } from '../three/mating/faceClustering';
 import { extractFeatures } from '../three/mating/featureExtractor';
@@ -3664,6 +3665,11 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       const sourceFrame = featureFrame(source);
       const targetFrame = featureFrame(target);
       const candidateGenMs = Date.now() - candidateGenStart;
+      // Group-aware source anchor override: exact local-space anchor from all group member meshes.
+      // Shared across both the 'mate' (translate) and 'both'/'twist' solver paths below.
+      const sourcePickOverride: Anchor | undefined = input._sourcePickOverride
+        ? (input._sourcePickOverride as Anchor)
+        : undefined;
 
       if (operation === 'mate') {
         const sourceObj = getV2ObjectByPartId(sourcePartId);
@@ -3705,12 +3711,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             sourceFaceId,
             targetFaceId,
             'translate',
-            undefined,
-            sourceMethod,
+            undefined, // twistSpec
+            sourcePickOverride ? 'picked' : sourceMethod,
             targetMethod,
+            sourcePickOverride, // sourcePick: group aggregate anchor when available
             undefined,
-            undefined,
-            sourceOffset,
+            sourcePickOverride ? undefined : sourceOffset, // pick encodes position — no offset needed
             targetOffset
           );
           const solverMs = Date.now() - solverStart;
@@ -3923,9 +3929,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           sourceObj, targetObj,
           sourceFaceId, targetFaceId,
           solverMode, twistSpec,
-          sourceMethod, targetMethod,
-          undefined, undefined,
-          sourceOffsetTuple, targetOffsetTuple
+          sourcePickOverride ? 'picked' : sourceMethod,
+          targetMethod,
+          sourcePickOverride, // sourcePick: group aggregate anchor when available
+          undefined,
+          sourcePickOverride ? undefined : sourceOffsetTuple,
+          targetOffsetTuple
         );
         if (solvedBoth) {
           // Simulate applyMateTransform exactly as MateExecutor does, then read back local state
@@ -4137,6 +4146,9 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     // When a sourceGroupId is provided, compute a sourceOffset that shifts the
     // anchor from part1-only to the combined AABB of the whole group.
     let computedSourceOffset: [number, number, number] | undefined = input.sourceOffset;
+    // Group-aware source anchor override: exact local-space anchor from all member meshes.
+    // When set, passed to generate_transform_plan as _sourcePickOverride (replaces offset approach).
+    let groupSourcePickForSolver: Anchor | undefined;
     let groupSourceGeomDiag: {
       sourceResolvedAs: 'group';
       sourceGroupId: string;
@@ -4217,18 +4229,23 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
               method: normalizeAnchorMethod(input.sourceMethod, 'planar_cluster'),
             });
             if (repAnchor) {
-              // Transform rep-part local anchor to world space
-              const repAnchorWorld = repAnchor.centerLocal.clone().applyMatrix4(sourceObjRef.matrixWorld);
-              const worldDelta = groupAggregate.centerWorld.clone().sub(repAnchorWorld);
-              if (worldDelta.lengthSq() > 1e-10) {
-                const mat3 = new THREE.Matrix3().setFromMatrix4(sourceObjRef.matrixWorld);
-                const localDelta = worldDelta.clone().applyMatrix3(mat3.clone().invert());
-                const existing = input.sourceOffset ? new THREE.Vector3(...(input.sourceOffset as [number,number,number])) : new THREE.Vector3();
-                const final = existing.add(localDelta);
-                computedSourceOffset = [final.x, final.y, final.z];
-                groupStartPointMode = 'group_aggregate_planar_cluster';
-                groupStartPointFrom = 'group_aggregate_planar_cluster';
-              }
+              // Convert group aggregate anchor to rep-part local space for direct use by solver.
+              // This replaces the offset-correction approach: the pick encodes exact position AND
+              // uses the group aggregate normal for face alignment (not rep-part-only normal).
+              const invMat = sourceObjRef.matrixWorld.clone().invert();
+              const pickCenterLocal = groupAggregate.centerWorld.clone().applyMatrix4(invMat);
+              const pickNormalLocal = groupAggregate.normalWorld.clone().transformDirection(invMat).normalize();
+              groupSourcePickForSolver = {
+                type: 'face' as const,
+                partId: source.partId,
+                faceId: faceId as string,
+                position: [pickCenterLocal.x, pickCenterLocal.y, pickCenterLocal.z] as [number, number, number],
+                normal: [pickNormalLocal.x, pickNormalLocal.y, pickNormalLocal.z] as [number, number, number],
+              };
+              // Clear sourceOffset: the pick already encodes the exact anchor position.
+              computedSourceOffset = undefined;
+              groupStartPointMode = 'group_aggregate_planar_cluster';
+              groupStartPointFrom = 'group_aggregate_planar_cluster';
             }
           }
 
@@ -4352,6 +4369,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     }
 
     const mateExecT0 = Date.now();
+    const mateExecPerfT0 = performance.now(); // performance.now() timestamp for browser timing
 
     const planGenStart = Date.now();
     const generated = await runTool('action.generate_transform_plan' as MCPToolName, {
@@ -4368,6 +4386,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         face: input.targetFace ?? 'top',
         method: normalizeAnchorMethod(input.targetMethod, 'planar_cluster'),
       },
+      ...(groupSourcePickForSolver ? { _sourcePickOverride: groupSourcePickForSolver } : {}),
       sourceOffset: computedSourceOffset,
       targetOffset: computedTargetOffset,
       mateMode,
@@ -4421,8 +4440,9 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const committed = await runTool('action.commit_preview' as MCPToolName, {
       previewId: preview.previewId,
       pushHistory: input.pushHistory !== false,
-      stepLabel:
-        input.stepLabel ?? `Mate ${source.partName} to ${target.partName}`,
+      stepLabel: input.stepLabel ?? `Mate ${source.partName} to ${target.partName}`,
+      // Group mates: skip own dispatch — dispatchBatchGroupMate will cover source + members in 1 notify
+      ...(input.sourceGroupId ? { _skipOwnDispatch: true } : {}),
     } as any);
     const commitMs = Date.now() - commitStart;
     const commitData = unwrapToolData(committed, 'PREVIEW_NOT_FOUND');
@@ -4501,10 +4521,32 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         groupDiagnostics.push(`  ${memberId}: moved to [${newPos.toArray().map(n=>n.toFixed(3)).join(',')}]`);
       }
 
-      // Single batched Zustand write for all group members → 1 React re-render instead of N×2
-      if (batchUpdates.length > 0) {
-        store.batchSetPartOverridesAndManual(batchUpdates);
-      }
+      // dispatchBatchGroupMate: ONE dispatch (with history) covers source + all members → 1 React re-render
+      // This replaces the separate commit_preview dispatch (skipped via _skipOwnDispatch) + batchSetPartOverridesAndManual.
+      const batchWriteStartPerf = performance.now();
+      const sourceT = commitData.transform;
+      const sourceOverride: PartTransform = {
+        position: sourceT.position as [number, number, number],
+        quaternion: sourceT.quaternion as [number, number, number, number],
+        scale: sourceT.scale as [number, number, number],
+      };
+      const mateLabel = input.stepLabel ?? `Mate ${source.partName} to ${target.partName}`;
+      store.dispatchBatchGroupMate(mateLabel, source.partId, sourceOverride, batchUpdates);
+      const batchWriteEndPerf = performance.now();
+
+      // Expose executor-side write timing for browser measurement in ChatPanel rAF
+      (window as any).__EXEC_TIMING__ = {
+        execStartT: mateExecPerfT0,
+        batchWriteStartT: batchWriteStartPerf,
+        batchWriteEndT: batchWriteEndPerf,
+        storeMutationMs: Math.round(batchWriteEndPerf - batchWriteStartPerf),
+      };
+      // Schedule rAF to measure store-write → first visible paint (React reconcile + R3F frame)
+      const _batchEnd = batchWriteEndPerf;
+      window.requestAnimationFrame(() => {
+        const existing = (window as any).__EXEC_TIMING__;
+        if (existing) existing.firstPaintAfterWriteMs = Math.round(performance.now() - _batchEnd);
+      });
 
       const skippedMemberIds = memberIds.filter((id: string) => !updatedMemberIds.includes(id));
       const propagationComplete = skippedMemberIds.length === 0;
@@ -5221,20 +5263,24 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const sceneStateMs = Math.round(performance.now() - sceneStateT0);
 
     // ── Stage 2: persist to Zustand store (triggers React re-render) ───────
+    // _skipOwnDispatch: when true, the caller (e.g. group mate path) will do a single
+    // dispatchBatchGroupMate that covers source + all members in ONE notify. Skip here.
+    const skipOwnDispatch = Boolean(input._skipOwnDispatch);
     const historyRecordT0 = performance.now();
-    currentStore().setPartOverride(partId, current);
-
-    // For non-mate operations (translate/rotate/align previews), the committed position
-    // is a user-intentional placement → update manualTransformById so that steps added
-    // later use this as the correct start position, not the original import position.
-    // Mate commits (operation='mate'|'both'|'twist') must NOT update manualTransformById
-    // because the before-mate position (captured in previewBeforeTransformByPartId) is
-    // what the step's start should be.
-    const committedPlan = runtimeState.plans.get(runtimeState.preview.planId);
-    const isMoveOp = committedPlan &&
-      !['mate', 'both', 'twist'].includes(committedPlan.operation as string);
-    if (isMoveOp) {
-      currentStore().setManualTransform(partId, current);
+    if (!skipOwnDispatch) {
+      currentStore().setPartOverride(partId, current);
+      // For non-mate operations (translate/rotate/align previews), the committed position
+      // is a user-intentional placement → update manualTransformById so that steps added
+      // later use this as the correct start position, not the original import position.
+      // Mate commits (operation='mate'|'both'|'twist') must NOT update manualTransformById
+      // because the before-mate position (captured in previewBeforeTransformByPartId) is
+      // what the step's start should be.
+      const committedPlan = runtimeState.plans.get(runtimeState.preview.planId);
+      const isMoveOp = committedPlan &&
+        !['mate', 'both', 'twist'].includes(committedPlan.operation as string);
+      if (isMoveOp) {
+        currentStore().setManualTransform(partId, current);
+      }
     }
     const historyRecordMs = Math.round(performance.now() - historyRecordT0);
 

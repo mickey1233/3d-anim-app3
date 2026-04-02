@@ -117,26 +117,26 @@ export function ChatPanel() {
       const res: any = await v2Client.request('router_execute', { text, context: ctx }, { timeoutMs: 120_000 });
 
       // ── Browser-side UI timing ─────────────────────────────────────────────
-      // t0 = when WS response (with tool results) arrived back in the browser.
-      // Tool execution already completed inside v2Client.request() above.
+      // wsResponseT: WS response (tool results) arrived in browser; all store writes already happened.
       const wsResponseT = performance.now();
       const wsRoundTripMs = Math.round(wsResponseT - startedAt);
 
-      // Measure how long Zustand state mutations take (synchronous store writes
-      // triggered by setPartOverride calls during tool execution already happened,
-      // but appendChatMessage is the last synchronous store write here).
-      const storeUpdateT = performance.now();
-      // (appendMessage call below triggers the last store write for this command)
-
-      // Schedule rAF to capture when the browser next paints after the store update.
-      // This is the closest measurable proxy for React re-render + paint completion.
+      // Schedule rAF: fires after React reconciles + paints the next frame.
       const rafScheduledT = performance.now();
       window.requestAnimationFrame(() => {
         const rafT = performance.now();
-        const uiTiming = {
+        // Read executor-side timing written by action.mate_execute during group mates
+        const execT = (window as any).__EXEC_TIMING__ ?? null;
+        const uiTiming: Record<string, number | null> = {
           wsRoundTripMs,
-          storeMutationMs: Math.round(storeUpdateT - wsResponseT),
+          // storeMutationMs: how long the batch dispatch took (from executor __EXEC_TIMING__)
+          storeMutationMs: execT?.storeMutationMs ?? 0,
+          // postExecServerMs: server overhead between tool execution completing and WS response arriving
+          postExecServerMs: execT ? Math.round(wsResponseT - execT.batchWriteEndT) : null,
+          // reactRenderMs: time from rAF scheduled (after appendMessage) to first paint
           reactRenderMs: Math.round(rafT - rafScheduledT),
+          // viewportVisibleUpdateMs: time from batch write to first R3F frame paint (executor's own rAF)
+          viewportVisibleUpdateMs: execT?.firstPaintAfterWriteMs ?? null,
           uiTotalMs: Math.round(rafT - startedAt),
         };
         console.log('[ui-timing]', JSON.stringify(uiTiming));
