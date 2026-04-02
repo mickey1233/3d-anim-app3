@@ -206,6 +206,7 @@ export class WsGatewayV2 {
             const maxIterations = this.normalizeRouterIterations();
             let lastReplyText: string | undefined;
             let routeMeta: RouteMeta | undefined;
+            let pendingIntent: import('./router/types.js').PendingIntent | null | undefined;
             let iterationsUsed = 0;
             const routerStartedAt = Date.now();
             const iterationTimings: Array<{
@@ -268,6 +269,8 @@ export class WsGatewayV2 {
               const routeMs = Math.max(0, Date.now() - routeStartedAt);
               lastReplyText = routed.replyText ?? lastReplyText;
               if (iteration === 0 && routed.routeMeta) routeMeta = routed.routeMeta;
+              // Carry pendingIntent from the first iteration (clarification turn)
+              if (iteration === 0 && routed.pendingIntent !== undefined) pendingIntent = routed.pendingIntent;
 
               if (routed.toolCalls.length === 0) break;
 
@@ -411,6 +414,7 @@ export class WsGatewayV2 {
                     iterationTimings,
                   },
                   ...(routeMeta ? { routeMeta } : {}),
+                  ...(pendingIntent !== undefined ? { pendingIntent } : {}),
                 },
               },
               undefined,

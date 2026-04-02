@@ -4315,6 +4315,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       groupMemberCount: number;
       updatedMemberCount: number;
       updatedMemberIds: string[];
+      propagationComplete: boolean;
+      skippedMemberIds: string[];
     } | null = null;
 
     if (input.sourceGroupId) {
@@ -4375,13 +4377,20 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         groupDiagnostics.push(`  ${memberId}: moved to [${newPos.toArray().map(n=>n.toFixed(3)).join(',')}]`);
       }
 
+      const skippedMemberIds = memberIds.filter((id: string) => !updatedMemberIds.includes(id));
+      const propagationComplete = skippedMemberIds.length === 0;
       groupRigidBodyDiag = {
         groupRigidBodyApplied: updatedMemberIds.length > 0,
         groupMemberCount: memberIds.length,
         updatedMemberCount: updatedMemberIds.length,
         updatedMemberIds,
+        propagationComplete,
+        skippedMemberIds,
       };
-      console.log(`[group-rigid] applied=${groupRigidBodyDiag.groupRigidBodyApplied} members=${memberIds.length} updated=${updatedMemberIds.length} ids=[${updatedMemberIds.join(',')}]`);
+      console.log(`[group-rigid] applied=${groupRigidBodyDiag.groupRigidBodyApplied} members=${memberIds.length} updated=${updatedMemberIds.length} complete=${propagationComplete} skipped=[${skippedMemberIds.join(',')}]`);
+      if (!propagationComplete) {
+        console.warn(`[group-rigid] INCOMPLETE PROPAGATION: ${skippedMemberIds.length} members not updated: [${skippedMemberIds.join(', ')}]`);
+      }
     }
 
     // ── Group merge policy ─────────────────────────────────────────────────────
@@ -4491,7 +4500,14 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           mountedRelationRecorded: groupMergeResult.action === 'relation_only' || groupMergeResult.action === 'merge',
         },
       },
-      { mutating: false, debug: plan.debug }
+      {
+        mutating: false,
+        debug: plan.debug,
+        // Emit a warning when group rigid-body propagation is incomplete
+        ...(groupRigidBodyDiag && !groupRigidBodyDiag.propagationComplete ? {
+          warnings: [{ code: 'PROPAGATION_INCOMPLETE', message: `rigid-group propagation incomplete: ${groupRigidBodyDiag.skippedMemberIds.length} members not updated: [${groupRigidBodyDiag.skippedMemberIds.join(', ')}]. Check that all parts are visible in the Three.js scene.` }],
+        } : {}),
+      }
     );
   }
 
@@ -4513,39 +4529,53 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         ? (input.mode as MateExecMode)
         : undefined;
 
+    // ── No-capture fast path ─────────────────────────────────────────────────
+    // When the router already resolved source+target with HIGH confidence,
+    // skip query.mate_vlm_infer AND callAgentForMateParams entirely.
+    // Geometry-based inference (inferBestFacePair + getExpectedFacePairFromCenters)
+    // handles face/method selection — no LLM or camera capture needed.
+    const noCaptureFastPath = Boolean(input.noCaptureFastPath);
+
     const t0 = Date.now();
     let inferred: any = null;
     let inferOrigin: string | null = null;
     let inferConfidence: number | null = null;
     let captureMs = 0;
-    try {
-      const captureStart = Date.now();
-      const inferredEnvelope = await runTool('query.mate_vlm_infer' as MCPToolName, {
-        sourcePart: { partId: source.partId },
-        targetPart: { partId: target.partId },
-        instruction,
-        ...(explicitSourceFace ? { preferredSourceFace: explicitSourceFace } : {}),
-        ...(explicitTargetFace ? { preferredTargetFace: explicitTargetFace } : {}),
-        sourceMethod: explicitSourceMethod ?? 'planar_cluster',
-        targetMethod: explicitTargetMethod ?? 'planar_cluster',
-        ...(explicitMode ? { preferredMode: explicitMode } : {}),
-        maxPairs: 12,
-        maxViews: 6,
-        maxWidthPx: 640,
-        maxHeightPx: 480,
-        format: 'jpeg',
-      } as any);
-      const inferredData = unwrapToolData(inferredEnvelope, 'SOLVER_FAILED') as any;
-      captureMs = Date.now() - captureStart;
-      inferred = inferredData?.inferred ?? null;
-      inferOrigin = typeof inferred?.origin === 'string' ? inferred.origin : null;
-      inferConfidence = typeof inferred?.confidence === 'number' ? inferred.confidence : null;
-      if (typeof inferred?.actionDescription === 'string') {
-        (inferred as any).actionDescription = inferred.actionDescription;
-      }
-    } catch {
-      captureMs = Date.now() - t0;
+
+    if (noCaptureFastPath) {
+      // Skip VLM capture — geometry inference takes over below
+      captureMs = 0;
       inferred = null;
+    } else {
+      try {
+        const captureStart = Date.now();
+        const inferredEnvelope = await runTool('query.mate_vlm_infer' as MCPToolName, {
+          sourcePart: { partId: source.partId },
+          targetPart: { partId: target.partId },
+          instruction,
+          ...(explicitSourceFace ? { preferredSourceFace: explicitSourceFace } : {}),
+          ...(explicitTargetFace ? { preferredTargetFace: explicitTargetFace } : {}),
+          sourceMethod: explicitSourceMethod ?? 'planar_cluster',
+          targetMethod: explicitTargetMethod ?? 'planar_cluster',
+          ...(explicitMode ? { preferredMode: explicitMode } : {}),
+          maxPairs: 12,
+          maxViews: 6,
+          maxWidthPx: 640,
+          maxHeightPx: 480,
+          format: 'jpeg',
+        } as any);
+        const inferredData = unwrapToolData(inferredEnvelope, 'SOLVER_FAILED') as any;
+        captureMs = Date.now() - captureStart;
+        inferred = inferredData?.inferred ?? null;
+        inferOrigin = typeof inferred?.origin === 'string' ? inferred.origin : null;
+        inferConfidence = typeof inferred?.confidence === 'number' ? inferred.confidence : null;
+        if (typeof inferred?.actionDescription === 'string') {
+          (inferred as any).actionDescription = inferred.actionDescription;
+        }
+      } catch {
+        captureMs = Date.now() - t0;
+        inferred = null;
+      }
     }
 
     const sourceObject = getV2ObjectByPartId(source.partId);
@@ -4570,15 +4600,17 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       };
     }
 
-    // Ask LLM for semantic decisions (intent, mode, face, method).
+    // Ask LLM for semantic decisions (intent, mode, face, method) — skipped on fast path.
     const agentStart = Date.now();
-    const agentParams = await callAgentForMateParams({
-      userText: instruction,
-      sourcePart: { id: source.partId, name: source.partName },
-      targetPart: { id: target.partId, name: target.partName },
-      geometryHint,
-    });
-    const agentMs = Date.now() - agentStart;
+    const agentParams = noCaptureFastPath
+      ? null  // geometry fallback handles everything below
+      : await callAgentForMateParams({
+          userText: instruction,
+          sourcePart: { id: source.partId, name: source.partName },
+          targetPart: { id: target.partId, name: target.partName },
+          geometryHint,
+        });
+    const agentMs = noCaptureFastPath ? 0 : (Date.now() - agentStart);
 
     // LLM primary; geometry fallback when LLM unavailable.
     const geometryFallbackIntent = agentParams === null && sourceObject && targetObject
@@ -4731,6 +4763,9 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           mateExecuteMs,
           totalMs,
         },
+        usedNoCaptureFastPath: noCaptureFastPath,
+        skippedCapture: noCaptureFastPath,
+        skippedAgentParams: noCaptureFastPath,
         ...(executedData.groupRigidBody ? { groupRigidBody: executedData.groupRigidBody } : {}),
       },
       {
@@ -4786,6 +4821,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       ...(input.mode ? { mode: input.mode } : {}),
       durationMs: input.durationMs ?? 800,
       commit: true,
+      // Propagate fast-path flag: skip VLM capture + agent params in smart_mate_execute
+      ...(input.noCaptureFastPath ? { noCaptureFastPath: true } : {}),
     } as any);
     const mateData = unwrapToolData(mateEnvelope, 'SOLVER_FAILED') as any;
     const mateExecuteMs = Date.now() - mateStart;

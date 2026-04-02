@@ -25,6 +25,8 @@ export function ChatPanel() {
   const parts = useV2Store((s) => s.parts);
   const assemblyGroups = useV2Store((s) => s.assemblyGroups);
   const recentReferents = useV2Store((s) => s.recentReferents);
+  const pendingIntent = useV2Store((s) => s.pendingIntent);
+  const setPendingIntent = useV2Store((s) => s.setPendingIntent);
   const cadFileName = useV2Store((s) => s.cadFileName);
   const steps = useV2Store((s) => s.steps);
   const selectionPartId = useV2Store((s) => s.selection.partId);
@@ -102,6 +104,10 @@ export function ChatPanel() {
       recentReferents: (recentReferents.lastSource || recentReferents.lastTarget)
         ? recentReferents
         : undefined,
+      // Pending clarification intent from the previous turn
+      pendingIntent: (pendingIntent && Date.now() < pendingIntent.expiresAt)
+        ? pendingIntent
+        : undefined,
     };
     try {
       const startedAt = performance.now();
@@ -125,6 +131,17 @@ export function ChatPanel() {
       } else {
         setLastRouteMeta(null);
       }
+      // Store or clear the pending clarification intent from this response
+      const responsePendingIntent = res?.meta?.pendingIntent;
+      if (responsePendingIntent !== undefined) {
+        // null means "clear", object means "set"
+        setPendingIntent(responsePendingIntent ?? null);
+      } else {
+        // No clarification was asked — clear any previous pending intent on successful tool execution
+        const toolCount2 = res?.trace?.toolCalls?.length ?? 0;
+        if (toolCount2 > 0) setPendingIntent(null);
+      }
+
       const toolCount = res?.trace?.toolCalls?.length ?? 0;
       const reply =
         res?.replyText ||
@@ -150,8 +167,10 @@ export function ChatPanel() {
     helpText,
     interactionMode,
     parts,
+    pendingIntent,
     recentReferents,
     selectionPartId,
+    setPendingIntent,
     steps.currentStepId,
     steps.list.length,
     value,

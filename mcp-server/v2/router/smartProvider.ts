@@ -29,7 +29,7 @@ import {
   buildMateArgsFromAssessment,
 } from './entityResolutionScorer.js';
 import { decideRoute, type RouteMeta } from './routeDecision.js';
-import type { RouterContext, RouterProvider, RouterRoute } from './types.js';
+import type { RouterContext, RouterProvider, RouterRoute, PendingIntent } from './types.js';
 
 const DOCS_TOPK = Math.max(1, Math.min(10, Number(process.env.SMART_DOCS_TOPK || 3)));
 const CODEX_ENABLED = process.env.SMART_CODEX_ENABLE !== '0';
@@ -42,6 +42,9 @@ const CALL_TIMEOUT_MS = Number(process.env.SMART_CHITCHAT_TIMEOUT_MS || 20_000);
  * Default: 8 s — enough for fast local LLMs but short enough to avoid demo timeouts.
  */
 const MATE_AGENT_TIMEOUT_MS = Number(process.env.MATE_FAST_TIMEOUT_MS || 8_000);
+
+/** How long a pending clarification intent stays alive (ms). Default: 2 minutes. */
+const PENDING_INTENT_TTL_MS = Number(process.env.PENDING_INTENT_TTL_MS || 120_000);
 
 // ---------------------------------------------------------------------------
 // Assembly intent classification — server-side, no LLM
@@ -149,6 +152,40 @@ function resolvePeerParts(
     }
   }
 
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Pending intent slot-filling helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Try to resolve a named entity (part or group) from the user's reply text.
+ * Used to fill a missing source/target slot in a pending clarification intent.
+ *
+ * Returns the first matched entity, or null if nothing found.
+ */
+function tryFillSlotFromText(
+  text: string,
+  ctx: RouterContext,
+): { partId: string; partName: string; groupId?: string } | null {
+  const lower = text.toLowerCase();
+
+  // Group name first (group acts as rigid source)
+  for (const group of ctx.groups ?? []) {
+    if (lower.includes(group.name.toLowerCase())) {
+      const repId = group.partIds[0];
+      if (repId) return { partId: repId, partName: group.name, groupId: group.id };
+    }
+  }
+
+  // Part name
+  for (const part of ctx.parts) {
+    if (lower.includes(part.name.toLowerCase())) {
+      const owningGroup = ctx.groups?.find((g) => g.partIds.includes(part.id));
+      return { partId: part.id, partName: part.name, groupId: owningGroup?.id };
+    }
+  }
   return null;
 }
 
@@ -285,6 +322,67 @@ export const SmartRouterProvider: RouterProvider = {
       `[smart] query="${text.slice(0, 50)}" cat=${decision.category} route=${decision.route} docsScore=${docsScore.toFixed(2)}`
     );
 
+    // ── Pending clarification continuation (highest priority) ─────────────────
+    // If the previous turn asked a clarification question, the user's reply here
+    // may be a slot answer ("HOR_FAN_LEFT") rather than a fresh command.
+    // Try to fill the missing slot BEFORE any other routing.
+    const pending = ctx.pendingIntent;
+    if (pending && Date.now() < pending.expiresAt) {
+      const filled = tryFillSlotFromText(text, ctx);
+      if (filled) {
+        const slot = pending.missingSlots[0];
+        let mateArgs: Record<string, unknown> = { ...pending.cachedArgs };
+        let displaySrc = pending.cachedSourceDisplay ?? '?';
+        let displayTgt = pending.cachedTargetDisplay ?? '?';
+
+        if (slot === 'source') {
+          mateArgs = {
+            ...mateArgs,
+            sourcePart: { partId: filled.partId },
+            ...(filled.groupId ? { sourceGroupId: filled.groupId } : {}),
+          };
+          displaySrc = filled.partName;
+        } else if (slot === 'target') {
+          mateArgs = { ...mateArgs, targetPart: { partId: filled.partId } };
+          displayTgt = filled.partName;
+        }
+
+        const remainingSlots = pending.missingSlots.slice(1);
+        if (remainingSlots.length === 0) {
+          // All slots filled — execute
+          console.log(`[smart] pending-continuation: slot=${slot} filled=${filled.partName} → executing`);
+          const finalArgs = { ...mateArgs, noCaptureFastPath: true, instruction: pending.cachedArgs.instruction ?? '' };
+          return withMeta(
+            {
+              toolCalls: [{ tool: 'action.demo_mate_and_apply', args: finalArgs }],
+              replyText: `正在組裝 ${displaySrc} → ${displayTgt}...`,
+              pendingIntent: null,
+            },
+            { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'pending-continuation',
+              reason: `pending_continuation: slot=${slot} filled=${filled.partName} usedFastPath=true` }
+          );
+        } else {
+          // Still more slots missing — re-ask
+          const nextQuestion = `好的，那目標零件是哪個？`;
+          const updatedPending: PendingIntent = {
+            ...pending,
+            missingSlots: remainingSlots,
+            cachedArgs: mateArgs,
+            cachedSourceDisplay: displaySrc,
+            cachedTargetDisplay: displayTgt,
+            promptText: nextQuestion,
+          };
+          return withMeta(
+            { toolCalls: [], replyText: nextQuestion, pendingIntent: updatedPending },
+            { ...baseMeta, route: 'fast-model', fastMs: 0, model: 'pending-continuation',
+              reason: `pending_continuation: partial slot=${slot} filled=${filled.partName}` }
+          );
+        }
+      }
+      // Filled nothing — fall through (user may have changed their mind with a new command)
+      console.log(`[smart] pending intent present but no slot fill from reply — falling through`);
+    }
+
     // ── Layer 1: Docs (high-confidence CAD doc lookup) ────────────────────────
     if (decision.route === 'docs' && docChunks.length > 0) {
       console.log(`[smart] served from docs (${docChunks.length} chunks)`);
@@ -409,7 +507,8 @@ export const SmartRouterProvider: RouterProvider = {
       console.log(`[smart] mate fast-path(${fastPathKind}): ${displaySrc} → ${displayTgt} ${diagStr}`);
       return withMeta(
         {
-          toolCalls: [{ tool: 'action.demo_mate_and_apply', args: mateArgs }],
+          // noCaptureFastPath: true → smart_mate_execute skips VLM capture + agent params
+          toolCalls: [{ tool: 'action.demo_mate_and_apply', args: { ...mateArgs, noCaptureFastPath: true } }],
           replyText: `正在組裝 ${displaySrc} → ${displayTgt}...`,
         },
         {
@@ -569,19 +668,53 @@ export const SmartRouterProvider: RouterProvider = {
 
         if (assessment.state === 'medium' || assessment.state === 'low') {
           const q = assessment.clarificationQuestion ?? '請告訴我你想組裝哪兩個零件（來源和目標）。';
+
+          // Build pending intent so the next user reply can fill the missing slot
+          const srcTop = assessment.sourceCandidates[0];
+          const tgtTop = assessment.targetCandidates[0];
+          const srcOk = srcTop != null && srcTop.score > 0;
+          const tgtOk = tgtTop != null && tgtTop.score > 0;
+          const missingSlots: Array<'source' | 'target'> = [];
+          const cachedArgs: Record<string, unknown> = { instruction: text };
+          if (srcOk && srcTop) {
+            const repPartId = srcTop.memberPartIds[0];
+            if (repPartId) {
+              cachedArgs['sourcePart'] = { partId: repPartId };
+              if (srcTop.entityType === 'group') cachedArgs['sourceGroupId'] = srcTop.entityId;
+            }
+          } else {
+            missingSlots.push('source');
+          }
+          if (tgtOk && tgtTop) {
+            cachedArgs['targetPart'] = { partId: tgtTop.entityId };
+          } else {
+            missingSlots.push('target');
+          }
+
+          const pendingIntent: PendingIntent = {
+            type: 'mate',
+            missingSlots,
+            cachedArgs,
+            cachedSourceDisplay: srcTop?.displayName,
+            cachedTargetDisplay: tgtTop?.displayName,
+            promptText: q,
+            expiresAt: Date.now() + PENDING_INTENT_TTL_MS,
+          };
+
           const diagFields = {
             confidenceState: assessment.state,
             ambiguityType: assessment.ambiguityType ?? 'unknown',
             clarificationNeeded: true,
             usedSelectionSignal: assessment.usedSelectionSignal,
             usedRecentReferent: assessment.usedRecentReferent,
+            missingSlots: missingSlots.join(',') || 'none',
             sourceCandidates: assessment.sourceCandidates.slice(0, 2).map(c => `${c.displayName}(${c.score.toFixed(2)})`).join(','),
             targetCandidates: assessment.targetCandidates.slice(0, 2).map(c => `${c.displayName}(${c.score.toFixed(2)})`).join(','),
           };
           const diagStr = Object.entries(diagFields).map(([k, v]) => `${k}=${v}`).join(' ');
           console.log(`[smart] case4-clarification needed: ${diagStr}`);
           return withMeta(
-            { toolCalls: [], replyText: q },
+            { toolCalls: [], replyText: q, pendingIntent },
             {
               ...baseMeta,
               route: 'fast-model',

@@ -190,6 +190,20 @@ export type V2State = {
     lastSource: { entityId: string; entityType: 'part' | 'group'; displayName: string; memberPartIds: string[]; role: 'source'; timestamp: number } | null;
     lastTarget: { entityId: string; entityType: 'part' | 'group'; displayName: string; memberPartIds: string[]; role: 'target'; timestamp: number } | null;
   };
+  /**
+   * Pending clarification intent from the most recent router response.
+   * When non-null, the next user message should be treated as filling a
+   * missing slot rather than starting a fresh command.
+   */
+  pendingIntent: {
+    type: 'mate' | 'move';
+    missingSlots: Array<'source' | 'target'>;
+    cachedArgs: Record<string, unknown>;
+    cachedSourceDisplay?: string;
+    cachedTargetDisplay?: string;
+    promptText: string;
+    expiresAt: number;
+  } | null;
   selection: { partId: string | null; groupId?: string; source: 'dropdown' | 'canvas' | 'list' | 'command' | 'system' };
   multiSelectIds: string[];
   steps: Snapshot['steps'];
@@ -349,6 +363,8 @@ export type V2State = {
     role: 'source' | 'target',
     entity: { entityId: string; entityType: 'part' | 'group'; displayName: string; memberPartIds: string[] },
   ) => void;
+  /** Set or clear the pending clarification intent. */
+  setPendingIntent: (intent: V2State['pendingIntent']) => void;
   /** Return all relations involving a given source ID (group or part). */
   getMountedRelationsForSource: (sourceId: string) => MountedRelation[];
   /** Rename an assembly group. */
@@ -454,6 +470,7 @@ export const useV2Store = create<V2State>((set, get) => ({
   assemblyGroups: { byId: {}, order: [] },
   mountedRelations: [],
   recentReferents: { lastSource: null, lastTarget: null },
+  pendingIntent: null,
   selection: { partId: null, source: 'system' },
   multiSelectIds: [],
   steps: { list: [], currentStepId: null },
@@ -545,6 +562,7 @@ export const useV2Store = create<V2State>((set, get) => ({
       assemblyGroups: { byId: {}, order: [] },
       mountedRelations: [],
       recentReferents: { lastSource: null, lastTarget: null },
+      pendingIntent: null,
       history: { past: [], future: [], lastCommand: undefined },
     })),
 
@@ -558,6 +576,7 @@ export const useV2Store = create<V2State>((set, get) => ({
       assemblyGroups: { byId: {}, order: [] },
       mountedRelations: [],
       recentReferents: { lastSource: null, lastTarget: null },
+      pendingIntent: null,
       markers: {},
       steps: { list: [], currentStepId: null },
       vlm: { images: [], result: undefined, analyzing: false },
@@ -1044,6 +1063,8 @@ export const useV2Store = create<V2State>((set, get) => ({
         },
       },
     })),
+
+  setPendingIntent: (intent) => set({ pendingIntent: intent }),
 
   renameAssemblyGroup: (groupId, name) =>
     set((state) => {

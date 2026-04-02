@@ -1,6 +1,28 @@
 import type { ToolCall } from '../../../shared/schema/index.js';
 import type { RecentReferent } from '../../../shared/schema/entityResolutionTypes.js';
 
+// ---------------------------------------------------------------------------
+// Pending intent — conversational clarification state
+// ---------------------------------------------------------------------------
+
+export type PendingIntentSlot = 'source' | 'target';
+
+export type PendingIntent = {
+  /** Which kind of operation was being attempted. */
+  type: 'mate' | 'move';
+  /** Slots that still need to be filled by the next user reply. */
+  missingSlots: PendingIntentSlot[];
+  /** Args accumulated so far (everything except the missing slots). */
+  cachedArgs: Record<string, unknown>;
+  /** Display names for re-wording the confirmation message. */
+  cachedSourceDisplay?: string;
+  cachedTargetDisplay?: string;
+  /** The clarification question that was already asked. */
+  promptText: string;
+  /** Unix ms timestamp after which this intent expires and is ignored. */
+  expiresAt: number;
+};
+
 export type RouterToolResult = {
   tool: string;
   ok: boolean;
@@ -56,6 +78,12 @@ export type RouterContext = {
     lastSource: RecentReferent | null;
     lastTarget: RecentReferent | null;
   } | null;
+  /**
+   * Pending clarification intent from the previous turn.
+   * When present and not expired, the router fills the missing slot(s)
+   * from the user's reply instead of starting a fresh routing pass.
+   */
+  pendingIntent?: PendingIntent | null;
 };
 
 /** Optional metadata attached by smartProvider to describe which layer handled the request. */
@@ -76,6 +104,11 @@ export type RouterRoute = {
   replyText?: string;
   /** Populated by smartProvider; optional for all other providers. */
   routeMeta?: RouteMeta;
+  /**
+   * When the router asked a clarification question, this carries the pending
+   * intent so the frontend can send it back on the next turn.
+   */
+  pendingIntent?: PendingIntent | null;
 };
 
 export type RouterProvider = {
