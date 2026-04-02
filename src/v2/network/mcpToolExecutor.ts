@@ -3660,8 +3660,10 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       };
       pathType = 'line';
     } else if (target) {
+      const candidateGenStart = Date.now();
       const sourceFrame = featureFrame(source);
       const targetFrame = featureFrame(target);
+      const candidateGenMs = Date.now() - candidateGenStart;
 
       if (operation === 'mate') {
         const sourceObj = getV2ObjectByPartId(sourcePartId);
@@ -3696,6 +3698,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           sourceObj.updateWorldMatrix(true, false);
           targetObj.updateWorldMatrix(true, false);
 
+          const solverStart = Date.now();
           const solvedTranslate = solveMateTopBottom(
             sourceObj,
             targetObj,
@@ -3710,6 +3713,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             sourceOffset,
             targetOffset
           );
+          const solverMs = Date.now() - solverStart;
 
           if (solvedTranslate) {
             const sourceWorldPos = new THREE.Vector3();
@@ -3761,6 +3765,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
               },
               autoFixes: [],
               debug: {
+                candidateGenMs,
+                solverMs,
                 sourceFrame,
                 targetFrame,
                 sourceFaceId,
@@ -3826,6 +3832,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           },
           autoFixes: [],
           debug: {
+            candidateGenMs,
+            solverMs: 0, // fallback path: frame delta, no iterative solve
             sourceFrame,
             targetFrame,
             sourceFaceId,
@@ -4044,6 +4052,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         },
         autoFixes: [],
         debug: {
+          candidateGenMs,
+          solverMs: 0, // both/twist path: inline math, not iterative
           sourceFrame,
           targetFrame,
           translationWorld: tuple3(vec3(resolvedEndWorldTransform.position).sub(vec3(sourceWorldTransform.position))),
@@ -4127,24 +4137,64 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     // When a sourceGroupId is provided, compute a sourceOffset that shifts the
     // anchor from part1-only to the combined AABB of the whole group.
     let computedSourceOffset: [number, number, number] | undefined = input.sourceOffset;
+    let groupSourceGeomDiag: {
+      sourceResolvedAs: 'group';
+      sourceGroupId: string;
+      representativePartId: string;
+      groupMemberIds: string[];
+      groupMemberCount: number;
+      groupStartPointMode: 'group_bbox' | 'representative_part';
+      groupStartPointFrom: 'group_bbox' | 'representative_part';
+      groupBboxCenter: [number, number, number] | null;
+      groupBboxSize: [number, number, number] | null;
+      groupCentroid: [number, number, number] | null;
+      groupFeatureCount: number;
+      offsetApplied: [number, number, number] | null;
+    } | null = null;
+
     if (input.sourceGroupId) {
       const grpStore = currentStore();
       const allMemberIds = grpStore.getGroupParts(input.sourceGroupId as string);
       const sceneRef = getV2Scene();
+      let groupStartPointMode: 'group_bbox' | 'representative_part' = 'representative_part';
+      let groupStartPointFrom: 'group_bbox' | 'representative_part' = 'representative_part';
+      let groupBboxCenter: [number, number, number] | null = null;
+      let groupBboxSize: [number, number, number] | null = null;
+      let groupCentroid: [number, number, number] | null = null;
+      let groupFeatureCount = 0;
+
       if (sceneRef && allMemberIds.length > 1) {
         const sourceObjRef = sceneRef.getObjectByProperty('uuid', source.partId) ?? null;
         if (sourceObjRef) {
           sourceObjRef.updateWorldMatrix(true, true);
           const combinedBox = new THREE.Box3();
+          const memberCentroids: THREE.Vector3[] = [];
           for (const mId of allMemberIds) {
             const mObj = sceneRef.getObjectByProperty('uuid', mId);
             if (mObj) {
               mObj.updateWorldMatrix(true, true);
               const mBox = computeWorldPercentileBox(mObj);
-              if (!mBox.isEmpty()) combinedBox.union(mBox);
+              if (!mBox.isEmpty()) {
+                combinedBox.union(mBox);
+                memberCentroids.push(mBox.getCenter(new THREE.Vector3()));
+                // Count mesh features (each Mesh child counts as a feature)
+                mObj.traverse((child) => { if ((child as THREE.Mesh).isMesh) groupFeatureCount++; });
+              }
             }
           }
           const part1Box = computeWorldPercentileBox(sourceObjRef);
+          if (!combinedBox.isEmpty()) {
+            const ctr = combinedBox.getCenter(new THREE.Vector3());
+            const sz = combinedBox.getSize(new THREE.Vector3());
+            groupBboxCenter = [ctr.x, ctr.y, ctr.z];
+            groupBboxSize = [sz.x, sz.y, sz.z];
+            groupStartPointMode = 'group_bbox';
+            // Centroid = average of member bbox centers
+            if (memberCentroids.length > 0) {
+              const avg = memberCentroids.reduce((acc, v) => acc.add(v), new THREE.Vector3()).divideScalar(memberCentroids.length);
+              groupCentroid = [avg.x, avg.y, avg.z];
+            }
+          }
           if (!combinedBox.isEmpty() && !part1Box.isEmpty()) {
             const faceId: string = input.sourceFace ?? 'bottom';
             const getAabbFaceCenter = (box: THREE.Box3, fId: string): THREE.Vector3 => {
@@ -4168,10 +4218,26 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
               const existing = input.sourceOffset ? new THREE.Vector3(...(input.sourceOffset as [number,number,number])) : new THREE.Vector3();
               const final = existing.add(localDelta);
               computedSourceOffset = [final.x, final.y, final.z];
+              groupStartPointFrom = 'group_bbox';
             }
           }
         }
       }
+
+      groupSourceGeomDiag = {
+        sourceResolvedAs: 'group',
+        sourceGroupId: input.sourceGroupId as string,
+        representativePartId: source.partId,
+        groupMemberIds: allMemberIds,
+        groupMemberCount: allMemberIds.length,
+        groupStartPointMode,
+        groupStartPointFrom,
+        groupBboxCenter,
+        groupBboxSize,
+        groupCentroid,
+        groupFeatureCount,
+        offsetApplied: computedSourceOffset ?? null,
+      };
     }
 
     // When a targetGroupId is provided, compute a targetOffset that shifts the anchor
@@ -4243,6 +4309,9 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       ensurePreviewBeforeTransform(source.partId);
     }
 
+    const mateExecT0 = Date.now();
+
+    const planGenStart = Date.now();
     const generated = await runTool('action.generate_transform_plan' as MCPToolName, {
       operation,
       source: {
@@ -4272,14 +4341,20 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       autoSwapSourceTarget: input.autoSwapSourceTarget !== false,
       enforceNormalPolicy: input.enforceNormalPolicy ?? 'source_out_target_in',
     } as any);
+    const planGenMs = Date.now() - planGenStart;
     const generatedData = unwrapToolData(generated, 'SOLVER_FAILED');
     const plan = generatedData.plan;
+    // Extract sub-stage timing emitted by generate_transform_plan into plan.debug
+    const candidateGenMs: number = (plan.debug as any)?.candidateGenMs ?? 0;
+    const solverMs: number = (plan.debug as any)?.solverMs ?? 0;
 
+    const previewStart = Date.now();
     const previewed = await runTool('preview.transform_plan' as MCPToolName, {
       planId: plan.planId,
       replaceCurrent: true,
       scrubT: 1,
     } as any);
+    const previewMs = Date.now() - previewStart;
     const previewData = unwrapToolData(previewed, 'PREVIEW_NOT_FOUND');
     const preview = previewData.preview;
 
@@ -4300,15 +4375,18 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const sourceBeforeTransform = runtimeState.previewBeforeTransformByPartId.get(source.partId)
       ?? getPartTransformOrThrow(source.partId);
 
+    const commitStart = Date.now();
     const committed = await runTool('action.commit_preview' as MCPToolName, {
       previewId: preview.previewId,
       pushHistory: input.pushHistory !== false,
       stepLabel:
         input.stepLabel ?? `Mate ${source.partName} to ${target.partName}`,
     } as any);
+    const commitMs = Date.now() - commitStart;
     const commitData = unwrapToolData(committed, 'PREVIEW_NOT_FOUND');
 
     // Propagate rigid body delta to other group members if sourceGroupId specified
+    const groupPropStart = Date.now();
     const groupDiagnostics: string[] = [];
     let groupRigidBodyDiag: {
       groupRigidBodyApplied: boolean;
@@ -4392,6 +4470,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         console.warn(`[group-rigid] INCOMPLETE PROPAGATION: ${skippedMemberIds.length} members not updated: [${skippedMemberIds.join(', ')}]`);
       }
     }
+    const groupPropagationMs = Date.now() - groupPropStart;
 
     // ── Group merge policy ─────────────────────────────────────────────────────
     // A group represents a rigid movable SOURCE subassembly only.
@@ -4493,11 +4572,21 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         historyId: commitData.historyId,
         transform: commitData.transform,
         ...(groupRigidBodyDiag !== null ? { groupRigidBody: groupRigidBodyDiag } : {}),
+        ...(groupSourceGeomDiag !== null ? { groupSourceGeometry: groupSourceGeomDiag } : {}),
         groupPolicy: {
           action: groupMergeResult.action,
           targetMergedIntoGroup: groupMergeResult.targetMergedIntoGroup,
           sourceGroupMembers: groupMergeResult.sourceGroupMembers ?? null,
           mountedRelationRecorded: groupMergeResult.action === 'relation_only' || groupMergeResult.action === 'merge',
+        },
+        mateExecTiming: {
+          planGenMs,
+          candidateGenMs,
+          solverMs,
+          previewMs,
+          commitMs,
+          groupPropagationMs,
+          totalMs: Date.now() - mateExecT0,
         },
       },
       {
@@ -4767,6 +4856,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         skippedCapture: noCaptureFastPath,
         skippedAgentParams: noCaptureFastPath,
         ...(executedData.groupRigidBody ? { groupRigidBody: executedData.groupRigidBody } : {}),
+        ...(executedData.groupSourceGeometry ? { groupSourceGeometry: executedData.groupSourceGeometry } : {}),
+        ...(executedData.mateExecTiming ? { mateExecTiming: executedData.mateExecTiming } : {}),
       },
       {
         mutating: false,
@@ -4853,6 +4944,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           ...(mateData.timing ? { mateStageTiming: mateData.timing } : {}),
         },
         ...(mateData.groupRigidBody ? { groupRigidBody: mateData.groupRigidBody } : {}),
+        ...(mateData.groupSourceGeometry ? { groupSourceGeometry: mateData.groupSourceGeometry } : {}),
+        ...(mateData.mateExecTiming ? { mateExecTiming: mateData.mateExecTiming } : {}),
       },
       {
         mutating: true,
