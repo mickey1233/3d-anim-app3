@@ -764,3 +764,118 @@ export function resolveAnchor({
   }
   return null;
 }
+
+/**
+ * Compute a world-space planar-cluster anchor aggregated from ALL objects in the list.
+ * This is the group-aware source anchor computation: instead of using one representative
+ * part's mesh, it collects face data from every mesh in every object (in world space),
+ * clusters by plane alignment, and returns the best cluster center in world space.
+ *
+ * Called by action.mate_execute when sourceGroupId is provided, to compute a true
+ * group-level source anchor for the offset correction (replacing AABB face center).
+ */
+export function resolveAnchorFromObjectList(
+  objects: THREE.Object3D[],
+  faceId: FaceId,
+): { centerWorld: THREE.Vector3; normalWorld: THREE.Vector3; alignedFaceCount: number; method: 'group_aggregate_planar_cluster' } | null {
+  const worldFaceDir = (FACE_DIR[faceId] ?? new THREE.Vector3(0, 1, 0)).clone().normalize();
+  const NORMAL_THRESH = 0.7;
+
+  type FaceData = { center: THREE.Vector3; area: number };
+  const faces: FaceData[] = [];
+
+  const va = new THREE.Vector3();
+  const vb = new THREE.Vector3();
+  const vc = new THREE.Vector3();
+  const edge1 = new THREE.Vector3();
+  const edge2 = new THREE.Vector3();
+  const faceNormal = new THREE.Vector3();
+  const faceCenter = new THREE.Vector3();
+
+  for (const obj of objects) {
+    obj.updateWorldMatrix(true, true);
+    obj.traverse((child) => {
+      if (!(child as THREE.Mesh).isMesh) return;
+      const mesh = child as THREE.Mesh;
+      const geom = mesh.geometry;
+      const pos = geom?.attributes?.position;
+      if (!pos) return;
+
+      mesh.updateWorldMatrix(false, false);
+
+      const readVert = (i: number, out: THREE.Vector3) =>
+        out.fromBufferAttribute(pos as THREE.BufferAttribute, i).applyMatrix4(mesh.matrixWorld);
+
+      const processTri = (ai: number, bi: number, ci: number) => {
+        readVert(ai, va); readVert(bi, vb); readVert(ci, vc);
+        edge1.subVectors(vb, va);
+        edge2.subVectors(vc, va);
+        faceNormal.crossVectors(edge1, edge2);
+        if (faceNormal.lengthSq() < 1e-12) return;
+        const triArea = faceNormal.length() * 0.5;
+        faceNormal.normalize();
+        // Filter: face must roughly point in the world face direction
+        if (faceNormal.dot(worldFaceDir) < NORMAL_THRESH) return;
+        faceCenter.addVectors(va, vb).add(vc).divideScalar(3);
+        faces.push({ center: faceCenter.clone(), area: triArea });
+      };
+
+      const idx = geom.index;
+      if (idx) {
+        for (let i = 0; i < idx.count; i += 3) processTri(idx.array[i], idx.array[i + 1], idx.array[i + 2]);
+      } else {
+        for (let i = 0; i < pos.count; i += 3) processTri(i, i + 1, i + 2);
+      }
+    });
+  }
+
+  if (faces.length === 0) return null;
+
+  // Plane-cluster faces along world face direction (same algorithm as resolveGroupPlanarClusterCore)
+  const dir = worldFaceDir;
+  let maxProj = -Infinity;
+  let minProj = Infinity;
+  for (const f of faces) {
+    const p = f.center.dot(dir);
+    if (p > maxProj) maxProj = p;
+    if (p < minProj) minProj = p;
+  }
+  const projRange = maxProj - minProj;
+  const modelScale = Math.max(Math.abs(maxProj), Math.abs(minProj), 1.0);
+  const planeGap = Math.max(projRange * 0.015, modelScale * 3e-4);
+
+  type PlaneCluster = { sumCenter: THREE.Vector3; totalArea: number; count: number; proj: number };
+  const planeClusters: PlaneCluster[] = [];
+  faces.sort((a, b) => a.center.dot(dir) - b.center.dot(dir));
+  for (const f of faces) {
+    const proj = f.center.dot(dir);
+    const last = planeClusters[planeClusters.length - 1];
+    if (last && Math.abs(proj - last.proj) <= planeGap) {
+      last.sumCenter.addScaledVector(f.center, f.area);
+      last.totalArea += f.area;
+      last.count += 1;
+      last.proj += (proj - last.proj) / last.count;
+    } else {
+      planeClusters.push({
+        sumCenter: f.center.clone().multiplyScalar(f.area),
+        totalArea: f.area,
+        count: 1,
+        proj,
+      });
+    }
+  }
+
+  planeClusters.sort((a, b) => b.proj - a.proj);
+  const extremeCluster = planeClusters[0];
+  const totalAlignedArea = planeClusters.reduce((s, c) => s + c.totalArea, 0) || 1;
+  const extremeFraction = extremeCluster.totalArea / totalAlignedArea;
+  const best = (extremeFraction >= 0.15)
+    ? extremeCluster
+    : planeClusters.reduce((b, c) => c.totalArea > b.totalArea ? c : b, planeClusters[0]);
+
+  const centerWorld = best.totalArea > 0
+    ? best.sumCenter.clone().divideScalar(best.totalArea)
+    : best.sumCenter.clone().divideScalar(best.count);
+
+  return { centerWorld, normalWorld: dir.clone(), alignedFaceCount: faces.length, method: 'group_aggregate_planar_cluster' };
+}

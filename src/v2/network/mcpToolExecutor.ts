@@ -12,7 +12,7 @@ import { v2Client } from './client';
 import { getV2Camera, getV2ObjectByPartId, getV2Renderer, getV2Scene, getV2ViewportPx } from '../three/SceneRegistry';
 import { computeCaptureSize, dataUrlFromPixels } from '../three/captureUtils';
 import { captureMultiAngles, DEFAULT_ANGLES } from '../three/captureMultiAngle';
-import { resolveAnchor } from '../three/mating/anchorMethods';
+import { resolveAnchor, resolveAnchorFromObjectList } from '../three/mating/anchorMethods';
 import { solveMateTopBottom, applyMateTransform } from '../three/mating/solver';
 import { clusterPlanarFaces } from '../three/mating/faceClustering';
 import { extractFeatures } from '../three/mating/featureExtractor';
@@ -4143,12 +4143,13 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       representativePartId: string;
       groupMemberIds: string[];
       groupMemberCount: number;
-      groupStartPointMode: 'group_bbox' | 'representative_part';
-      groupStartPointFrom: 'group_bbox' | 'representative_part';
+      groupStartPointMode: 'group_aggregate_planar_cluster' | 'group_bbox' | 'representative_part';
+      groupStartPointFrom: 'group_aggregate_planar_cluster' | 'group_bbox' | 'representative_part';
       groupBboxCenter: [number, number, number] | null;
       groupBboxSize: [number, number, number] | null;
       groupCentroid: [number, number, number] | null;
       groupFeatureCount: number;
+      alignedFaceCount: number;
       offsetApplied: [number, number, number] | null;
     } | null = null;
 
@@ -4156,69 +4157,109 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       const grpStore = currentStore();
       const allMemberIds = grpStore.getGroupParts(input.sourceGroupId as string);
       const sceneRef = getV2Scene();
-      let groupStartPointMode: 'group_bbox' | 'representative_part' = 'representative_part';
-      let groupStartPointFrom: 'group_bbox' | 'representative_part' = 'representative_part';
+      let groupStartPointMode: 'group_aggregate_planar_cluster' | 'group_bbox' | 'representative_part' = 'representative_part';
+      let groupStartPointFrom: 'group_aggregate_planar_cluster' | 'group_bbox' | 'representative_part' = 'representative_part';
       let groupBboxCenter: [number, number, number] | null = null;
       let groupBboxSize: [number, number, number] | null = null;
       let groupCentroid: [number, number, number] | null = null;
       let groupFeatureCount = 0;
+      let alignedFaceCount = 0;
 
       if (sceneRef && allMemberIds.length > 1) {
         const sourceObjRef = sceneRef.getObjectByProperty('uuid', source.partId) ?? null;
         if (sourceObjRef) {
           sourceObjRef.updateWorldMatrix(true, true);
+
+          // Collect all member objects and compute combined AABB + feature count
+          const memberObjects: THREE.Object3D[] = [];
           const combinedBox = new THREE.Box3();
           const memberCentroids: THREE.Vector3[] = [];
           for (const mId of allMemberIds) {
             const mObj = sceneRef.getObjectByProperty('uuid', mId);
             if (mObj) {
               mObj.updateWorldMatrix(true, true);
+              memberObjects.push(mObj);
               const mBox = computeWorldPercentileBox(mObj);
               if (!mBox.isEmpty()) {
                 combinedBox.union(mBox);
                 memberCentroids.push(mBox.getCenter(new THREE.Vector3()));
-                // Count mesh features (each Mesh child counts as a feature)
                 mObj.traverse((child) => { if ((child as THREE.Mesh).isMesh) groupFeatureCount++; });
               }
             }
           }
-          const part1Box = computeWorldPercentileBox(sourceObjRef);
           if (!combinedBox.isEmpty()) {
             const ctr = combinedBox.getCenter(new THREE.Vector3());
             const sz = combinedBox.getSize(new THREE.Vector3());
             groupBboxCenter = [ctr.x, ctr.y, ctr.z];
             groupBboxSize = [sz.x, sz.y, sz.z];
-            groupStartPointMode = 'group_bbox';
-            // Centroid = average of member bbox centers
+            groupStartPointMode = 'group_bbox'; // will be upgraded to planar_cluster below if successful
             if (memberCentroids.length > 0) {
               const avg = memberCentroids.reduce((acc, v) => acc.add(v), new THREE.Vector3()).divideScalar(memberCentroids.length);
               groupCentroid = [avg.x, avg.y, avg.z];
             }
           }
-          if (!combinedBox.isEmpty() && !part1Box.isEmpty()) {
-            const faceId: string = input.sourceFace ?? 'bottom';
-            const getAabbFaceCenter = (box: THREE.Box3, fId: string): THREE.Vector3 => {
-              const c = box.getCenter(new THREE.Vector3());
-              switch (fId) {
-                case 'top':    return new THREE.Vector3(c.x, box.max.y, c.z);
-                case 'bottom': return new THREE.Vector3(c.x, box.min.y, c.z);
-                case 'left':   return new THREE.Vector3(box.min.x, c.y, c.z);
-                case 'right':  return new THREE.Vector3(box.max.x, c.y, c.z);
-                case 'front':  return new THREE.Vector3(c.x, c.y, box.max.z);
-                case 'back':   return new THREE.Vector3(c.x, c.y, box.min.z);
-                default:       return c;
+
+          // ── Primary: aggregate planar-cluster from ALL member meshes ────────
+          // This replaces the AABB face-center approach. resolveAnchorFromObjectList
+          // collects aligned face triangles from all member objects in world space,
+          // clusters them by plane, and returns the highest-projection cluster center.
+          // This correctly handles non-convex groups and fan-blade arrangements where
+          // the AABB face center may not coincide with any actual mating surface.
+          const faceId = (input.sourceFace ?? 'bottom') as StoreFaceId;
+          const groupAggregate = resolveAnchorFromObjectList(memberObjects, faceId);
+
+          if (groupAggregate) {
+            alignedFaceCount = groupAggregate.alignedFaceCount;
+            // Compute rep-part anchor in world space (same method as the solver will use)
+            const repAnchor = resolveAnchor({
+              object: sourceObjRef,
+              faceId,
+              method: normalizeAnchorMethod(input.sourceMethod, 'planar_cluster'),
+            });
+            if (repAnchor) {
+              // Transform rep-part local anchor to world space
+              const repAnchorWorld = repAnchor.centerLocal.clone().applyMatrix4(sourceObjRef.matrixWorld);
+              const worldDelta = groupAggregate.centerWorld.clone().sub(repAnchorWorld);
+              if (worldDelta.lengthSq() > 1e-10) {
+                const mat3 = new THREE.Matrix3().setFromMatrix4(sourceObjRef.matrixWorld);
+                const localDelta = worldDelta.clone().applyMatrix3(mat3.clone().invert());
+                const existing = input.sourceOffset ? new THREE.Vector3(...(input.sourceOffset as [number,number,number])) : new THREE.Vector3();
+                const final = existing.add(localDelta);
+                computedSourceOffset = [final.x, final.y, final.z];
+                groupStartPointMode = 'group_aggregate_planar_cluster';
+                groupStartPointFrom = 'group_aggregate_planar_cluster';
               }
-            };
-            const part1AnchorWorld = getAabbFaceCenter(part1Box, faceId);
-            const groupAnchorWorld = getAabbFaceCenter(combinedBox, faceId);
-            const worldDelta = groupAnchorWorld.clone().sub(part1AnchorWorld);
-            if (worldDelta.lengthSq() > 1e-10) {
-              const mat3 = new THREE.Matrix3().setFromMatrix4(sourceObjRef.matrixWorld);
-              const localDelta = worldDelta.clone().applyMatrix3(mat3.clone().invert());
-              const existing = input.sourceOffset ? new THREE.Vector3(...(input.sourceOffset as [number,number,number])) : new THREE.Vector3();
-              const final = existing.add(localDelta);
-              computedSourceOffset = [final.x, final.y, final.z];
-              groupStartPointFrom = 'group_bbox';
+            }
+          }
+
+          // ── Fallback: AABB face center if planar-cluster aggregate fails ────
+          // (no aligned faces found, e.g. geometry-less proxy objects)
+          if (groupStartPointFrom === 'representative_part' && !combinedBox.isEmpty()) {
+            const part1Box = computeWorldPercentileBox(sourceObjRef);
+            if (!part1Box.isEmpty()) {
+              const getAabbFaceCenter = (box: THREE.Box3, fId: string): THREE.Vector3 => {
+                const c = box.getCenter(new THREE.Vector3());
+                switch (fId) {
+                  case 'top':    return new THREE.Vector3(c.x, box.max.y, c.z);
+                  case 'bottom': return new THREE.Vector3(c.x, box.min.y, c.z);
+                  case 'left':   return new THREE.Vector3(box.min.x, c.y, c.z);
+                  case 'right':  return new THREE.Vector3(box.max.x, c.y, c.z);
+                  case 'front':  return new THREE.Vector3(c.x, c.y, box.max.z);
+                  case 'back':   return new THREE.Vector3(c.x, c.y, box.min.z);
+                  default:       return c;
+                }
+              };
+              const part1AnchorWorld = getAabbFaceCenter(part1Box, faceId);
+              const groupAnchorWorld = getAabbFaceCenter(combinedBox, faceId);
+              const worldDelta = groupAnchorWorld.clone().sub(part1AnchorWorld);
+              if (worldDelta.lengthSq() > 1e-10) {
+                const mat3 = new THREE.Matrix3().setFromMatrix4(sourceObjRef.matrixWorld);
+                const localDelta = worldDelta.clone().applyMatrix3(mat3.clone().invert());
+                const existing = input.sourceOffset ? new THREE.Vector3(...(input.sourceOffset as [number,number,number])) : new THREE.Vector3();
+                const final = existing.add(localDelta);
+                computedSourceOffset = [final.x, final.y, final.z];
+                groupStartPointFrom = 'group_bbox';
+              }
             }
           }
         }
@@ -4236,6 +4277,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         groupBboxSize,
         groupCentroid,
         groupFeatureCount,
+        alignedFaceCount,
         offsetApplied: computedSourceOffset ?? null,
       };
     }
@@ -4585,6 +4627,8 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           solverMs,
           previewMs,
           commitMs,
+          // Breakdown from inside action.commit_preview (all should be <5ms each):
+          ...(commitData.commitTiming ? { commitBreakdown: commitData.commitTiming } : {}),
           groupPropagationMs,
           totalMs: Date.now() - mateExecT0,
         },
@@ -5158,8 +5202,17 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       throw new ToolExecutionError({ code: 'PREVIEW_NOT_FOUND', message: 'No active preview for commit' });
     }
 
+    const commitT0 = performance.now();
+
     const partId = runtimeState.preview.partId;
+
+    // ── Stage 1: read current transform from store ─────────────────────────
+    const sceneStateT0 = performance.now();
     const current = getPartTransformOrThrow(partId);
+    const sceneStateMs = Math.round(performance.now() - sceneStateT0);
+
+    // ── Stage 2: persist to Zustand store (triggers React re-render) ───────
+    const historyRecordT0 = performance.now();
     currentStore().setPartOverride(partId, current);
 
     // For non-mate operations (translate/rotate/align previews), the committed position
@@ -5174,11 +5227,22 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     if (isMoveOp) {
       currentStore().setManualTransform(partId, current);
     }
+    const historyRecordMs = Math.round(performance.now() - historyRecordT0);
 
+    // ── Stage 3: preview cleanup (runtime state, planId, UUID generation) ──
+    const previewCleanupT0 = performance.now();
     runtimeState.previewBeforeTransformByPartId.delete(partId);
-
     const historyId = `history-${crypto.randomUUID()}`;
     clearPreviewState();
+    const previewCleanupMs = Math.round(performance.now() - previewCleanupT0);
+
+    const commitTotalMs = Math.round(performance.now() - commitT0);
+
+    // Note: React reconciliation triggered by setPartOverride runs asynchronously
+    // AFTER this function returns and is NOT captured in these timing values.
+    // The UI re-render latency is separate from the executor-side commitTotalMs.
+    console.log(`[commit_preview] sceneState=${sceneStateMs}ms historyRecord=${historyRecordMs}ms previewCleanup=${previewCleanupMs}ms total=${commitTotalMs}ms (React re-render runs async after return)`);
+
     return ok(
       {
         committed: true,
@@ -5189,6 +5253,13 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
           quaternion: current.quaternion,
           scale: current.scale,
           space: 'world',
+        },
+        commitTiming: {
+          sceneStateMs,
+          historyRecordMs,
+          previewCleanupMs,
+          commitTotalMs,
+          note: 'React re-render triggered by historyRecord runs async after executor returns — not included here',
         },
       },
       { mutating: true }
