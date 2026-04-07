@@ -33,6 +33,19 @@ export type MateRecipe = {
   sourceMethod: string;
   targetMethod: string;
 
+  // --- Entity type fields (part vs group) ---
+
+  /** Whether the source is a named group/module or an individual part. */
+  sourceEntityType?: 'part' | 'group';
+  /** Whether the target is a named group/module or an individual part. */
+  targetEntityType?: 'part' | 'group';
+
+  /** True if this recipe was saved from an explicit user correction. */
+  userCorrected?: boolean;
+
+  /** Confidence in this recipe (0-1). User-corrected recipes default to 0.98. */
+  confidence?: number;
+
   // --- Learning / generalization fields ---
 
   /**
@@ -93,6 +106,27 @@ async function persistStore(store: RecipeStore): Promise<void> {
 export async function findRecipe(nameA: string, nameB: string): Promise<MateRecipe | null> {
   const store = await loadStore();
   return store[recipeKey(nameA, nameB)] ?? null;
+}
+
+/**
+ * Find a recipe where one entity is a group (by group name).
+ * Searches with groupName as either source or target.
+ * Returns the recipe with the correct source/target orientation,
+ * or null if none found.
+ */
+export async function findGroupRecipe(
+  groupName: string,
+  otherName: string
+): Promise<MateRecipe | null> {
+  const store = await loadStore();
+  const key = recipeKey(groupName, otherName);
+  const recipe = store[key] ?? null;
+  // Only return if at least one side is marked as a group entity
+  if (recipe && (recipe.sourceEntityType === 'group' || recipe.targetEntityType === 'group')) {
+    return recipe;
+  }
+  // Also check without entity type restriction (backward compat)
+  return recipe;
 }
 
 /** Save (or overwrite) a recipe. */

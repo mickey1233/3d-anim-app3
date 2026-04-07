@@ -13,6 +13,8 @@ import { verifyAnchorFace, logAnchorVerifyFailure } from './vlm/anchorVerify.js'
 import { inferMateFromImages } from './vlm/mateInfer.js';
 import { inferMateParams } from './router/mateParamsInfer.js';
 import { saveRecipe, deleteRecipe, listRecipes, saveDemonstration, listDemonstrations, findRelevantDemonstrations } from './router/mateRecipes.js';
+import type { CommandFirstDiagnostics } from './router/commandFirstRouter.js';
+import { tryCommandFirstRoute } from './router/commandFirstRouter.js';
 import type { DemonstrationPriorScore } from '../../shared/schema/assemblySemanticTypes.js';
 import { queryWeather, queryWebSearch } from './web/queryTools.js';
 import { getServerStatus } from './status/serverStatus.js';
@@ -207,6 +209,7 @@ export class WsGatewayV2 {
             let lastReplyText: string | undefined;
             let routeMeta: RouteMeta | undefined;
             let pendingIntent: import('./router/types.js').PendingIntent | null | undefined;
+            let commandFirstDiagnostics: CommandFirstDiagnostics | undefined;
             let iterationsUsed = 0;
             const routerStartedAt = Date.now();
             const iterationTimings: Array<{
@@ -219,11 +222,15 @@ export class WsGatewayV2 {
 
             // Pre-fetch VLM capture for mate commands on first iteration.
             // Runs before routeAndExecute so the router can use VLM-inferred params.
+            // Skip VLM if command-first would handle this (fast path takes priority).
+            const commandFirstPrecheck = await tryCommandFirstRoute(text, baseCtx);
+            const skipVlmForCommandFirst = commandFirstPrecheck.matched;
+
             let vlmMateCapture: VlmMateCapture | null = null;
             const mateVlmEnabled =
               process.env.MATE_VLM_ENABLE === '1' ||
               Boolean(process.env.MATE_VLM_MOCK_RESPONSE);
-            if (mateVlmEnabled) {
+            if (mateVlmEnabled && !skipVlmForCommandFirst) {
               const MATE_KW = ['mate', '對齊', '对齐', '組裝', '组装', '裝配', '装配', 'align', 'attach', 'fit'];
               const lowerText = text.toLowerCase();
               const hasMateKeyword = MATE_KW.some((k) => lowerText.includes(k));
@@ -269,6 +276,7 @@ export class WsGatewayV2 {
               const routeMs = Math.max(0, Date.now() - routeStartedAt);
               lastReplyText = routed.replyText ?? lastReplyText;
               if (iteration === 0 && routed.routeMeta) routeMeta = routed.routeMeta;
+              if (iteration === 0 && routed.commandFirstDiagnostics) commandFirstDiagnostics = routed.commandFirstDiagnostics;
               // Carry pendingIntent from the first iteration (clarification turn)
               if (iteration === 0 && routed.pendingIntent !== undefined) pendingIntent = routed.pendingIntent;
 
@@ -415,6 +423,7 @@ export class WsGatewayV2 {
                   },
                   ...(routeMeta ? { routeMeta } : {}),
                   ...(pendingIntent !== undefined ? { pendingIntent } : {}),
+                  ...(commandFirstDiagnostics ? { commandFirstDiagnostics } : {}),
                 },
               },
               undefined,
@@ -570,6 +579,48 @@ export class WsGatewayV2 {
           if (parsed.data.command === 'agent.list_mate_recipes') {
             const recipes = await listRecipes();
             this.sendResponse(ws, parsed.data.id, true, { recipes });
+            return;
+          }
+
+          // FIX 4: User correction learning — save corrected assembly as a recipe
+          if (parsed.data.command === 'agent.confirm_correction') {
+            const args = (parsed.data.args ?? {}) as {
+              sourceName?: string;
+              targetName?: string;
+              sourceFace?: string;
+              targetFace?: string;
+              sourceMethod?: string;
+              targetMethod?: string;
+              sourceEntityType?: 'part' | 'group';
+              targetEntityType?: 'part' | 'group';
+              whyDescription?: string;
+              pattern?: string;
+              antiPattern?: string;
+            };
+            if (!args.sourceName || !args.targetName || !args.sourceFace || !args.targetFace) {
+              this.sendResponse(ws, parsed.data.id, false, undefined, {
+                message: 'confirm_correction requires sourceName, targetName, sourceFace, targetFace',
+                code: 'INVALID_ARGUMENT',
+              });
+              return;
+            }
+            const saved = await saveRecipe({
+              sourceName: args.sourceName,
+              targetName: args.targetName,
+              sourceFace: args.sourceFace,
+              targetFace: args.targetFace,
+              sourceMethod: args.sourceMethod ?? 'planar_cluster',
+              targetMethod: args.targetMethod ?? 'planar_cluster',
+              ...(args.sourceEntityType !== undefined ? { sourceEntityType: args.sourceEntityType } : {}),
+              ...(args.targetEntityType !== undefined ? { targetEntityType: args.targetEntityType } : {}),
+              userCorrected: true,
+              confidence: 0.98,
+              ...(args.whyDescription !== undefined ? { whyDescription: args.whyDescription } : {}),
+              ...(args.pattern !== undefined ? { pattern: args.pattern } : {}),
+              ...(args.antiPattern !== undefined ? { antiPattern: args.antiPattern } : {}),
+            });
+            console.log(`[wsGateway] Correction learned: ${saved.sourceName} ↔ ${saved.targetName} (userCorrected=true)`);
+            this.sendResponse(ws, parsed.data.id, true, { saved, learned: true });
             return;
           }
 
