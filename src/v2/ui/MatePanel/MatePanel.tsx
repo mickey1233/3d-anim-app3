@@ -8,6 +8,7 @@ export function MatePanel() {
   const partOrder = useV2Store((s) => s.parts.order);
   const partById = useV2Store((s) => s.parts.byId);
   const assemblyGroups = useV2Store((s) => s.assemblyGroups);
+  const selectionGroupId = useV2Store((s) => s.selection.groupId);
   const setPickMode = useV2Store((s) => s.setPickFaceMode);
   const clearMatePick = useV2Store((s) => s.clearMatePick);
   const clearMarkers = useV2Store((s) => s.clearMarkers);
@@ -31,6 +32,22 @@ export function MatePanel() {
     clearMatePick();
     clearMarkers();
   }, [setPickMode, clearMatePick, clearMarkers]);
+
+  // Auto-populate source from current group selection.
+  // When the user selects a group in the PartsPanel before switching to MATE mode,
+  // automatically set that group as the mate source so the whole module moves together.
+  React.useEffect(() => {
+    if (!selectionGroupId) return;
+    const group = assemblyGroups.byId[selectionGroupId];
+    if (!group) return;
+    const firstMemberId = group.partIds[0];
+    if (!firstMemberId) return;
+    // Only update if the source hasn't already been set to this group
+    if (mateDraft.sourceGroupId !== selectionGroupId) {
+      setMateDraft({ sourceId: firstMemberId, sourceGroupId: selectionGroupId }, 'source');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectionGroupId]);
 
   const applyMate = async () => {
     if (!mateDraft.sourceId || !mateDraft.targetId) return;

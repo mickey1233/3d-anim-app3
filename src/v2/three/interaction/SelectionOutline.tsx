@@ -193,9 +193,17 @@ export function SelectionOutline() {
     );
   }
 
-  // When a group is selected (from PartsPanel), render a single combined AABB outline.
-  if (selectionGroupId) {
-    const groupPartIds = assemblyGroups.byId[selectionGroupId]?.partIds ?? [];
+  // When a group is selected (explicit header click), OR when the selected part
+  // belongs to any group — always render the full group AABB so the user can
+  // see the entire module boundary.
+  const effectiveGroupId =
+    selectionGroupId ??
+    (selectedId
+      ? Object.entries(assemblyGroups.byId).find(([, g]) => g.partIds.includes(selectedId))?.[0]
+      : null);
+
+  if (effectiveGroupId) {
+    const groupPartIds = assemblyGroups.byId[effectiveGroupId]?.partIds ?? [];
     if (groupPartIds.length > 0) {
       return <GroupOutline partIds={groupPartIds} color={0x00ff88} />;
     }
