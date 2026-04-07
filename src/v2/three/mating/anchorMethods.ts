@@ -774,10 +774,24 @@ export function resolveAnchor({
  * Called by action.mate_execute when sourceGroupId is provided, to compute a true
  * group-level source anchor for the offset correction (replacing AABB face center).
  */
+export type GroupSourceCluster = {
+  centerWorld: THREE.Vector3;
+  normalWorld: THREE.Vector3;
+  totalArea: number;
+  proj: number;
+  faceCount: number;
+};
+
 export function resolveAnchorFromObjectList(
   objects: THREE.Object3D[],
   faceId: FaceId,
-): { centerWorld: THREE.Vector3; normalWorld: THREE.Vector3; alignedFaceCount: number; method: 'group_aggregate_planar_cluster' } | null {
+): {
+  centerWorld: THREE.Vector3;
+  normalWorld: THREE.Vector3;
+  alignedFaceCount: number;
+  allClusters: GroupSourceCluster[];
+  method: 'group_aggregate_planar_cluster';
+} | null {
   const worldFaceDir = (FACE_DIR[faceId] ?? new THREE.Vector3(0, 1, 0)).clone().normalize();
   const NORMAL_THRESH = 0.7;
 
@@ -877,5 +891,17 @@ export function resolveAnchorFromObjectList(
     ? best.sumCenter.clone().divideScalar(best.totalArea)
     : best.sumCenter.clone().divideScalar(best.count);
 
-  return { centerWorld, normalWorld: dir.clone(), alignedFaceCount: faces.length, method: 'group_aggregate_planar_cluster' };
+  // Expose all clusters so callers can do target-proximity scoring instead of
+  // relying solely on the extremity/area heuristic used for `centerWorld`.
+  const allClusters: GroupSourceCluster[] = planeClusters.map((c) => ({
+    centerWorld: c.totalArea > 0
+      ? c.sumCenter.clone().divideScalar(c.totalArea)
+      : c.sumCenter.clone().divideScalar(c.count),
+    normalWorld: dir.clone(),
+    totalArea: c.totalArea,
+    proj: c.proj,
+    faceCount: c.count,
+  }));
+
+  return { centerWorld, normalWorld: dir.clone(), alignedFaceCount: faces.length, allClusters, method: 'group_aggregate_planar_cluster' };
 }

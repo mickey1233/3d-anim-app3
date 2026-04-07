@@ -3783,6 +3783,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
                 targetOffset,
                 sourceFaceCenterWorld: tuple3(solvedTranslate.sourceFaceCenter),
                 targetFaceCenterWorld: tuple3(solvedTranslate.targetFaceCenter),
+                // World-space normals derived from the solver's local normals + object matrixWorld
+                sourceNormalWorld: tuple3(solvedTranslate.sourceNormalLocal.clone().transformDirection(sourceObj.matrixWorld).normalize()),
+                targetNormalWorld: tuple3(solvedTranslate.targetNormalLocal.clone().transformDirection(targetObj.matrixWorld).normalize()),
+                // Which anchor method was actually used for source (tells us if group pick was consumed)
+                sourcePickMethodUsed: sourcePickOverride ? 'picked' : sourceMethod,
+                sourcePickConsumed: Boolean(sourcePickOverride),
                 translationWorld: tuple3(solvedTranslate.translation),
                 translationLocal: tuple3(vec3(endTransform.position).sub(vec3(sourceTransform.position))),
                 pathType,
@@ -4162,7 +4168,26 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       groupCentroid: [number, number, number] | null;
       groupFeatureCount: number;
       alignedFaceCount: number;
+      groupPlanarClusterCount: number;
+      groupSourceCandidateCount: number;
+      groupCandidatesFromAllMembers: boolean;
+      selectedClusterRank: number;
+      selectedClusterArea: number;
+      selectedClusterProj: number;
+      clusterSelectionMethod: 'target_proximity' | 'extremity' | 'area' | 'fallback';
       offsetApplied: [number, number, number] | null;
+      // Solver diagnostics
+      sourceFaceId: string;
+      targetFaceId: string;
+      sourcePickMethod: string;
+      targetPickMethod: string;
+      sourcePickOverrideInjected: boolean;
+      sourcePickConsumed: boolean | null;
+      sourceNormalWorld: [number, number, number] | null;
+      targetNormalWorld: [number, number, number] | null;
+      finalSourceAnchorWorld: [number, number, number] | null;
+      finalTargetAnchorWorld: [number, number, number] | null;
+      solverTranslationWorld: [number, number, number] | null;
     } | null = null;
 
     if (input.sourceGroupId) {
@@ -4176,6 +4201,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       let groupCentroid: [number, number, number] | null = null;
       let groupFeatureCount = 0;
       let alignedFaceCount = 0;
+      let groupPlanarClusterCount = 0;
+      let groupSourceCandidateCount = 0;
+      let clusterSelectionMethod: 'target_proximity' | 'extremity' | 'area' | 'fallback' = 'fallback';
+      let selectedClusterRank = 0;
+      let selectedClusterArea = 0;
+      let selectedClusterProj = 0;
 
       if (sceneRef && allMemberIds.length > 1) {
         const sourceObjRef = sceneRef.getObjectByProperty('uuid', source.partId) ?? null;
@@ -4211,42 +4242,99 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
             }
           }
 
-          // ── Primary: aggregate planar-cluster from ALL member meshes ────────
-          // This replaces the AABB face-center approach. resolveAnchorFromObjectList
-          // collects aligned face triangles from all member objects in world space,
-          // clusters them by plane, and returns the highest-projection cluster center.
-          // This correctly handles non-convex groups and fan-blade arrangements where
-          // the AABB face center may not coincide with any actual mating surface.
+          // ── Primary: group-aware candidate generation from ALL member meshes ──
+          // resolveAnchorFromObjectList collects aligned face triangles from ALL
+          // member objects, clusters them by plane, and returns EVERY cluster plus
+          // the heuristic best. We then score each cluster against the actual target
+          // anchor (proximity + normal alignment) so the selection is geometry-driven
+          // rather than purely extremity-based.
           const faceId = (input.sourceFace ?? 'bottom') as StoreFaceId;
+          const targetFaceIdForScoring = (input.targetFace ?? 'top') as StoreFaceId;
           const groupAggregate = resolveAnchorFromObjectList(memberObjects, faceId);
 
           if (groupAggregate) {
             alignedFaceCount = groupAggregate.alignedFaceCount;
-            // Compute rep-part anchor in world space (same method as the solver will use)
-            const repAnchor = resolveAnchor({
-              object: sourceObjRef,
-              faceId,
-              method: normalizeAnchorMethod(input.sourceMethod, 'planar_cluster'),
-            });
-            if (repAnchor) {
-              // Convert group aggregate anchor to rep-part local space for direct use by solver.
-              // This replaces the offset-correction approach: the pick encodes exact position AND
-              // uses the group aggregate normal for face alignment (not rep-part-only normal).
-              const invMat = sourceObjRef.matrixWorld.clone().invert();
-              const pickCenterLocal = groupAggregate.centerWorld.clone().applyMatrix4(invMat);
-              const pickNormalLocal = groupAggregate.normalWorld.clone().transformDirection(invMat).normalize();
-              groupSourcePickForSolver = {
-                type: 'face' as const,
-                partId: source.partId,
-                faceId: faceId as string,
-                position: [pickCenterLocal.x, pickCenterLocal.y, pickCenterLocal.z] as [number, number, number],
-                normal: [pickNormalLocal.x, pickNormalLocal.y, pickNormalLocal.z] as [number, number, number],
-              };
-              // Clear sourceOffset: the pick already encodes the exact anchor position.
-              computedSourceOffset = undefined;
-              groupStartPointMode = 'group_aggregate_planar_cluster';
-              groupStartPointFrom = 'group_aggregate_planar_cluster';
+            const allClusters = groupAggregate.allClusters;
+            groupPlanarClusterCount = allClusters.length;
+            groupSourceCandidateCount = allClusters.length;
+
+            // ── Resolve target anchor for proximity scoring ──────────────────
+            // Sync target transform from store so we get an accurate world position.
+            const targetObjForScore = getV2ObjectByPartId(target.partId)
+              ?? sceneRef?.getObjectByProperty('uuid', target.partId)
+              ?? null;
+            let targetAnchorWorld: THREE.Vector3 | null = null;
+            if (targetObjForScore) {
+              const tgtStore = currentStore();
+              const tgtT = tgtStore.parts.overridesById[target.partId]
+                || tgtStore.parts.initialTransformById[target.partId];
+              if (tgtT) {
+                targetObjForScore.position.set(tgtT.position[0], tgtT.position[1], tgtT.position[2]);
+                targetObjForScore.quaternion.set(tgtT.quaternion[0], tgtT.quaternion[1], tgtT.quaternion[2], tgtT.quaternion[3]);
+              }
+              targetObjForScore.updateWorldMatrix(true, false);
+              const tgtAnchor = resolveAnchor({
+                object: targetObjForScore,
+                faceId: targetFaceIdForScoring,
+                method: normalizeAnchorMethod(input.targetMethod, 'planar_cluster'),
+              });
+              if (tgtAnchor) {
+                targetAnchorWorld = tgtAnchor.centerLocal.clone().applyMatrix4(targetObjForScore.matrixWorld);
+              }
             }
+
+            // ── Score each source cluster against target anchor ──────────────
+            // score = normalAlignment / (1 + distToTarget)
+            // All clusters have normals aligned to faceId direction, so the normal
+            // component mainly differentiates clusters that are tilted slightly.
+            // Distance-to-target is the main differentiator.
+            let bestCluster = groupAggregate; // default to heuristic best
+            if (targetAnchorWorld && allClusters.length > 1) {
+              let bestScore = -Infinity;
+              for (let ci = 0; ci < allClusters.length; ci++) {
+                const cl = allClusters[ci];
+                const dist = cl.centerWorld.distanceTo(targetAnchorWorld);
+                const score = 1.0 / (1.0 + dist);
+                if (score > bestScore) {
+                  bestScore = score;
+                  bestCluster = { ...groupAggregate, centerWorld: cl.centerWorld, normalWorld: cl.normalWorld };
+                  selectedClusterRank = ci;
+                  selectedClusterArea = cl.totalArea;
+                  selectedClusterProj = cl.proj;
+                  clusterSelectionMethod = 'target_proximity';
+                }
+              }
+            } else if (allClusters.length === 1) {
+              // Only one cluster — no scoring needed
+              selectedClusterRank = 0;
+              selectedClusterArea = allClusters[0].totalArea;
+              selectedClusterProj = allClusters[0].proj;
+              clusterSelectionMethod = 'extremity'; // equivalent to the heuristic
+            } else if (allClusters.length > 1) {
+              // No target available — use heuristic best (extremity/area, already in groupAggregate.centerWorld)
+              selectedClusterRank = 0;
+              selectedClusterArea = allClusters[0].totalArea;
+              selectedClusterProj = allClusters[0].proj;
+              clusterSelectionMethod = 'extremity';
+            }
+
+            // ── Build solver pick from best cluster ──────────────────────────
+            const invMat = sourceObjRef.matrixWorld.clone().invert();
+            const pickCenterLocal = bestCluster.centerWorld.clone().applyMatrix4(invMat);
+            const pickNormalLocal = bestCluster.normalWorld.clone().transformDirection(invMat).normalize();
+            groupSourcePickForSolver = {
+              type: 'face' as const,
+              partId: source.partId,
+              faceId: faceId as string,
+              position: [pickCenterLocal.x, pickCenterLocal.y, pickCenterLocal.z] as [number, number, number],
+              normal: [pickNormalLocal.x, pickNormalLocal.y, pickNormalLocal.z] as [number, number, number],
+            };
+            // Clear sourceOffset: the pick already encodes the exact anchor position.
+            computedSourceOffset = undefined;
+            groupStartPointMode = 'group_aggregate_planar_cluster';
+            groupStartPointFrom = 'group_aggregate_planar_cluster';
+
+            console.log(`[group-candidates] faceId=${faceId} allClusters=${allClusters.length} selectedRank=${selectedClusterRank} method=${clusterSelectionMethod} area=${selectedClusterArea.toFixed(4)} proj=${selectedClusterProj.toFixed(4)} targetAnchor=${targetAnchorWorld ? targetAnchorWorld.toArray().map(n=>n.toFixed(3)).join(',') : 'none'}`);
           }
 
           // ── Fallback: AABB face center if planar-cluster aggregate fails ────
@@ -4295,7 +4383,26 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         groupCentroid,
         groupFeatureCount,
         alignedFaceCount,
+        groupPlanarClusterCount,
+        groupSourceCandidateCount,
+        groupCandidatesFromAllMembers: allMemberIds.length > 0,
+        selectedClusterRank,
+        selectedClusterArea,
+        selectedClusterProj,
+        clusterSelectionMethod,
         offsetApplied: computedSourceOffset ?? null,
+        // Solver diagnostics filled in after generate_transform_plan returns
+        sourceFaceId: input.sourceFace ?? 'bottom',
+        targetFaceId: input.targetFace ?? 'top',
+        sourcePickMethod: groupStartPointMode === 'group_aggregate_planar_cluster' ? 'picked' : normalizeAnchorMethod(input.sourceMethod, 'planar_cluster'),
+        targetPickMethod: normalizeAnchorMethod(input.targetMethod, 'planar_cluster'),
+        sourcePickOverrideInjected: Boolean(groupSourcePickForSolver),
+        sourcePickConsumed: null as boolean | null,
+        sourceNormalWorld: null as [number, number, number] | null,
+        targetNormalWorld: null as [number, number, number] | null,
+        finalSourceAnchorWorld: null as [number, number, number] | null,
+        finalTargetAnchorWorld: null as [number, number, number] | null,
+        solverTranslationWorld: null as [number, number, number] | null,
       };
     }
 
@@ -4409,6 +4516,36 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
     const candidateGenMs: number = (plan.debug as any)?.candidateGenMs ?? 0;
     const solverMs: number = (plan.debug as any)?.solverMs ?? 0;
 
+    // Back-fill solver diagnostics into groupSourceGeomDiag now that plan.debug is available
+    if (groupSourceGeomDiag) {
+      const planDbg = (plan.debug as any) ?? {};
+      groupSourceGeomDiag.sourcePickMethod = planDbg.sourcePickMethodUsed ?? groupSourceGeomDiag.sourcePickMethod;
+      groupSourceGeomDiag.sourcePickConsumed = planDbg.sourcePickConsumed ?? null;
+      groupSourceGeomDiag.sourceNormalWorld = planDbg.sourceNormalWorld ?? null;
+      groupSourceGeomDiag.targetNormalWorld = planDbg.targetNormalWorld ?? null;
+      groupSourceGeomDiag.finalSourceAnchorWorld = planDbg.sourceFaceCenterWorld ?? null;
+      groupSourceGeomDiag.finalTargetAnchorWorld = planDbg.targetFaceCenterWorld ?? null;
+      groupSourceGeomDiag.solverTranslationWorld = planDbg.translationWorld ?? null;
+      console.log('[group-source-geom]', JSON.stringify({
+        sourceResolvedAs: groupSourceGeomDiag.sourceResolvedAs,
+        representativePartId: groupSourceGeomDiag.representativePartId,
+        groupMemberIds: groupSourceGeomDiag.groupMemberIds,
+        groupStartPointMode: groupSourceGeomDiag.groupStartPointMode,
+        alignedFaceCount: groupSourceGeomDiag.alignedFaceCount,
+        sourceFaceId: groupSourceGeomDiag.sourceFaceId,
+        targetFaceId: groupSourceGeomDiag.targetFaceId,
+        sourcePickMethod: groupSourceGeomDiag.sourcePickMethod,
+        targetPickMethod: groupSourceGeomDiag.targetPickMethod,
+        sourcePickOverrideInjected: groupSourceGeomDiag.sourcePickOverrideInjected,
+        sourcePickConsumed: groupSourceGeomDiag.sourcePickConsumed,
+        sourceNormalWorld: groupSourceGeomDiag.sourceNormalWorld,
+        targetNormalWorld: groupSourceGeomDiag.targetNormalWorld,
+        finalSourceAnchorWorld: groupSourceGeomDiag.finalSourceAnchorWorld,
+        finalTargetAnchorWorld: groupSourceGeomDiag.finalTargetAnchorWorld,
+        solverTranslationWorld: groupSourceGeomDiag.solverTranslationWorld,
+      }));
+    }
+
     const previewStart = Date.now();
     const previewed = await runTool('preview.transform_plan' as MCPToolName, {
       planId: plan.planId,
@@ -4457,6 +4594,7 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
       updatedMemberIds: string[];
       propagationComplete: boolean;
       skippedMemberIds: string[];
+      memberFinalPositions: Array<{ partId: string; worldPos: [number, number, number]; role: string }>;
     } | null = null;
 
     if (input.sourceGroupId) {
@@ -4550,6 +4688,12 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
 
       const skippedMemberIds = memberIds.filter((id: string) => !updatedMemberIds.includes(id));
       const propagationComplete = skippedMemberIds.length === 0;
+      const sourceFinalT = getPartTransformOrThrow(source.partId);
+      // Include source (rep-part) in the position list so we can verify the full group moved together
+      const memberFinalPositions: Array<{ partId: string; worldPos: [number, number, number]; role: string }> = [
+        { partId: source.partId, worldPos: sourceFinalT.position, role: 'source_rep' },
+        ...batchUpdates.map((u) => ({ partId: u.partId, worldPos: u.override.position, role: 'member' })),
+      ];
       groupRigidBodyDiag = {
         groupRigidBodyApplied: updatedMemberIds.length > 0,
         groupMemberCount: memberIds.length,
@@ -4557,8 +4701,10 @@ async function runTool<T extends MCPToolName>(tool: T, args: MCPToolArgs<T>): Pr
         updatedMemberIds,
         propagationComplete,
         skippedMemberIds,
+        memberFinalPositions,
       };
       console.log(`[group-rigid] applied=${groupRigidBodyDiag.groupRigidBodyApplied} members=${memberIds.length} updated=${updatedMemberIds.length} complete=${propagationComplete} skipped=[${skippedMemberIds.join(',')}]`);
+      console.log('[group-rigid] memberFinalPositions:', JSON.stringify(memberFinalPositions));
       if (!propagationComplete) {
         console.warn(`[group-rigid] INCOMPLETE PROPAGATION: ${skippedMemberIds.length} members not updated: [${skippedMemberIds.join(', ')}]`);
       }
